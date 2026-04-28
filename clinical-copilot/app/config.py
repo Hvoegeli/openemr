@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     openemr_private_key_path: str = "secrets/agent_key.pem"
     openemr_kid: str = "agent_forge_key_1"
 
+    # OpenEMR seed client — also used for password-grant credential validation
+    # (proves a username/password pair is valid against OpenEMR without us
+    # having to hit the legacy login endpoints).
+    openemr_seed_client_id: str | None = None
+    openemr_seed_client_secret: str | None = None
+
+    # Co-pilot cookie sessions. Random fallback OK for dev; set explicitly in prod.
+    copilot_session_secret: str = "dev-secret-change-me-please-32bytes"
+
     # App database
     database_url: str = "postgresql://agent_forge:dev@localhost:5432/agent_forge"
 

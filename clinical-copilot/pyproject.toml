@@ -24,6 +24,7 @@ dependencies = [
     "reportlab>=4.4.10",
     "matplotlib>=3.10.9",
     "markdown>=3.10.2",
+    "itsdangerous>=2.2",
 ]
 
 [dependency-groups]

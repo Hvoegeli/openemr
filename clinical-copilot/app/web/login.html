@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in — Clinical Co-pilot</title>
+  <style>
+    :root {
+      --bg: #f7f7f8;
+      --panel: #ffffff;
+      --border: #e5e7eb;
+      --text: #111827;
+      --muted: #6b7280;
+      --accent: #2563eb;
+      --error: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #eef2ff 0%, var(--bg) 60%);
+      display: grid;
+      place-items: center;
+      padding: 1.5rem;
+    }
+    .card {
+      width: 100%;
+      max-width: 420px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 6px 22px rgba(15, 23, 42, 0.08);
+      padding: 2rem 2rem 1.75rem;
+    }
+    h1 {
+      font-size: 1.4rem;
+      margin: 0 0 0.25rem;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin: 0 0 1.5rem;
+    }
+    label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--muted);
+      margin: 0.85rem 0 0.3rem;
+    }
+    input {
+      width: 100%;
+      padding: 0.65rem 0.8rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 1rem;
+      font-family: inherit;
+    }
+    input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+    button {
+      width: 100%;
+      margin-top: 1.4rem;
+      padding: 0.7rem 1rem;
+      border: 0;
+      border-radius: 6px;
+      background: var(--accent);
+      color: white;
+      font-size: 1rem;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    #error {
+      color: var(--error);
+      font-size: 0.85rem;
+      min-height: 1.2em;
+      margin-top: 0.85rem;
+    }
+    .footer {
+      margin-top: 1.5rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.5;
+    }
+    .badge {
+      display: inline-block;
+      background: #eef2ff;
+      color: #4338ca;
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 0.18rem 0.55rem;
+      border-radius: 999px;
+      margin-bottom: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <form class="card" id="login-form" autocomplete="on">
+    <span class="badge">Clinical Co-pilot</span>
+    <h1>Sign in</h1>
+    <p class="subtitle">Use your OpenEMR username and password.</p>
+
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" autocomplete="username" autofocus required>
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+    <button id="submit" type="submit">Sign in</button>
+    <div id="error" role="alert"></div>
+
+    <div class="footer">
+      For the MVP demo: <code>admin</code> / <code>pass</code>.<br>
+      Credentials are verified directly against OpenEMR via OAuth2 password grant.
+    </div>
+  </form>
+
+  <script>
+    const form = document.getElementById('login-form');
+    const submit = document.getElementById('submit');
+    const errorBox = document.getElementById('error');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorBox.textContent = '';
+      submit.disabled = true;
+      submit.textContent = 'Signing in…';
+
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+
+      try {
+        const r = await fetch('/api/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username, password}),
+          credentials: 'same-origin',
+        });
+        if (r.ok) {
+          window.location.href = '/';
+          return;
+        }
+        const detail = await r.json().catch(() => ({}));
+        errorBox.textContent = (
+          r.status === 401
+            ? 'Invalid username or password.'
+            : (detail.detail || ('Login failed (' + r.status + ')'))
+        );
+      } catch (err) {
+        errorBox.textContent = 'Network error — is the OpenEMR backend reachable?';
+      } finally {
+        submit.disabled = false;
+        submit.textContent = 'Sign in';
+      }
+    });
+  </script>
+</body>
+</html>

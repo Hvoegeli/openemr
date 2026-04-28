@@ -7,13 +7,20 @@
     :root {
       --bg: #f7f7f8;
       --panel: #ffffff;
+      --panel-soft: #fafafb;
       --border: #e5e7eb;
+      --border-strong: #d1d5db;
       --text: #111827;
       --muted: #6b7280;
+      --muted-2: #9ca3af;
       --accent: #2563eb;
+      --accent-soft: #eef2ff;
       --warn-bg: #fef3c7;
       --warn-text: #78350f;
       --citation: #2563eb;
+      --error: #b91c1c;
+      --good: #15803d;
+      --tab-h: 42px;
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
@@ -22,108 +29,801 @@
       color: var(--text);
       background: var(--bg);
       display: grid;
-      grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+      grid-template-rows: 44px minmax(0, 1fr);
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       height: 100vh;
+      overflow: hidden;
     }
-    .pane { display: flex; flex-direction: column; min-height: 0; }
-    .pane > header {
-      padding: 0.75rem 1rem;
-      border-bottom: 1px solid var(--border);
+    /* When a document is open, the left pane spans the whole viewport
+       and the chat (right) is hidden. Close button restores normal mode. */
+    body.doc-open #left-pane { grid-column: 1 / span 2; border-right: 0; }
+    body.doc-open #chat-pane { display: none; }
+
+    /* ── Top header bar ─────────────────────────────────────────────── */
+    #topbar {
+      grid-column: 1 / span 2;
+      grid-row: 1;
+      display: flex; align-items: center; justify-content: space-between;
       background: var(--panel);
-      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      padding: 0 1rem;
+      font-size: 0.9rem;
     }
-    #chat-pane { border-right: 1px solid var(--border); }
+    #topbar .brand { font-weight: 600; letter-spacing: -0.01em; }
+    #topbar .brand .accent { color: var(--accent); }
+    #topbar .right { display: flex; align-items: center; gap: 0.75rem; color: var(--muted); font-size: 0.85rem; }
+    #topbar button {
+      background: none; border: 1px solid var(--border); border-radius: 6px;
+      padding: 0.3rem 0.7rem; font-size: 0.82rem; color: var(--muted);
+      cursor: pointer; font-family: inherit;
+    }
+    #topbar button:hover { color: var(--text); border-color: var(--border-strong); }
+
+    /* ── Panes ──────────────────────────────────────────────────────── */
+    .pane {
+      display: flex; flex-direction: column; min-height: 0;
+      background: var(--panel);
+    }
+    #left-pane {
+      grid-column: 1; grid-row: 2;
+      border-right: 1px solid var(--border);
+    }
+    #chat-pane {
+      grid-column: 2; grid-row: 2;
+      background: var(--panel);
+      display: grid;
+      grid-template-rows: 44px minmax(0, 1fr) auto;
+      min-height: 0;
+    }
+
+    /* ── Tabs ───────────────────────────────────────────────────────── */
+    .tabs {
+      display: flex; flex: 0 0 auto;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel-soft);
+    }
+    .tab {
+      flex: 1 1 0;
+      padding: 0 0.75rem;
+      height: var(--tab-h);
+      display: flex; align-items: center; justify-content: center; gap: 0.4rem;
+      cursor: pointer;
+      border: 0; border-bottom: 2px solid transparent;
+      background: none; color: var(--muted);
+      font: inherit; font-size: 0.88rem;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+    }
+    .tab:hover { color: var(--text); background: rgba(0,0,0,0.02); }
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      background: var(--panel);
+    }
+    .tab .count {
+      font-size: 0.72rem; color: var(--muted-2);
+      background: var(--panel); padding: 0.05rem 0.4rem;
+      border: 1px solid var(--border); border-radius: 999px;
+    }
+    .tab.active .count { color: var(--accent); border-color: var(--accent-soft); background: var(--accent-soft); }
+
+    .tab-body {
+      flex: 1 1 auto; min-height: 0;
+      overflow-y: auto;
+      padding: 1rem 1.1rem;
+      font-size: 0.9rem;
+    }
+    .tab-body.hidden { display: none; }
+
+    /* ── Patient card content ───────────────────────────────────────── */
+    .empty { color: var(--muted); font-style: italic; }
+    .meta { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.5rem; }
+    h2.patient-name { margin: 0 0 0.1rem; font-size: 1.15rem; }
+    h3 {
+      margin: 1.1rem 0 0.35rem;
+      font-size: 0.78rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    ul.kv { margin: 0; padding-left: 1.1rem; }
+    ul.kv li { margin-bottom: 0.2rem; }
+    code { background: rgba(0,0,0,0.05); padding: 0 0.3em; border-radius: 3px; font-size: 0.85em; }
+
+    /* ── Calendar list ──────────────────────────────────────────────── */
+    .cal-row {
+      display: grid;
+      grid-template-columns: 56px minmax(0,1fr) auto;
+      gap: 0.6rem;
+      align-items: center;
+      padding: 0.65rem 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 0.45rem;
+      background: var(--panel);
+      cursor: pointer;
+      transition: border-color 0.12s, background 0.12s;
+    }
+    .cal-row:hover { border-color: var(--accent); background: var(--accent-soft); }
+    .cal-row.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+    .cal-row .time {
+      font-variant-numeric: tabular-nums;
+      font-size: 0.78rem; color: var(--muted);
+      text-align: center;
+    }
+    .cal-row .name { font-weight: 500; }
+    .cal-row .sub { font-size: 0.78rem; color: var(--muted); }
+    .cal-row .badge {
+      font-size: 0.68rem; color: var(--muted);
+      border: 1px solid var(--border); border-radius: 999px;
+      padding: 0.05rem 0.45rem; white-space: nowrap;
+    }
+    .cal-row .badge.ready { color: var(--good); border-color: #bbf7d0; background: #f0fdf4; }
+    .cal-row .badge.loading { color: var(--accent); border-color: #c7d2fe; background: var(--accent-soft); }
+
+    /* ── Documents list ─────────────────────────────────────────────── */
+    .doc-row {
+      padding: 0.55rem 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 0.4rem;
+      background: var(--panel);
+    }
+    .doc-row .row1 {
+      display: flex; justify-content: space-between; gap: 0.5rem;
+      align-items: baseline;
+    }
+    .doc-row .title { font-weight: 500; font-size: 0.92rem; }
+    .doc-row .date { font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .doc-row .row2 { font-size: 0.78rem; color: var(--muted); margin-top: 0.15rem; }
+    .doc-row .kind {
+      display: inline-block; font-size: 0.66rem; font-weight: 600; letter-spacing: 0.04em;
+      text-transform: uppercase; padding: 0.05rem 0.4rem; border-radius: 4px;
+      margin-right: 0.4rem; vertical-align: 1px;
+    }
+    .doc-row .kind.encounter { background: var(--accent-soft); color: var(--accent); }
+    .doc-row .kind.document  { background: #ecfeff; color: #0e7490; }
+    .doc-row { cursor: pointer; transition: border-color 0.12s, background 0.12s; }
+    .doc-row:hover { border-color: var(--accent); background: var(--accent-soft); }
+
+    /* ── Document viewer (left-pane takeover) ───────────────────────── */
+    #doc-viewer {
+      display: none;
+      flex-direction: column;
+      flex: 1 1 auto;
+      min-height: 0;
+      background: var(--panel);
+    }
+    body.doc-open #doc-viewer { display: flex; }
+    body.doc-open .tabs,
+    body.doc-open .tab-body { display: none; }
+    #doc-viewer-head {
+      flex: 0 0 auto;
+      padding: 1rem 1.5rem 0.6rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel-soft);
+    }
+    #doc-viewer-head .crumbs {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-bottom: 0.35rem;
+    }
+    #doc-viewer-head .crumbs .sep { margin: 0 0.4rem; color: var(--muted-2); }
+    #doc-viewer-head h2 {
+      margin: 0;
+      font-size: 1.2rem;
+    }
+    #doc-viewer-head .meta-row {
+      display: flex; flex-wrap: wrap; gap: 0.5rem 1rem;
+      margin-top: 0.4rem;
+      font-size: 0.85rem; color: var(--muted);
+    }
+    #doc-viewer-body {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding: 1.25rem 1.5rem;
+      max-width: 920px;
+      width: 100%;
+      align-self: center;
+      font-size: 0.94rem;
+      line-height: 1.55;
+    }
+    #doc-viewer-body h3 {
+      margin: 1.25rem 0 0.4rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    #doc-viewer-body .field {
+      display: grid;
+      grid-template-columns: 140px minmax(0, 1fr);
+      gap: 0.5rem 1rem;
+      padding: 0.3rem 0;
+      border-bottom: 1px dashed var(--border);
+    }
+    #doc-viewer-body .field:last-child { border-bottom: 0; }
+    #doc-viewer-body .field .k { color: var(--muted); font-size: 0.85rem; }
+    #doc-viewer-body .att-row {
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      margin-bottom: 0.35rem;
+      display: flex; justify-content: space-between; align-items: baseline;
+      gap: 1rem;
+    }
+    #doc-viewer-body .att-row a { color: var(--accent); text-decoration: none; }
+    #doc-viewer-body .att-row a:hover { text-decoration: underline; }
+    #doc-viewer-foot {
+      flex: 0 0 auto;
+      padding: 0.75rem 1.5rem;
+      border-top: 1px solid var(--border);
+      background: var(--panel-soft);
+      display: flex; justify-content: flex-end;
+    }
+    #doc-close {
+      padding: 0.55rem 1.4rem;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit; font-weight: 500;
+      cursor: pointer;
+    }
+    #doc-close:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Right (chat) pane ──────────────────────────────────────────── */
+    #chat-header {
+      display: flex; align-items: center; gap: 0.6rem;
+      padding: 0 1rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel-soft);
+      font-size: 0.88rem; color: var(--muted);
+    }
+    #chat-header .title { font-weight: 600; color: var(--text); }
+    .pill {
+      display: inline-block;
+      padding: 0.1rem 0.55rem; font-size: 0.72rem;
+      border-radius: 999px; border: 1px solid var(--border);
+      color: var(--muted); background: var(--panel);
+    }
+    .pill.live { color: var(--accent); border-color: #c7d2fe; background: var(--accent-soft); }
+    .pill.warn { color: var(--warn-text); border-color: #fde68a; background: var(--warn-bg); }
+
     #log {
-      flex: 1; overflow-y: auto;
-      padding: 1rem;
-      display: flex; flex-direction: column; gap: 0.75rem;
+      overflow-y: auto;
+      padding: 1rem 1.25rem;
+      display: flex; flex-direction: column; gap: 0.65rem;
     }
     .msg {
-      max-width: 90%;
-      padding: 0.75rem 1rem;
+      max-width: 92%;
+      padding: 0.6rem 0.9rem;
       border-radius: 8px;
-      line-height: 1.45;
+      line-height: 1.5;
       white-space: pre-wrap;
       word-wrap: break-word;
+      font-size: 0.94rem;
     }
     .msg.user { align-self: flex-end; background: var(--accent); color: white; }
-    .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
-    .msg.system { align-self: center; background: var(--warn-bg); color: var(--warn-text); font-size: 0.85rem; }
-    .msg.assistant .citation {
-      color: var(--citation); font-size: 0.85em;
-      cursor: help;
-      text-decoration: underline dotted;
-    }
-    .msg.assistant .citation.invalid {
-      color: #b91c1c;
-      text-decoration: line-through wavy;
-    }
+    .msg.assistant { align-self: flex-start; background: var(--panel-soft); border: 1px solid var(--border); }
+    .msg.system { align-self: center; background: var(--warn-bg); color: var(--warn-text); font-size: 0.82rem; }
     .stream-status {
       color: var(--muted);
       font-style: italic;
-      font-size: 0.9rem;
+      font-size: 0.85rem;
       animation: pulse 1.4s ease-in-out infinite;
     }
     @keyframes pulse {
       0%, 100% { opacity: 0.55; }
       50%      { opacity: 1; }
     }
-    .stream-text { white-space: pre-wrap; }
+    .citation {
+      color: var(--citation); font-size: 0.85em;
+      cursor: pointer;
+      text-decoration: underline dotted;
+    }
+    .citation:hover { background: var(--accent-soft); border-radius: 3px; }
+    .citation.invalid {
+      color: var(--error);
+      text-decoration: line-through wavy;
+      cursor: not-allowed;
+    }
+    .citation.invalid:hover { background: transparent; }
+    /* Flash highlight when a citation jumps to a card item */
+    .flash-target { animation: flash 1.6s ease-out; }
+    @keyframes flash {
+      0%   { background: #fef08a; outline: 2px solid #ca8a04; }
+      40%  { background: #fef08a; outline: 2px solid #ca8a04; }
+      100% { background: transparent; outline: 0 solid transparent; }
+    }
+    .sources-inline {
+      margin-top: 0.55rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      border-top: 1px dashed var(--border);
+      padding-top: 0.5rem;
+      line-height: 1.6;
+    }
+    .sources-inline .src {
+      display: inline-block;
+      padding: 0.04rem 0.4rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      margin: 0 0.18rem 0.18rem 0;
+      background: var(--panel);
+      font-family: ui-monospace, "SF Mono", monospace;
+      font-size: 0.7rem;
+      color: var(--muted);
+    }
     #input-row {
       display: flex; gap: 0.5rem;
-      padding: 0.75rem 1rem;
+      padding: 0.6rem 1rem 0.75rem;
       border-top: 1px solid var(--border);
       background: var(--panel);
     }
     #msg {
-      flex: 1; padding: 0.6rem 0.8rem;
-      border: 1px solid var(--border); border-radius: 6px;
-      font: inherit;
+      flex: 1; padding: 0.55rem 0.75rem;
+      border: 1px solid var(--border-strong); border-radius: 6px;
+      font: inherit; font-size: 0.94rem;
     }
     #msg:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
     #send {
-      padding: 0.6rem 1.2rem;
+      padding: 0.55rem 1.1rem;
       border: 0; border-radius: 6px;
       background: var(--accent); color: white; cursor: pointer; font: inherit; font-weight: 500;
     }
     #send:disabled { opacity: 0.5; cursor: not-allowed; }
-    #card-pane { background: var(--bg); }
-    #card {
-      padding: 1rem; overflow-y: auto;
-      font-size: 0.9rem;
-    }
-    #card h2 { margin-top: 0; }
-    #card h3 { margin: 1rem 0 0.4rem; font-size: 0.95rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
-    #card ul { margin: 0; padding-left: 1.1rem; }
-    #card li { margin-bottom: 0.2rem; }
-    #card .empty { color: var(--muted); font-style: italic; }
-    #card .meta { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.5rem; }
-    code { background: rgba(0,0,0,0.05); padding: 0 0.3em; border-radius: 3px; font-size: 0.85em; }
   </style>
 </head>
 <body>
-  <section class="pane" id="chat-pane">
-    <header>Clinical Co-pilot</header>
-    <div id="log"></div>
+
+  <!-- ── top bar ───────────────────────────────────────────────────── -->
+  <header id="topbar">
+    <div class="brand">Clinical <span class="accent">Co-pilot</span></div>
+    <div class="right">
+      <span id="who"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <!-- ── left tabs pane ────────────────────────────────────────────── -->
+  <section class="pane" id="left-pane">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-tab="cal" role="tab" aria-selected="true">
+        Today's Calendar <span class="count" id="cal-count">·</span>
+      </button>
+      <button class="tab" data-tab="card" role="tab" aria-selected="false">
+        Patient Card
+      </button>
+      <button class="tab" data-tab="docs" role="tab" aria-selected="false">
+        Supporting Documents <span class="count" id="docs-count">·</span>
+      </button>
+    </div>
+
+    <div class="tab-body" id="tab-cal" role="tabpanel">
+      <div class="empty">Loading today's roster…</div>
+    </div>
+    <div class="tab-body hidden" id="tab-card" role="tabpanel">
+      <div class="empty">No patient selected. Pick one from <strong>Today's Calendar</strong> or ask the chat.</div>
+    </div>
+    <div class="tab-body hidden" id="tab-docs" role="tabpanel">
+      <div class="empty">Select a patient first.</div>
+    </div>
+
+    <!-- Document viewer overlay (occupies the full left/expanded pane) -->
+    <div id="doc-viewer" role="region" aria-label="Document viewer">
+      <header id="doc-viewer-head">
+        <div class="crumbs">
+          <span id="doc-crumbs-patient">—</span>
+          <span class="sep">/</span>
+          <span>Supporting Documents</span>
+        </div>
+        <h2 id="doc-title">—</h2>
+        <div class="meta-row" id="doc-meta"></div>
+      </header>
+      <div id="doc-viewer-body"></div>
+      <footer id="doc-viewer-foot">
+        <button id="doc-close" type="button">Close</button>
+      </footer>
+    </div>
+  </section>
+
+  <!-- ── right chat pane ───────────────────────────────────────────── -->
+  <section id="chat-pane">
+    <div id="chat-header">
+      <span class="title">Chat</span>
+      <span class="pill" id="ctx-status">Idle</span>
+      <span class="pill" id="ctx-patient" style="display:none"></span>
+    </div>
+    <div id="log">
+      <div class="msg assistant">
+        Sign in confirmed. Pick a patient from <strong>Today's Calendar</strong> on the left, or ask me anything — try <em>"Catch me up on Cohen."</em>
+      </div>
+    </div>
     <form id="input-row">
-      <input id="msg" placeholder='Try: "Catch me up on Shaw."' autofocus autocomplete="off">
+      <input id="msg" placeholder='Try: "Catch me up on Cohen."' autofocus autocomplete="off">
       <button id="send" type="submit">Send</button>
     </form>
   </section>
-  <section class="pane" id="card-pane">
-    <header>Patient Card</header>
-    <div id="card"><div class="empty">No patient selected. Ask about a patient by last name to load their chart.</div></div>
-  </section>
 
   <script>
+    /* ── DOM refs ─────────────────────────────────────────────────── */
     const log = document.getElementById('log');
     const form = document.getElementById('input-row');
     const msg = document.getElementById('msg');
     const send = document.getElementById('send');
-    const card = document.getElementById('card');
-    let sessionId = null;
-    let lastPatientId = null;
 
+    const tabCard = document.getElementById('tab-card');
+    const tabDocs = document.getElementById('tab-docs');
+    const tabCal  = document.getElementById('tab-cal');
+    const docsCount = document.getElementById('docs-count');
+    const calCount  = document.getElementById('cal-count');
+
+    const ctxStatus = document.getElementById('ctx-status');
+    const ctxPatient = document.getElementById('ctx-patient');
+    const who = document.getElementById('who');
+
+    /* ── State ────────────────────────────────────────────────────── */
+    let sessionId = null;
+    let activePatientId = null;
+    // Buffer: patientId → { card?, docs?, cardLoading?, docsLoading? }
+    const buffer = new Map();
+
+    /* ── Boot ─────────────────────────────────────────────────────── */
+    // Fire both requests in parallel — the calendar is the slow one and
+    // doesn't depend on /api/me (both share the same session cookie).
+    (() => {
+      const calPromise = loadCalendar();
+      fetch('/api/me').then(async (r) => {
+        if (r.ok) { who.textContent = (await r.json()).username; }
+        else if (r.status === 401) { window.location.href = '/login'; }
+      }).catch(() => { /* ignore */ });
+      return calPromise;
+    })();
+
+    /* ── Logout ───────────────────────────────────────────────────── */
+    document.getElementById('logout').addEventListener('click', async () => {
+      await fetch('/api/logout', {method: 'POST'});
+      window.location.href = '/login';
+    });
+
+    /* ── Tabs ─────────────────────────────────────────────────────── */
+    document.querySelectorAll('.tab').forEach(btn => {
+      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+
+    function switchTab(name) {
+      document.querySelectorAll('.tab').forEach(t => {
+        const on = t.dataset.tab === name;
+        t.classList.toggle('active', on);
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      tabCard.classList.toggle('hidden', name !== 'card');
+      tabDocs.classList.toggle('hidden', name !== 'docs');
+      tabCal.classList.toggle('hidden',  name !== 'cal');
+    }
+
+    /* ── Calendar + buffered prefetch ─────────────────────────────── */
+    async function loadCalendar() {
+      try {
+        const r = await fetch('/api/calendar/today');
+        if (!r.ok) {
+          tabCal.innerHTML = '<div class="empty">Failed to load today\'s roster (' + r.status + ').</div>';
+          return;
+        }
+        const d = await r.json();
+        renderCalendar(d);
+        for (const p of (d.patients || [])) {
+          prefetchPatient(p.patient_id);
+        }
+      } catch (e) {
+        tabCal.innerHTML = '<div class="empty">Network error loading roster.</div>';
+      }
+    }
+
+    function renderCalendar(d) {
+      const patients = d.patients || [];
+      calCount.textContent = patients.length || '·';
+      if (!patients.length) {
+        tabCal.innerHTML = '<div class="empty">No patients on the schedule for today.</div>';
+        return;
+      }
+      const dateStr = d.date ? new Date(d.date + 'T00:00:00').toLocaleDateString(
+        undefined, {weekday: 'long', month: 'long', day: 'numeric'}
+      ) : '';
+      const head = '<h3 style="margin-top:0">' + escapeHtml(dateStr) + '</h3>';
+      const rows = patients.map(p => {
+        const time = p.time
+          ? new Date(p.time).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})
+          : '—';
+        const meta = [
+          p.age != null ? p.age + 'y' : null,
+          p.sex || null,
+          p.reason || null,
+        ].filter(Boolean).map(escapeHtml).join(' · ');
+        return (
+          '<div class="cal-row" data-pid="' + escapeHtml(p.patient_id) + '">' +
+            '<div class="time">' + escapeHtml(time) + '</div>' +
+            '<div>' +
+              '<div class="name">' + escapeHtml(p.name || '(unknown)') + '</div>' +
+              '<div class="sub">' + meta + '</div>' +
+            '</div>' +
+            '<div class="badge loading" data-buffer-badge>loading…</div>' +
+          '</div>'
+        );
+      }).join('');
+      tabCal.innerHTML = head + rows;
+      tabCal.querySelectorAll('.cal-row').forEach(row => {
+        row.addEventListener('click', () => selectPatient(row.dataset.pid, {fromCalendar: true}));
+      });
+    }
+
+    function prefetchPatient(pid) {
+      if (!pid) return;
+      let entry = buffer.get(pid) || {};
+      if (entry.card || entry.cardLoading) return;
+      entry.cardLoading = true;
+      entry.docsLoading = true;
+      buffer.set(pid, entry);
+
+      Promise.all([
+        fetch('/api/patient/' + encodeURIComponent(pid) + '/card').then(r => r.ok ? r.json() : null),
+        fetch('/api/patient/' + encodeURIComponent(pid) + '/documents').then(r => r.ok ? r.json() : null),
+      ]).then(([card, docs]) => {
+        const e = buffer.get(pid) || {};
+        e.card = card; e.docs = docs;
+        e.cardLoading = false; e.docsLoading = false;
+        buffer.set(pid, e);
+        markBufferReady(pid);
+      }).catch(() => {
+        const e = buffer.get(pid) || {};
+        e.cardLoading = false; e.docsLoading = false;
+        buffer.set(pid, e);
+      });
+    }
+
+    function markBufferReady(pid) {
+      const row = tabCal.querySelector('.cal-row[data-pid="' + cssEscape(pid) + '"]');
+      if (row) {
+        const badge = row.querySelector('[data-buffer-badge]');
+        if (badge) {
+          badge.textContent = 'ready';
+          badge.classList.remove('loading');
+          badge.classList.add('ready');
+        }
+      }
+    }
+
+    /* ── Selecting a patient (from calendar OR chat) ─────────────── */
+    async function selectPatient(pid, opts = {}) {
+      if (!pid) return;
+      activePatientId = pid;
+      tabCal.querySelectorAll('.cal-row').forEach(r => {
+        r.classList.toggle('active', r.dataset.pid === pid);
+      });
+
+      const entry = buffer.get(pid) || {};
+      if (entry.card) {
+        tabCard.innerHTML = renderCard(entry.card);
+        updateCtxPatient(entry.card.name, pid);
+      } else {
+        tabCard.innerHTML = '<div class="empty">Loading patient ' + escapeHtml(pid) + '…</div>';
+        prefetchPatient(pid);
+        const wait = await waitForBuffer(pid, 'card');
+        if (wait) {
+          tabCard.innerHTML = renderCard(wait);
+          updateCtxPatient(wait.name, pid);
+        } else {
+          tabCard.innerHTML = '<div class="empty">Failed to load patient card.</div>';
+        }
+      }
+
+      const e2 = buffer.get(pid) || {};
+      if (e2.docs) {
+        tabDocs.innerHTML = renderDocs(e2.docs);
+        docsCount.textContent = (e2.docs.items || []).length || '·';
+      } else {
+        tabDocs.innerHTML = '<div class="empty">Loading documents…</div>';
+        const wait = await waitForBuffer(pid, 'docs');
+        if (wait) {
+          tabDocs.innerHTML = renderDocs(wait);
+          docsCount.textContent = (wait.items || []).length || '·';
+        } else {
+          tabDocs.innerHTML = '<div class="empty">Failed to load documents.</div>';
+        }
+      }
+
+      if (opts.fromCalendar) switchTab('card');
+    }
+
+    function waitForBuffer(pid, key, timeoutMs = 15000) {
+      return new Promise(resolve => {
+        const start = Date.now();
+        const tick = () => {
+          const e = buffer.get(pid) || {};
+          if (e[key]) return resolve(e[key]);
+          if (Date.now() - start > timeoutMs) return resolve(null);
+          setTimeout(tick, 120);
+        };
+        tick();
+      });
+    }
+
+    /* ── Patient card / docs renderers ────────────────────────────── */
+    // FHIR resource type → CSS-safe label, used for data-fhir-ref so a
+    // citation click can find and flash the matching <li>.
+    function renderCard(d) {
+      const list = (items, fhirType, fmt, emptyText) =>
+        items && items.length
+          ? '<ul class="kv">' + items.map(it => {
+              const ref = fhirType + '/' + it.id;
+              return '<li data-fhir-ref="' + escapeHtml(ref) + '">' + fmt(it) + '</li>';
+            }).join('') + '</ul>'
+          : '<div class="empty">' + emptyText + '</div>';
+
+      return [
+        '<h2 class="patient-name">' + escapeHtml(d.name || '(unknown)') + '</h2>',
+        '<div class="meta">',
+          (d.age != null ? d.age + 'y · ' : ''),
+          escapeHtml(d.sex || '?'),
+          ' · MRN <code>' + escapeHtml(d.mrn || '') + '</code>',
+        '</div>',
+        '<h3 data-section="AllergyIntolerance">Allergies</h3>',
+        list(d.allergies, 'AllergyIntolerance', a =>
+          escapeHtml(a.substance || '?') +
+          (a.severity ? ' <span class="empty">(' + escapeHtml(a.severity) + ')</span>' : ''),
+        'None documented'),
+        '<h3 data-section="Condition">Active Problems</h3>',
+        list(d.active_problems, 'Condition', p =>
+          escapeHtml(p.name || '?'),
+        'None documented'),
+        '<h3 data-section="MedicationRequest">Active Medications</h3>',
+        list(d.active_medications, 'MedicationRequest', m =>
+          escapeHtml(m.drug || '?') +
+          (m.dose_text ? ' — ' + escapeHtml(m.dose_text) : ''),
+        'None documented'),
+        '<h3 data-section="Observation">Recent Vitals</h3>',
+        list(d.recent_vitals, 'Observation', v =>
+          escapeHtml(v.name || '?') + ': ' +
+          (v.value != null ? escapeHtml(String(v.value)) : '?') +
+          (v.unit ? ' ' + escapeHtml(v.unit) : ''),
+        'None documented'),
+      ].join('');
+    }
+
+    function renderDocs(d) {
+      const items = d.items || [];
+      if (!items.length) {
+        return '<div class="empty">No prior visits or documents on file.</div>';
+      }
+      // Stash items on the global so click handlers can resolve by index.
+      window.__currentDocs = items;
+      return items.map((it, i) => {
+        const dateStr = it.date
+          ? new Date(it.date).toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'})
+          : '—';
+        const sub = [it.status, it.category, it.summary].filter(Boolean).map(escapeHtml).join(' · ');
+        const kind = it.kind === 'document' ? 'document' : 'encounter';
+        return (
+          '<div class="doc-row" data-doc-idx="' + i + '">' +
+            '<div class="row1">' +
+              '<div class="title">' +
+                '<span class="kind ' + kind + '">' + kind + '</span>' +
+                escapeHtml(it.title || '(untitled)') +
+              '</div>' +
+              '<div class="date">' + escapeHtml(dateStr) + '</div>' +
+            '</div>' +
+            (sub ? '<div class="row2">' + sub + '</div>' : '') +
+          '</div>'
+        );
+      }).join('');
+    }
+
+    /* ── Document viewer (open/close) ─────────────────────────────── */
+    const docViewerBody = document.getElementById('doc-viewer-body');
+    const docTitle = document.getElementById('doc-title');
+    const docMeta = document.getElementById('doc-meta');
+    const docCrumbsPatient = document.getElementById('doc-crumbs-patient');
+
+    tabDocs.addEventListener('click', (e) => {
+      const row = e.target.closest('.doc-row');
+      if (!row) return;
+      const idx = Number(row.dataset.docIdx);
+      const items = window.__currentDocs || [];
+      const item = items[idx];
+      if (item) openDoc(item);
+    });
+
+    document.getElementById('doc-close').addEventListener('click', closeDoc);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && document.body.classList.contains('doc-open')) {
+        closeDoc();
+      }
+    });
+
+    function openDoc(item) {
+      // Header
+      docTitle.textContent = item.title || '(untitled)';
+      const dateStr = item.date
+        ? new Date(item.date).toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'short'})
+        : '—';
+      const pieces = [
+        item.kind === 'document' ? 'Document' : 'Visit',
+        dateStr,
+        item.status ? 'Status: ' + item.status : null,
+        item.category ? 'Category: ' + item.category : null,
+        item.ref ? item.ref : null,
+      ].filter(Boolean);
+      docMeta.innerHTML = pieces.map(p => '<span>' + escapeHtml(p) + '</span>').join('');
+
+      // Patient crumb — last selected name if known
+      const e = activePatientId ? buffer.get(activePatientId) : null;
+      docCrumbsPatient.textContent = e && e.card && e.card.name ? e.card.name : (activePatientId || '—');
+
+      // Body
+      const fields = [];
+      if (item.summary) {
+        fields.push('<h3>Summary</h3><div>' + escapeHtml(item.summary) + '</div>');
+      }
+      const kvFields = [];
+      if (item.kind === 'encounter') {
+        kvFields.push(['Type',   item.title]);
+        kvFields.push(['Status', item.status]);
+        kvFields.push(['Date',   dateStr]);
+      } else {
+        kvFields.push(['Type',     item.title]);
+        kvFields.push(['Category', item.category]);
+        kvFields.push(['Status',   item.status]);
+        kvFields.push(['Date',     dateStr]);
+      }
+      if (kvFields.some(([, v]) => v)) {
+        fields.push('<h3>Details</h3>' + kvFields
+          .filter(([, v]) => v)
+          .map(([k, v]) =>
+            '<div class="field"><div class="k">' + escapeHtml(k) + '</div>' +
+            '<div>' + escapeHtml(v) + '</div></div>'
+          ).join(''));
+      }
+      const atts = item.attachments || [];
+      if (atts.length) {
+        fields.push('<h3>Attachments</h3>' + atts.map(a => {
+          const label = a.title || a.content_type || 'Attachment';
+          const url = a.url
+            ? '<a href="' + escapeHtml(a.url) + '" target="_blank" rel="noopener">Open</a>'
+            : '<span class="empty">no URL</span>';
+          return '<div class="att-row"><div>' + escapeHtml(label) + '</div>' + url + '</div>';
+        }).join(''));
+      } else if (item.kind === 'document') {
+        fields.push('<h3>Attachments</h3><div class="empty">No attachments on this DocumentReference.</div>');
+      }
+      fields.push(
+        '<h3>Source</h3>' +
+        '<div class="field"><div class="k">FHIR ref</div><div><code>' +
+        escapeHtml(item.ref || '(unknown)') + '</code></div></div>'
+      );
+      docViewerBody.innerHTML = fields.join('');
+
+      document.body.classList.add('doc-open');
+      docViewerBody.scrollTop = 0;
+    }
+
+    function closeDoc() {
+      document.body.classList.remove('doc-open');
+    }
+
+    /* ── Chat header status pills ────────────────────────────────── */
+    function updateCtxPatient(name, pid) {
+      if (!name && !pid) {
+        ctxPatient.style.display = 'none';
+        return;
+      }
+      ctxPatient.textContent = name ? name : pid;
+      ctxPatient.style.display = '';
+    }
+    function setCtxStatus(text, kind = 'live') {
+      ctxStatus.textContent = text;
+      ctxStatus.classList.remove('live', 'warn');
+      if (kind) ctxStatus.classList.add(kind);
+    }
+
+    /* ── Chat submit + SSE ────────────────────────────────────────── */
     const TOOL_LABELS = {
       'current_time': 'Checking the date',
       'resolve_patient': 'Searching for patient',
@@ -138,8 +838,6 @@
       append('user', text);
       send.disabled = true;
 
-      // Build the assistant bubble with a status line we'll update as
-      // tool/stream events arrive, then a text box that fills with tokens.
       const bubble = document.createElement('div');
       bubble.className = 'msg assistant';
       const statusLine = document.createElement('div');
@@ -147,10 +845,14 @@
       statusLine.textContent = 'Thinking…';
       bubble.appendChild(statusLine);
       const responseBox = document.createElement('div');
-      responseBox.className = 'stream-text';
       bubble.appendChild(responseBox);
+      const sourcesBox = document.createElement('div');
+      sourcesBox.className = 'sources-inline';
+      sourcesBox.style.display = 'none';
+      bubble.appendChild(sourcesBox);
       log.appendChild(bubble);
       log.scrollTop = log.scrollHeight;
+      setCtxStatus('Thinking…', 'live');
 
       let streamedText = '';
       let lastSources = [];
@@ -162,9 +864,12 @@
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({session_id: sessionId, message: text}),
+          credentials: 'same-origin',
         });
+        if (r.status === 401) { window.location.href = '/login'; return; }
         if (!r.ok || !r.body) {
           statusLine.textContent = 'Error: ' + r.status + ' ' + r.statusText;
+          setCtxStatus('Error', 'warn');
           return;
         }
 
@@ -176,7 +881,6 @@
           const {value, done} = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, {stream: true});
-          // SSE frames are separated by \n\n
           let idx;
           while ((idx = buffer.indexOf('\n\n')) >= 0) {
             const frame = buffer.slice(0, idx).trim();
@@ -192,6 +896,7 @@
             } else if (evt.type === 'tool') {
               const label = TOOL_LABELS[evt.name] || evt.name;
               statusLine.textContent = label + '…';
+              setCtxStatus(label + '…', 'live');
             } else if (evt.type === 'token') {
               if (statusLine.parentNode) statusLine.remove();
               streamedText += evt.text;
@@ -201,104 +906,140 @@
               lastSources = evt.sources || [];
               lastValidationWarning = !!evt.validation_warning;
               lastPatientFromTurn = evt.patient_id;
-              // Re-decorate with the authoritative source list once known
               responseBox.innerHTML = decorateCitations(streamedText, new Set(lastSources));
+              if (lastSources.length) {
+                sourcesBox.innerHTML =
+                  '<strong>Sources cited (' + lastSources.length + ')</strong> ' +
+                  lastSources.map(s => '<span class="src">' + escapeHtml(s) + '</span>').join(' ');
+                sourcesBox.style.display = '';
+              }
+              setCtxStatus(
+                lastValidationWarning ? 'Validation warning' : 'Validated',
+                lastValidationWarning ? 'warn' : 'live',
+              );
             }
           }
         }
 
         if (lastValidationWarning) {
-          append('system', 'Warning: this response retained uncited claims after retry. Verify against the chart.');
+          append('system', '⚠ Some citations could not be verified after retry. Verify against the chart.');
         }
-        if (lastPatientFromTurn && lastPatientFromTurn !== lastPatientId) {
-          lastPatientId = lastPatientFromTurn;
-          loadCard(lastPatientId);
+        if (lastPatientFromTurn && lastPatientFromTurn !== activePatientId) {
+          selectPatient(lastPatientFromTurn);
         }
       } catch (err) {
         statusLine.textContent = 'Network error: ' + err.message;
+        setCtxStatus('Network error', 'warn');
       } finally {
         send.disabled = false;
         msg.focus();
       }
     });
 
+    /* ── Helpers ──────────────────────────────────────────────────── */
     function escapeHtml(s) {
-      return s.replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+      return String(s == null ? '' : s).replace(/[<>&"']/g,
+        c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
     }
-
     function append(role, text) {
-      appendHTML(role, escapeHtml(text));
-    }
-
-    function appendHTML(role, html) {
       const div = document.createElement('div');
       div.className = 'msg ' + role;
-      div.innerHTML = html;
+      div.innerHTML = escapeHtml(text);
       log.appendChild(div);
       log.scrollTop = log.scrollHeight;
     }
-
     function decorateCitations(text, sourceSet) {
       const escaped = escapeHtml(text);
       return escaped.replace(/\[([A-Z][a-zA-Z]+)\/([a-zA-Z0-9._-]+)\]/g, (m, type, id) => {
         const ref = type + '/' + id;
         const cls = sourceSet.has(ref) ? 'citation' : 'citation invalid';
-        return '<span class="' + cls + '" title="' + ref + '">[' + type + ']</span>';
+        return '<span class="' + cls +
+               '" data-fhir-ref="' + escapeHtml(ref) +
+               '" title="' + escapeHtml(ref) + ' — click to view">' +
+               '[' + type + ']</span>';
       });
     }
 
-    async function loadCard(pid) {
-      card.innerHTML = '<div class="empty">Loading patient ' + escapeHtml(pid) + '...</div>';
-      try {
-        const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/card');
-        if (!r.ok) {
-          card.innerHTML = '<div class="empty">Failed to load card: ' + r.status + '</div>';
+    /* ── Citation click navigation ───────────────────────────────── */
+    // Event delegation on #log so it works for streaming + historical messages.
+    log.addEventListener('click', (e) => {
+      const cite = e.target.closest('.citation');
+      if (!cite || cite.classList.contains('invalid')) return;
+      const ref = cite.dataset.fhirRef;
+      if (ref) jumpToCitation(ref);
+    });
+
+    /**
+     * Route a click on `[Type/id]` to the right place:
+     *   Patient            → Patient Card tab (top)
+     *   Encounter          → Supporting Documents → open in viewer if found
+     *   AllergyIntolerance →
+     *   Condition          →  scroll Patient Card to the matching <li>
+     *   MedicationRequest  →  and flash it for ~1.6s
+     *   Observation        →
+     */
+    function jumpToCitation(ref) {
+      const [type] = ref.split('/');
+      if (!type) return;
+
+      if (type === 'Patient') {
+        switchTab('card');
+        const h = tabCard.querySelector('h2.patient-name');
+        if (h) {
+          tabCard.scrollTop = 0;
+          flash(h);
+        }
+        return;
+      }
+
+      if (type === 'Encounter') {
+        switchTab('docs');
+        // Try to open the matching encounter in the doc viewer.
+        const items = window.__currentDocs || [];
+        const idx = items.findIndex(it => it.ref === ref);
+        if (idx >= 0) {
+          openDoc(items[idx]);
+        } else {
+          // Not in current docs (could be from a different patient turn);
+          // just flash the docs tab title bar so the user notices the jump.
+          flash(tabDocs);
+        }
+        return;
+      }
+
+      // The four list-resource types live on the Patient Card.
+      const sectionTypes = new Set(['AllergyIntolerance', 'Condition', 'MedicationRequest', 'Observation']);
+      if (sectionTypes.has(type)) {
+        switchTab('card');
+        const li = tabCard.querySelector(
+          'li[data-fhir-ref="' + cssEscape(ref) + '"]'
+        );
+        if (li) {
+          li.scrollIntoView({behavior: 'smooth', block: 'center'});
+          flash(li);
           return;
         }
-        const d = await r.json();
-        card.innerHTML = renderCard(d);
-      } catch (e) {
-        card.innerHTML = '<div class="empty">Network error loading card</div>';
+        // Resource not on the current card — flash the section header.
+        const h = tabCard.querySelector('h3[data-section="' + type + '"]');
+        if (h) {
+          h.scrollIntoView({behavior: 'smooth', block: 'center'});
+          flash(h);
+        }
+        return;
       }
+
+      // Unknown type — just hop to the card tab.
+      switchTab('card');
     }
 
-    function renderCard(d) {
-      const list = (items, fmt, emptyText) =>
-        items && items.length
-          ? '<ul>' + items.map(fmt).join('') + '</ul>'
-          : '<div class="empty">' + emptyText + '</div>';
-
-      return [
-        '<h2>' + escapeHtml(d.name || '(unknown)') + '</h2>',
-        '<div class="meta">',
-          (d.age != null ? d.age + 'y · ' : ''),
-          escapeHtml(d.sex || '?'),
-          ' · MRN <code>' + escapeHtml(d.mrn || '') + '</code>',
-        '</div>',
-        '<h3>Allergies</h3>',
-        list(d.allergies, a =>
-          '<li>' + escapeHtml(a.substance || '?') +
-          (a.severity ? ' <span class="empty">(' + escapeHtml(a.severity) + ')</span>' : '') +
-          '</li>',
-        'None documented'),
-        '<h3>Active Problems</h3>',
-        list(d.active_problems, p =>
-          '<li>' + escapeHtml(p.name || '?') + '</li>',
-        'None documented'),
-        '<h3>Active Medications</h3>',
-        list(d.active_medications, m =>
-          '<li>' + escapeHtml(m.drug || '?') +
-          (m.dose_text ? ' — ' + escapeHtml(m.dose_text) : '') +
-          '</li>',
-        'None documented'),
-        '<h3>Recent Vitals</h3>',
-        list(d.recent_vitals, v =>
-          '<li>' + escapeHtml(v.name || '?') + ': ' +
-          (v.value != null ? escapeHtml(String(v.value)) : '?') +
-          (v.unit ? ' ' + escapeHtml(v.unit) : '') +
-          '</li>',
-        'None documented'),
-      ].join('');
+    function flash(el) {
+      el.classList.remove('flash-target');
+      // Force reflow so the animation can replay if clicked twice.
+      void el.offsetWidth;
+      el.classList.add('flash-target');
+    }
+    function cssEscape(s) {
+      return String(s).replace(/[^a-zA-Z0-9_-]/g, c => '\\' + c);
     }
   </script>
 </body>
