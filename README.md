@@ -1,79 +1,139 @@
-[![Syntax Status](https://github.com/openemr/openemr/actions/workflows/syntax.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/syntax.yml)
-[![Styling Status](https://github.com/openemr/openemr/actions/workflows/styling.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/styling.yml)
-[![Testing Status](https://github.com/openemr/openemr/actions/workflows/test.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/test.yml)
-[![JS Unit Testing Status](https://github.com/openemr/openemr/actions/workflows/js-test.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/js-test.yml)
-[![PHPStan](https://github.com/openemr/openemr/actions/workflows/phpstan.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/phpstan.yml)
-[![Rector](https://github.com/openemr/openemr/actions/workflows/rector.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/rector.yml)
-[![ShellCheck](https://github.com/openemr/openemr/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/shellcheck.yml)
-[![Docker Compose Linting](https://github.com/openemr/openemr/actions/workflows/docker-compose-lint.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/docker-compose-lint.yml)
-[![Dockerfile Linting](https://github.com/openemr/openemr/actions/workflows/hadolint.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/hadolint.yml)
-[![Isolated Tests](https://github.com/openemr/openemr/actions/workflows/isolated-tests.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/isolated-tests.yml)
-[![Inferno Certification Test](https://github.com/openemr/openemr/actions/workflows/inferno-test.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/inferno-test.yml)
-[![Composer Checks](https://github.com/openemr/openemr/actions/workflows/composer.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/composer.yml)
-[![Composer Require Checker](https://github.com/openemr/openemr/actions/workflows/composer-require-checker.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/composer-require-checker.yml)
-[![API Docs Freshness Checks](https://github.com/openemr/openemr/actions/workflows/api-docs.yml/badge.svg)](https://github.com/openemr/openemr/actions/workflows/api-docs.yml)
-[![codecov](https://codecov.io/gh/openemr/openemr/graph/badge.svg?token=7Eu3U1Ozdq)](https://codecov.io/gh/openemr/openemr)
+# Clinical Co-Pilot — an OpenEMR fork with an AI agent for hospitalists
 
-[![Backers on Open Collective](https://opencollective.com/openemr/backers/badge.svg)](#backers) [![Sponsors on Open Collective](https://opencollective.com/openemr/sponsors/badge.svg)](#sponsors)
+[![Forked from openemr/openemr](https://img.shields.io/badge/forked%20from-openemr%2Fopenemr-blue)](https://github.com/openemr/openemr)
+[![MVP submission: 2026-04-28](https://img.shields.io/badge/MVP%20submission-2026--04--28-success)](#mvp-submission)
 
-# OpenEMR
+> **AgentForge — Clinical Co-Pilot**, Gauntlet AI Austin admission track.
+> A multi-turn AI agent that helps a hospitalist physician catch up on inpatients fast — reading the chart from a forked [OpenEMR](https://github.com/openemr/openemr) via FHIR R4, summarizing what matters, and citing every clinical claim back to a specific record. Read-only over real EHR data, structurally verified, designed against the "hospital CTO bar".
 
-[OpenEMR](https://open-emr.org) is a Free and Open Source electronic health records and medical practice management application. It features fully integrated electronic health records, practice management, scheduling, electronic billing, internationalization, free support, a vibrant community, and a whole lot more. It runs on Windows, Linux, Mac OS X, and many other platforms.
+---
 
-### Contributing
+## Deployed app (MVP submission)
 
-OpenEMR is a leader in healthcare open source software and comprises a large and diverse community of software developers, medical providers and educators with a very healthy mix of both volunteers and professionals. [Join us and learn how to start contributing today!](https://open-emr.org/wiki/index.php/FAQ#How_do_I_begin_to_volunteer_for_the_OpenEMR_project.3F)
+**OpenEMR fork (the deployed system of record):** https://southern-chester-hint-teenage.trycloudflare.com/
 
-> Already comfortable with git? Check out [CONTRIBUTING.md](CONTRIBUTING.md) for quick setup instructions and requirements for contributing to OpenEMR by resolving a bug or adding an awesome feature 😊.
+> **Caveat for reviewers:** the MVP gate calls for "publicly accessible deployment of your OpenEMR fork." We use a Cloudflare quick-tunnel to expose a locally-running OpenEMR over HTTPS. This URL is live and reachable while the tunnel process is up. Login: `admin` / `pass` (default; called out in [AUDIT.md §1.2](AUDIT.md#12-default-credentials-and-secrets)). Our Fly.io deploy of the same fork is in flight and detailed in [`deploy/fly/`](deploy/fly/) — it hit a known issue with the upstream `openemr/openemr:latest` image's first-boot install path on a fresh Fly volume, deferred to Thursday's early submission.
+>
+> **Agent UI:** the Clinical Co-Pilot itself runs locally during the demo at `http://127.0.0.1:8000/` (see [Quick start](#quick-start)). For Thursday's early submission the agent will be deployed alongside OpenEMR on the same infrastructure per the brief's "deploy final agent to the same infrastructure" requirement.
 
-### Support
+---
 
-Community and Professional support can be found [here](https://open-emr.org/wiki/index.php/OpenEMR_Support_Guide).
+## What's in this repo
 
-Extensive documentation and forums can be found on the [OpenEMR website](https://open-emr.org) that can help you to become more familiar about the project 📖.
-
-### Reporting Issues and Bugs
-
-Report these on the [Issue Tracker](https://github.com/openemr/openemr/issues). If you are unsure if it is an issue/bug, then always feel free to use the [Forum](https://community.open-emr.org/) and [Chat](https://www.open-emr.org/chat/) to discuss about the issue 🪲.
-
-### Reporting Security Vulnerabilities
-
-Check out [SECURITY.md](.github/SECURITY.md)
-
-### API
-
-Check out [API_README.md](API_README.md)
-
-### Docker
-
-Check out [DOCKER_README.md](DOCKER_README.md)
-
-### FHIR
-
-Check out [FHIR_README.md](FHIR_README.md)
-
-### For Developers
-
-If using OpenEMR directly from the code repository, then the following commands will build OpenEMR (Node.js version 24.* is required) :
-
-```shell
-composer install --no-dev
-npm install
-npm run build
-composer dump-autoload -o
+```
+openemr/                        # the OpenEMR fork (PHP/Apache, MariaDB)
+├── README.md                   # ← you are here
+├── README.openemr-upstream.md  # the original upstream OpenEMR README
+├── presearch.md                # Phase 1-3 pre-search per the brief
+├── ARCHITECTURE.md             # ★ Stage 5 — agent integration plan + 500-word summary
+├── ARCHITECTURE.pdf            # rendered architecture doc
+├── AUDIT.md                    # ★ Stage 3 — security/perf/arch/data-quality/compliance audit
+├── USERS.md                    # ★ Stage 4 — target user, workflow, use cases
+├── deploy/fly/                 # Fly.io deploy configs (mariadb + openemr)
+│   ├── db.toml
+│   └── openemr.toml
+└── clinical-copilot/           # ★ The AI agent (this is the new code)
+    ├── app/
+    │   ├── agent/              # LangGraph state machine + citation validator
+    │   ├── fhir/               # OAuth2 + FHIR R4 client + adapter
+    │   ├── main.py             # FastAPI entry
+    │   └── web/index.html      # minimal browser chat UI
+    ├── scripts/
+    │   ├── register_oauth_client.py    # one-time: read-only system client
+    │   ├── register_seed_client.py     # one-time: write-capable seed client
+    │   ├── seed_cohen.py               # populate the demo patient
+    │   ├── smoke_fhir.py / smoke_anthropic.py / cli_chat.py
+    │   └── fly_set_secrets.sh
+    ├── Dockerfile
+    └── fly.toml
 ```
 
-### Contributors
+The OpenEMR fork itself (`/src`, `/library`, `/interface`, `/apis`, etc.) is **unmodified** from upstream. All net-new code is in [`clinical-copilot/`](clinical-copilot/).
 
-This project exists thanks to all the people who have contributed. [[Contribute]](CONTRIBUTING.md).
-<a href="https://github.com/openemr/openemr/graphs/contributors"><img src="https://opencollective.com/openemr/contributors.svg?width=890" /></a>
+---
 
+## Required submission documents
 
-### Sponsors
+| Doc | What it is |
+|---|---|
+| [USERS.md](USERS.md) | Target user (hospitalist), workflow, three use cases with explicit "why an agent" defense |
+| [AUDIT.md](AUDIT.md) | Five-section audit of OpenEMR with a 500-word summary leading with the highest-impact findings |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Agent integration plan, 500-word summary at top, implementation-status table, layer walkthrough, latency + cost models |
+| [presearch.md](presearch.md) | Phase 1–3 pre-search constraints + decision log |
 
-Thanks to our [ONC Certification Major Sponsors](https://www.open-emr.org/wiki/index.php/OpenEMR_Certification_Stage_III_Meaningful_Use#Major_sponsors)!
+---
 
+## The agent — what it actually does
 
-### License
+A focused tool, not always-on. Three intended use cases (see [USERS.md](USERS.md)):
 
-[GNU GPL](LICENSE)
+- **A — Pre-round patient summary** ("Catch me up on Cohen") — *implemented for MVP*
+- **B — Medication safety check** ("Is it safe to start Bactrim on Cohen?") — *Thursday work*
+- **C — Sign-out drafting** — *Sunday-final work*
+
+Verification is **structural, not best-effort**: the LLM has no path to FHIR, every tool returns `{data, sources: [...]}`, and a deterministic citation validator rejects responses that cite resource IDs not in the cumulative tool-output set. The system prompt also forbids the LLM from emitting clinical reasoning (drug interactions, dose-reduction rules) that didn't come from a tool — exactly the "confident hallucination → patient harm" failure mode the brief calls out.
+
+A live demo run against Cohen (HTN / T2DM / CKD3 / AFib, on Lisinopril / Metformin / Apixaban / Atorvastatin) produces 23 cited clinical claims, validator passes 0 retries, the BP question gets a refused "insufficient evidence" rather than a confabulated value. See `ARCHITECTURE.md §1` for the design rationale and `AUDIT.md §1` for the OpenEMR-side findings that shape it.
+
+---
+
+## Quick start (local dev)
+
+### 1. Run OpenEMR locally
+
+```bash
+cd docker/development-easy
+docker compose up --detach --wait
+# → https://localhost:9300/  (admin / pass)
+```
+
+### 2. Start the agent
+
+```bash
+cd clinical-copilot
+
+# one-time: register the read-only OAuth client
+PYTHONPATH=. uv run python scripts/register_oauth_client.py
+# (paste the printed OPENEMR_CLIENT_ID into .env, then enable
+#  the client in OpenEMR admin → System → API Clients)
+
+# one-time: register the demo-data seed client + seed Cohen
+PYTHONPATH=. uv run python scripts/register_seed_client.py
+PYTHONPATH=. uv run python scripts/seed_cohen.py
+
+# start the agent
+PYTHONPATH=. uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+# → http://127.0.0.1:8000/
+```
+
+Try `Catch me up on Cohen.` in the chat. You'll see the agent call `current_time → resolve_patient → get_patient_card`, validate citations, and surface BP-not-charted as `Insufficient evidence` rather than confabulating.
+
+See [`clinical-copilot/.env.example`](clinical-copilot/.env.example) for the full env contract.
+
+### 3. (Optional) Public URL via cloudflared
+
+```bash
+brew install cloudflared
+cloudflared tunnel --url https://localhost:9300 --no-tls-verify
+# → prints a https://*.trycloudflare.com URL
+```
+
+This is the same mechanism we used for the MVP "deployed app" link above.
+
+---
+
+## Roadmap
+
+| Sprint gate | Date | What's in |
+|---|---|---|
+| **MVP (this submission)** | 2026-04-28 | Forked + deployed OpenEMR, Stage 3-5 docs, working local agent against Cohen, demo video |
+| **Early submission** | 2026-04-30 | Deployed agent on same infra, eval framework (~140 cases), LangSmith observability, app-layer auth, audit-log Postgres |
+| **Final** | 2026-05-03 | `clinical_rules` tool, Use Case C, cost analysis (100/1K/10K/100K), social post, production-readiness gaps closed |
+
+---
+
+## Acknowledgements
+
+This is a fork of [OpenEMR](https://github.com/openemr/openemr) — a 20-year-old open-source EHR with a real codebase and a real user community. The original upstream README is preserved at [README.openemr-upstream.md](README.openemr-upstream.md). All credit for OpenEMR itself goes to the OpenEMR project and its contributors. Net-new code in this fork is in [`clinical-copilot/`](clinical-copilot/).
+
+Built with Claude Code as part of the Gauntlet AI Austin admission track.

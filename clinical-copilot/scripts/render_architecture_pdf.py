@@ -26,7 +26,9 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+# Repo root is one level above clinical-copilot/, where ARCHITECTURE.md lives
+# alongside USERS.md and AUDIT.md per the brief's submission layout.
+ROOT = Path(__file__).resolve().parents[2]
 ARCH_MD = ROOT / "ARCHITECTURE.md"
 OUT_PDF = ROOT / "ARCHITECTURE.pdf"
 DIAGRAM_DIR = ROOT / "build" / "diagrams"
