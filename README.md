@@ -10,11 +10,12 @@
 
 ## Deployed app (MVP submission)
 
-**OpenEMR fork (the deployed system of record):** https://southern-chester-hint-teenage.trycloudflare.com/
+| | URL | What it is |
+|---|---|---|
+| **OpenEMR fork** (system of record) | https://southern-chester-hint-teenage.trycloudflare.com/ | Our forked OpenEMR. Login: `admin` / `pass` (default — flagged in [AUDIT.md §1.2](AUDIT.md#12-default-credentials-and-secrets)). |
+| **Clinical Co-Pilot** (the AI agent) | https://comfort-reach-soviet-freight.trycloudflare.com/ | The agent UI. Type *"Catch me up on Cohen."* — the demo patient is seeded. |
 
-> **Caveat for reviewers:** the MVP gate calls for "publicly accessible deployment of your OpenEMR fork." We use a Cloudflare quick-tunnel to expose a locally-running OpenEMR over HTTPS. This URL is live and reachable while the tunnel process is up. Login: `admin` / `pass` (default; called out in [AUDIT.md §1.2](AUDIT.md#12-default-credentials-and-secrets)). Our Fly.io deploy of the same fork is in flight and detailed in [`deploy/fly/`](deploy/fly/) — it hit a known issue with the upstream `openemr/openemr:latest` image's first-boot install path on a fresh Fly volume, deferred to Thursday's early submission.
->
-> **Agent UI:** the Clinical Co-Pilot itself runs locally during the demo at `http://127.0.0.1:8000/` (see [Quick start](#quick-start)). For Thursday's early submission the agent will be deployed alongside OpenEMR on the same infrastructure per the brief's "deploy final agent to the same infrastructure" requirement.
+> **Caveat for reviewers:** the MVP gate calls for "publicly accessible deployment." Both URLs are live and reachable while the cloudflared tunnel processes are up. The agent streams responses via SSE — token-by-token output begins in ~2s with progress indicators ("Searching for patient…", "Loading chart…") in between. Our Fly.io deploy of OpenEMR is in flight and detailed in [`deploy/fly/`](deploy/fly/) — it hit a known issue with the upstream `openemr/openemr:latest` image's first-boot install path on a fresh Fly volume, deferred to Thursday's early submission per the brief's "deploy final agent to the same infrastructure" requirement.
 
 ---
 

@@ -58,6 +58,17 @@
       color: #b91c1c;
       text-decoration: line-through wavy;
     }
+    .stream-status {
+      color: var(--muted);
+      font-style: italic;
+      font-size: 0.9rem;
+      animation: pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.55; }
+      50%      { opacity: 1; }
+    }
+    .stream-text { white-space: pre-wrap; }
     #input-row {
       display: flex; gap: 0.5rem;
       padding: 0.75rem 1rem;
@@ -113,6 +124,12 @@
     let sessionId = null;
     let lastPatientId = null;
 
+    const TOOL_LABELS = {
+      'current_time': 'Checking the date',
+      'resolve_patient': 'Searching for patient',
+      'get_patient_card': 'Loading chart',
+    };
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const text = msg.value.trim();
@@ -120,29 +137,85 @@
       msg.value = '';
       append('user', text);
       send.disabled = true;
+
+      // Build the assistant bubble with a status line we'll update as
+      // tool/stream events arrive, then a text box that fills with tokens.
+      const bubble = document.createElement('div');
+      bubble.className = 'msg assistant';
+      const statusLine = document.createElement('div');
+      statusLine.className = 'stream-status';
+      statusLine.textContent = 'Thinking…';
+      bubble.appendChild(statusLine);
+      const responseBox = document.createElement('div');
+      responseBox.className = 'stream-text';
+      bubble.appendChild(responseBox);
+      log.appendChild(bubble);
+      log.scrollTop = log.scrollHeight;
+
+      let streamedText = '';
+      let lastSources = [];
+      let lastValidationWarning = false;
+      let lastPatientFromTurn = null;
+
       try {
-        const r = await fetch('/chat', {
+        const r = await fetch('/chat/stream', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({session_id: sessionId, message: text}),
         });
-        if (!r.ok) {
-          append('system', 'Error: ' + r.status + ' ' + r.statusText);
+        if (!r.ok || !r.body) {
+          statusLine.textContent = 'Error: ' + r.status + ' ' + r.statusText;
           return;
         }
-        const data = await r.json();
-        sessionId = data.session_id;
-        const decorated = decorateCitations(data.response, new Set(data.sources || []));
-        appendHTML('assistant', decorated);
-        if (data.validation_warning) {
+
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const {value, done} = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, {stream: true});
+          // SSE frames are separated by \n\n
+          let idx;
+          while ((idx = buffer.indexOf('\n\n')) >= 0) {
+            const frame = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 2);
+            if (!frame.startsWith('data:')) continue;
+            const json = frame.slice(5).trim();
+            if (!json) continue;
+            let evt;
+            try { evt = JSON.parse(json); } catch (_) { continue; }
+
+            if (evt.type === 'session') {
+              sessionId = evt.session_id;
+            } else if (evt.type === 'tool') {
+              const label = TOOL_LABELS[evt.name] || evt.name;
+              statusLine.textContent = label + '…';
+            } else if (evt.type === 'token') {
+              if (statusLine.parentNode) statusLine.remove();
+              streamedText += evt.text;
+              responseBox.innerHTML = decorateCitations(streamedText, new Set(lastSources));
+              log.scrollTop = log.scrollHeight;
+            } else if (evt.type === 'done') {
+              lastSources = evt.sources || [];
+              lastValidationWarning = !!evt.validation_warning;
+              lastPatientFromTurn = evt.patient_id;
+              // Re-decorate with the authoritative source list once known
+              responseBox.innerHTML = decorateCitations(streamedText, new Set(lastSources));
+            }
+          }
+        }
+
+        if (lastValidationWarning) {
           append('system', 'Warning: this response retained uncited claims after retry. Verify against the chart.');
         }
-        if (data.patient_id && data.patient_id !== lastPatientId) {
-          lastPatientId = data.patient_id;
-          loadCard(data.patient_id);
+        if (lastPatientFromTurn && lastPatientFromTurn !== lastPatientId) {
+          lastPatientId = lastPatientFromTurn;
+          loadCard(lastPatientId);
         }
       } catch (err) {
-        append('system', 'Network error: ' + err.message);
+        statusLine.textContent = 'Network error: ' + err.message;
       } finally {
         send.disabled = false;
         msg.focus();

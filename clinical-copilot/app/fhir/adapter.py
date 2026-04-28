@@ -103,32 +103,39 @@ async def resolve_patient(
 
 
 async def get_patient_card(client: FhirClient, *, patient_id: str) -> SourcedResult:
-    """Fetch the structured data that powers the right-side patient card."""
-    patient = await client.get(f"Patient/{patient_id}")
+    """Fetch the structured data that powers the right-side patient card.
+
+    All six FHIR queries fan out in parallel via `asyncio.gather` — sequential
+    awaits added ~3s on a local stack and ~5s through cloudflared. They are
+    independent (no result feeds the next), so parallelism is safe.
+    """
+    import asyncio
 
     # OpenEMR's FHIR layer is selective about which search params it honors.
     # Using broad searches and filtering client-side is safer than passing
     # `status` / `clinical-status` filters that silently return zero.
-    encounters_all = await client.search(
-        "Encounter", {"patient": patient_id, "_sort": "-date", "_count": 5}
+    patient, encounters_all, allergies, problems_all, meds, vitals = await asyncio.gather(
+        client.get(f"Patient/{patient_id}"),
+        client.search("Encounter", {"patient": patient_id, "_sort": "-date", "_count": 5}),
+        client.search("AllergyIntolerance", {"patient": patient_id}),
+        client.search("Condition", {"patient": patient_id}),
+        client.search("MedicationRequest", {"patient": patient_id, "_count": 10}),
+        client.search(
+            "Observation",
+            {"patient": patient_id, "category": "vital-signs", "_count": 10},
+        ),
     )
+
     encounters = [
         e for e in encounters_all
         if e.get("status") in {"in-progress", "arrived", "triaged", "finished"}
     ][:1]
-    allergies = await client.search("AllergyIntolerance", {"patient": patient_id})
-    problems_all = await client.search("Condition", {"patient": patient_id})
     problems = [
         c for c in problems_all
         if (
             (c.get("clinicalStatus") or {}).get("coding", [{}])[0].get("code") in {"active", "recurrence", "relapse", None}
         )
     ]
-    meds = await client.search("MedicationRequest", {"patient": patient_id, "_count": 10})
-    vitals = await client.search(
-        "Observation",
-        {"patient": patient_id, "category": "vital-signs", "_count": 10},
-    )
 
     sources = (
         [_ref(patient)]
