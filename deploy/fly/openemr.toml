@@ -1,0 +1,73 @@
+# Fly config for the OpenEMR fork (PHP/Apache).
+#
+# Uses `openemr/openemr:latest` (production image), NOT `:flex`. The flex
+# image's `EASY_DEV_MODE_NEW` mode expects the OpenEMR source mounted at
+# /openemr — fine for local docker-compose, broken on Fly. The production
+# image bundles its own source and runs the auto-install via env vars on
+# first boot. Mirrors `docker/production/docker-compose.yml` from the fork.
+#
+# Deploy:
+#   fly deploy -c deploy/fly/openemr.toml
+#
+# Secrets must be set first (random values; record locally for OAuth/seed):
+#   fly secrets set -a openemr \
+#       MYSQL_ROOT_PASS=<same as openemr-db's MYSQL_ROOT_PASSWORD> \
+#       MYSQL_PASS=<same as openemr-db's MYSQL_PASSWORD> \
+#       OE_PASS=<admin password>
+
+app             = "openemr"
+primary_region  = "ord"
+
+[build]
+  image = "openemr/openemr:latest"
+
+[env]
+  # DB connection — `openemr-db.internal` is auto-resolved by Fly's 6PN DNS
+  MYSQL_HOST     = "openemr-db.internal"
+  MYSQL_USER     = "openemr"
+  OE_USER        = "admin"
+
+  # Enable the APIs the agent depends on; persisted to the `globals` table
+  # via `OPENEMR_SETTING_*` and only applied on the first install boot.
+  OPENEMR_SETTING_rest_api                = "1"
+  OPENEMR_SETTING_rest_fhir_api           = "1"
+  OPENEMR_SETTING_rest_system_scopes_api  = "1"
+  OPENEMR_SETTING_oauth_password_grant    = "3"
+
+# NOTE: no [mounts] for /sites yet. Fly volumes don't auto-populate from the
+# image like docker-compose volumes do, so an empty mount on /sites hides
+# the default/ + factory_default/ trees the install script needs and triggers
+# a phantom "upgrade from v0" path. To add /sites persistence later: deploy
+# without the mount, let install populate /sites in the image's ephemeral
+# layer, then `fly ssh console` and copy that tree into a freshly-mounted
+# volume on a sibling path before swapping. For MVP demo we accept that
+# /sites resets on machine restart — the DB on openemr-db persists, which
+# is what matters for chart data + OAuth client registrations.
+
+[http_service]
+  internal_port        = 80
+  force_https          = true
+
+  # IMPORTANT: keep min_machines_running=1 and DO NOT auto-stop. OpenEMR's
+  # `Running quick setup!` step takes ~1-3 minutes during which port 80 is
+  # not yet listening; if Fly auto-stops the machine for "excess capacity"
+  # (no inbound traffic), the install gets SIGTERMed mid-MariaDB-init and
+  # we end up in a permanent "fresh install but DB partially populated"
+  # state that's harder to recover from than just letting it run.
+  auto_stop_machines   = false
+  auto_start_machines  = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    # Production image exposes /meta/health/readyz; first-boot install can
+    # take ~3 minutes per the upstream production docker-compose.
+    interval     = "30s"
+    timeout      = "5s"
+    grace_period = "3m"
+    method       = "GET"
+    path         = "/meta/health/readyz"
+
+[[vm]]
+  memory   = "2gb"
+  cpu_kind = "shared"
+  cpus     = 1

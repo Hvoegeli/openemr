@@ -1,0 +1,35 @@
+# Fly config for the MariaDB instance backing the deployed OpenEMR fork.
+#
+# The DB is private to Fly's 6PN network — no public IP is allocated. The
+# OpenEMR app reaches it as `openemr-db.internal` (Fly's automatic .internal
+# DNS resolves to the machine's private IPv6 address).
+#
+# Deploy:
+#   fly deploy -c deploy/fly/db.toml
+#
+# Secrets must be set first:
+#   fly secrets set -a openemr-db \
+#       MYSQL_ROOT_PASSWORD=<random> \
+#       MYSQL_PASSWORD=<random>
+
+app = "openemr-db"
+primary_region = "ord"
+
+[build]
+  image = "mariadb:11.8.6"
+
+[env]
+  MYSQL_DATABASE = "openemr"
+  MYSQL_USER     = "openemr"
+
+[mounts]
+  source      = "mariadb_data"
+  destination = "/var/lib/mysql"
+
+# No [http_service]/[[services]] block on purpose — the DB stays
+# private-only and is reachable only from the Fly 6PN network.
+
+[[vm]]
+  memory   = "1gb"
+  cpu_kind = "shared"
+  cpus     = 1
