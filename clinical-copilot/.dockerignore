@@ -1,0 +1,35 @@
+# Keep the image small and avoid leaking dev artifacts.
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+.git/
+.gitignore
+.github/
+
+.env
+.env.example
+
+# Local OpenEMR checkout (not needed inside the image)
+openemr/
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+
+# IDE / OS junk
+.DS_Store
+.vscode/
+.idea/
+
+# Tests + scripts not needed at runtime
+tests/
+scripts/
+
+# Don't ship the seeding client's secret-bearing helpers
+secrets/agent_jwks.json

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Clinical Co-pilot</title>
+  <style>
+    :root {
+      --bg: #f7f7f8;
+      --panel: #ffffff;
+      --border: #e5e7eb;
+      --text: #111827;
+      --muted: #6b7280;
+      --accent: #2563eb;
+      --warn-bg: #fef3c7;
+      --warn-text: #78350f;
+      --citation: #2563eb;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      display: grid;
+      grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+      height: 100vh;
+    }
+    .pane { display: flex; flex-direction: column; min-height: 0; }
+    .pane > header {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      font-weight: 600;
+    }
+    #chat-pane { border-right: 1px solid var(--border); }
+    #log {
+      flex: 1; overflow-y: auto;
+      padding: 1rem;
+      display: flex; flex-direction: column; gap: 0.75rem;
+    }
+    .msg {
+      max-width: 90%;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .msg.user { align-self: flex-end; background: var(--accent); color: white; }
+    .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+    .msg.system { align-self: center; background: var(--warn-bg); color: var(--warn-text); font-size: 0.85rem; }
+    .msg.assistant .citation {
+      color: var(--citation); font-size: 0.85em;
+      cursor: help;
+      text-decoration: underline dotted;
+    }
+    .msg.assistant .citation.invalid {
+      color: #b91c1c;
+      text-decoration: line-through wavy;
+    }
+    #input-row {
+      display: flex; gap: 0.5rem;
+      padding: 0.75rem 1rem;
+      border-top: 1px solid var(--border);
+      background: var(--panel);
+    }
+    #msg {
+      flex: 1; padding: 0.6rem 0.8rem;
+      border: 1px solid var(--border); border-radius: 6px;
+      font: inherit;
+    }
+    #msg:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+    #send {
+      padding: 0.6rem 1.2rem;
+      border: 0; border-radius: 6px;
+      background: var(--accent); color: white; cursor: pointer; font: inherit; font-weight: 500;
+    }
+    #send:disabled { opacity: 0.5; cursor: not-allowed; }
+    #card-pane { background: var(--bg); }
+    #card {
+      padding: 1rem; overflow-y: auto;
+      font-size: 0.9rem;
+    }
+    #card h2 { margin-top: 0; }
+    #card h3 { margin: 1rem 0 0.4rem; font-size: 0.95rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    #card ul { margin: 0; padding-left: 1.1rem; }
+    #card li { margin-bottom: 0.2rem; }
+    #card .empty { color: var(--muted); font-style: italic; }
+    #card .meta { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.5rem; }
+    code { background: rgba(0,0,0,0.05); padding: 0 0.3em; border-radius: 3px; font-size: 0.85em; }
+  </style>
+</head>
+<body>
+  <section class="pane" id="chat-pane">
+    <header>Clinical Co-pilot</header>
+    <div id="log"></div>
+    <form id="input-row">
+      <input id="msg" placeholder='Try: "Catch me up on Shaw."' autofocus autocomplete="off">
+      <button id="send" type="submit">Send</button>
+    </form>
+  </section>
+  <section class="pane" id="card-pane">
+    <header>Patient Card</header>
+    <div id="card"><div class="empty">No patient selected. Ask about a patient by last name to load their chart.</div></div>
+  </section>
+
+  <script>
+    const log = document.getElementById('log');
+    const form = document.getElementById('input-row');
+    const msg = document.getElementById('msg');
+    const send = document.getElementById('send');
+    const card = document.getElementById('card');
+    let sessionId = null;
+    let lastPatientId = null;
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = msg.value.trim();
+      if (!text) return;
+      msg.value = '';
+      append('user', text);
+      send.disabled = true;
+      try {
+        const r = await fetch('/chat', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({session_id: sessionId, message: text}),
+        });
+        if (!r.ok) {
+          append('system', 'Error: ' + r.status + ' ' + r.statusText);
+          return;
+        }
+        const data = await r.json();
+        sessionId = data.session_id;
+        const decorated = decorateCitations(data.response, new Set(data.sources || []));
+        appendHTML('assistant', decorated);
+        if (data.validation_warning) {
+          append('system', 'Warning: this response retained uncited claims after retry. Verify against the chart.');
+        }
+        if (data.patient_id && data.patient_id !== lastPatientId) {
+          lastPatientId = data.patient_id;
+          loadCard(data.patient_id);
+        }
+      } catch (err) {
+        append('system', 'Network error: ' + err.message);
+      } finally {
+        send.disabled = false;
+        msg.focus();
+      }
+    });
+
+    function escapeHtml(s) {
+      return s.replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function append(role, text) {
+      appendHTML(role, escapeHtml(text));
+    }
+
+    function appendHTML(role, html) {
+      const div = document.createElement('div');
+      div.className = 'msg ' + role;
+      div.innerHTML = html;
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function decorateCitations(text, sourceSet) {
+      const escaped = escapeHtml(text);
+      return escaped.replace(/\[([A-Z][a-zA-Z]+)\/([a-zA-Z0-9._-]+)\]/g, (m, type, id) => {
+        const ref = type + '/' + id;
+        const cls = sourceSet.has(ref) ? 'citation' : 'citation invalid';
+        return '<span class="' + cls + '" title="' + ref + '">[' + type + ']</span>';
+      });
+    }
+
+    async function loadCard(pid) {
+      card.innerHTML = '<div class="empty">Loading patient ' + escapeHtml(pid) + '...</div>';
+      try {
+        const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/card');
+        if (!r.ok) {
+          card.innerHTML = '<div class="empty">Failed to load card: ' + r.status + '</div>';
+          return;
+        }
+        const d = await r.json();
+        card.innerHTML = renderCard(d);
+      } catch (e) {
+        card.innerHTML = '<div class="empty">Network error loading card</div>';
+      }
+    }
+
+    function renderCard(d) {
+      const list = (items, fmt, emptyText) =>
+        items && items.length
+          ? '<ul>' + items.map(fmt).join('') + '</ul>'
+          : '<div class="empty">' + emptyText + '</div>';
+
+      return [
+        '<h2>' + escapeHtml(d.name || '(unknown)') + '</h2>',
+        '<div class="meta">',
+          (d.age != null ? d.age + 'y · ' : ''),
+          escapeHtml(d.sex || '?'),
+          ' · MRN <code>' + escapeHtml(d.mrn || '') + '</code>',
+        '</div>',
+        '<h3>Allergies</h3>',
+        list(d.allergies, a =>
+          '<li>' + escapeHtml(a.substance || '?') +
+          (a.severity ? ' <span class="empty">(' + escapeHtml(a.severity) + ')</span>' : '') +
+          '</li>',
+        'None documented'),
+        '<h3>Active Problems</h3>',
+        list(d.active_problems, p =>
+          '<li>' + escapeHtml(p.name || '?') + '</li>',
+        'None documented'),
+        '<h3>Active Medications</h3>',
+        list(d.active_medications, m =>
+          '<li>' + escapeHtml(m.drug || '?') +
+          (m.dose_text ? ' — ' + escapeHtml(m.dose_text) : '') +
+          '</li>',
+        'None documented'),
+        '<h3>Recent Vitals</h3>',
+        list(d.recent_vitals, v =>
+          '<li>' + escapeHtml(v.name || '?') + ': ' +
+          (v.value != null ? escapeHtml(String(v.value)) : '?') +
+          (v.unit ? ' ' + escapeHtml(v.unit) : '') +
+          '</li>',
+        'None documented'),
+      ].join('');
+    }
+  </script>
+</body>
+</html>

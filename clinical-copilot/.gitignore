@@ -1,0 +1,24 @@
+.env
+.env.local
+.env.*.local
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+.DS_Store
+.idea/
+.vscode/
+
+*.log
+secrets/
+
+# OpenEMR is its own repo at https://github.com/Hvoegeli/openemr.git — clone separately
+openemr/
+
+# intermediate build artifacts (the final PDF is checked in)
+build/
