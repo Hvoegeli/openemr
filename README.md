@@ -8,14 +8,29 @@
 
 ---
 
-## Deployed app (MVP submission)
+## ★ MVP submission — 2026-04-28
+
+Everything a reviewer needs is in this section. Each link below is at the **top of the repo**.
+
+### Deployed app
 
 | | URL | What it is |
 |---|---|---|
 | **OpenEMR fork** (system of record) | https://southern-chester-hint-teenage.trycloudflare.com/ | Our forked OpenEMR. Login: `admin` / `pass` (default — flagged in [AUDIT.md §1.2](AUDIT.md#12-default-credentials-and-secrets)). |
-| **Clinical Co-Pilot** (the AI agent) | https://comfort-reach-soviet-freight.trycloudflare.com/ | The agent UI. Type *"Catch me up on Cohen."* — the demo patient is seeded. |
+| **Clinical Co-Pilot** (the AI agent) | https://comfort-reach-soviet-freight.trycloudflare.com/ | The agent UI. Sign in with the same `admin` / `pass`. Type *"Catch me up on Cohen."* — the demo patient is seeded. |
 
-> **Caveat for reviewers:** the MVP gate calls for "publicly accessible deployment." Both URLs are live and reachable while the cloudflared tunnel processes are up. The agent streams responses via SSE — token-by-token output begins in ~2s with progress indicators ("Searching for patient…", "Loading chart…") in between. Our Fly.io deploy of OpenEMR is in flight and detailed in [`deploy/fly/`](deploy/fly/) — it hit a known issue with the upstream `openemr/openemr:latest` image's first-boot install path on a fresh Fly volume, deferred to Thursday's early submission per the brief's "deploy final agent to the same infrastructure" requirement.
+### Required documents
+
+| Doc | What it is |
+|---|---|
+| [USERS.md](USERS.md) | **Stage 4** — target user (hospitalist), workflow, three use cases with explicit "why an agent" defense |
+| [AUDIT.md](AUDIT.md) | **Stage 3** — five-section audit of OpenEMR with a 500-word summary leading with the highest-impact findings |
+| [ARCHITECTURE.md](ARCHITECTURE.md) / [ARCHITECTURE.pdf](ARCHITECTURE.pdf) | **Stage 5** — agent integration plan, 500-word summary, implementation-status table, layer walkthrough, latency + cost models |
+| [presearch.md](presearch.md) | Phase 1–3 pre-search constraints + decision log |
+
+### Caveat for reviewers
+
+The MVP gate calls for "publicly accessible deployment." Both URLs above are live and reachable while the cloudflared tunnel processes are up. The agent streams responses via SSE — token-by-token output begins in ~2s with progress indicators ("Searching for patient…", "Loading chart…") in between. Our Fly.io deploy of OpenEMR is in flight and detailed in [`deploy/fly/`](deploy/fly/) — it hit a known issue with the upstream `openemr/openemr:latest` image's first-boot install path on a fresh Fly volume, deferred to Thursday's early submission per the brief's "deploy final agent to the same infrastructure" requirement.
 
 ---
 
@@ -50,17 +65,6 @@ openemr/                        # the OpenEMR fork (PHP/Apache, MariaDB)
 ```
 
 The OpenEMR fork itself (`/src`, `/library`, `/interface`, `/apis`, etc.) is **unmodified** from upstream. All net-new code is in [`clinical-copilot/`](clinical-copilot/).
-
----
-
-## Required submission documents
-
-| Doc | What it is |
-|---|---|
-| [USERS.md](USERS.md) | Target user (hospitalist), workflow, three use cases with explicit "why an agent" defense |
-| [AUDIT.md](AUDIT.md) | Five-section audit of OpenEMR with a 500-word summary leading with the highest-impact findings |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Agent integration plan, 500-word summary at top, implementation-status table, layer walkthrough, latency + cost models |
-| [presearch.md](presearch.md) | Phase 1–3 pre-search constraints + decision log |
 
 ---
 
