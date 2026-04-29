@@ -34,7 +34,23 @@ SCOPES = " ".join(
         "openid",
         "api:oemr",
         "api:fhir",
+        # Standard REST (.cruds) scopes — what seed_cohen.py and
+        # seed_demo_patients.py actually use to POST allergies, problems,
+        # meds, encounters, vitals, and SOAP notes.
+        "user/patient.cruds",
+        "user/allergy.cruds",
+        "user/medical_problem.cruds",
+        "user/medication.cruds",
+        "user/encounter.cruds",
+        "user/vital.cruds",
+        "user/soap_note.crus",
+        "user/practitioner.cruds",
+        "user/facility.cruds",
+        "user/list.read",
+        # FHIR-style scopes — kept for parity with the older agent_forge
+        # client and so this seed client can also exercise FHIR writes.
         "user/Patient.read",
+        "user/Patient.write",
         "user/AllergyIntolerance.read",
         "user/AllergyIntolerance.write",
         "user/Condition.read",
