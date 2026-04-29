@@ -16,8 +16,8 @@ Everything a reviewer needs is in this section. Each link below is at the **top 
 
 | | URL | What it is |
 |---|---|---|
-| **OpenEMR fork** (system of record) | https://southern-chester-hint-teenage.trycloudflare.com/ | Our forked OpenEMR. Login: `admin` / `pass` (default — flagged in [AUDIT.md §1.2](AUDIT.md#12-default-credentials-and-secrets)). |
-| **Clinical Co-Pilot** (the AI agent) | https://comfort-reach-soviet-freight.trycloudflare.com/ | The agent UI. Sign in with the same `admin` / `pass`. Type *"Catch me up on Cohen."* — the demo patient is seeded. |
+| **OpenEMR fork** (system of record) | https://alberta-expansion-pittsburgh-vitamin.trycloudflare.com/ | Our forked OpenEMR. Login: `admin` / `pass` (default — flagged in [AUDIT.md §1.2](AUDIT.md#12-default-credentials-and-secrets)). |
+| **Clinical Co-Pilot** (the AI agent) | https://deutschland-air-spreading-wants.trycloudflare.com/ | The agent UI. Sign in with the same `admin` / `pass`. Type *"Catch me up on Cohen."* — the demo patient is seeded. |
 
 ### Required documents
 
@@ -32,7 +32,7 @@ All four required documents are at the **root of the repo** per the brief:
 
 ### Caveat for reviewers
 
-The MVP gate calls for "publicly accessible deployment." Both URLs above are live and reachable while the cloudflared tunnel processes are up. The agent streams responses via SSE — token-by-token output begins in ~2s with progress indicators ("Searching for patient…", "Loading chart…") in between. Our Fly.io deploy of OpenEMR is in flight and detailed in [`deploy/fly/`](deploy/fly/) — it hit a known issue with the upstream `openemr/openemr:latest` image's first-boot install path on a fresh Fly volume, deferred to Thursday's early submission per the brief's "deploy final agent to the same infrastructure" requirement.
+Both URLs are publicly reachable and run on a dedicated **Hetzner Cloud CPX21** in Ashburn, VA — no laptop in the path. OpenEMR is the standard `docker/development-easy` docker-compose stack; the co-pilot runs as a `systemd` service alongside it; both `cloudflared` quick-tunnels are themselves `systemd` services with `Restart=always`. The agent streams responses via SSE — token-by-token output begins in ~2s with progress indicators ("Searching for patient…", "Loading chart…") in between. Our originally-attempted Fly.io deploy of OpenEMR (configs in [`deploy/fly/`](deploy/fly/)) hit a known issue with the upstream image's first-boot install path on a fresh Fly volume; the Hetzner deploy uses the same docker-compose that's verified working locally and sidesteps that bug.
 
 ---
 
