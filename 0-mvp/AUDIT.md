@@ -17,7 +17,7 @@ OpenEMR is a 20-year-old PHP electronic health record system with a real codebas
 
 3. **The audit log exists but is partial.** OpenEMR has an `audit_master` and `log` tables and writes to them on UI-driven changes, but **the FHIR and standard-API endpoints we used to read and write Cohen's chart did not produce log rows we could find via the API**. HIPAA requires a complete record of *who accessed what PHI when*; OpenEMR's API surface doesn't yet meet that bar without additional instrumentation. Our agent's audit log (planned for Thursday in `clinical-copilot/`) becomes the system of record for AI-mediated access — by design, not by accident.
 
-The audit also surfaced **data-quality quirks** the FHIR layer papers over silently — free-text titles get embedded in the narrative `text.div` rather than the structured `code.coding`, and the FHIR layer emits `data-absent-reason: unknown` placeholders that look real to a naive consumer. We added a narrative-fallback path in our adapter ([clinical-copilot/app/fhir/adapter.py](clinical-copilot/app/fhir/adapter.py)) so the agent doesn't render "Unknown" for every chart entry.
+The audit also surfaced **data-quality quirks** the FHIR layer papers over silently — free-text titles get embedded in the narrative `text.div` rather than the structured `code.coding`, and the FHIR layer emits `data-absent-reason: unknown` placeholders that look real to a naive consumer. We added a narrative-fallback path in our adapter ([clinical-copilot/app/fhir/adapter.py](../clinical-copilot/app/fhir/adapter.py)) so the agent doesn't render "Unknown" for every chart entry.
 
 **Performance** is acceptable for MVP — local p95 around 14s for a full 3-tool turn against Cohen — but the breakdown is 70% LLM, 30% sequential FHIR. A 500-bed-300-concurrent-user deployment will need parallel tool calls, prompt caching, and very likely a FHIR-layer cache.
 
@@ -37,7 +37,7 @@ The agent design in `ARCHITECTURE.md` is shaped by these findings: the verificat
 - **FHIR API (`/apis/default/fhir/`)** uses **SMART-style scopes** — `system/Patient.read`, `user/Encounter.write`, etc. Token scope is checked at the request boundary.
 - **Standard REST API (`/apis/default/api/`)** uses **a custom scope vocabulary** — `user/allergy.cruds` (combined create/read/update/delete/search), `user/medical_problem.cruds`, etc. Then layers the legacy **GACL ACL system** on top: `RestConfig::request_authorization_check($request, "patients", "med")` in every handler.
 
-This duality is not documented well outside the source. We discovered it by reading [`apis/routes/_rest_routes_standard.inc.php`](apis/routes/_rest_routes_standard.inc.php) and [`src/RestControllers/Config/RestConfig.php`](src/RestControllers/Config/RestConfig.php) and tracing 401/403 errors through the `BearerTokenAuthorizationStrategy` and the PHP error log.
+This duality is not documented well outside the source. We discovered it by reading [`apis/routes/_rest_routes_standard.inc.php`](../apis/routes/_rest_routes_standard.inc.php) and [`src/RestControllers/Config/RestConfig.php`](../src/RestControllers/Config/RestConfig.php) and tracing 401/403 errors through the `BearerTokenAuthorizationStrategy` and the PHP error log.
 
 **Implication for the co-pilot:** writes to clinical data require a **second OAuth client** with `client_secret_post` auth, `password` grant, and the standard-API scopes — because `private_key_jwt` + `system/*.read` (what our FHIR reads use) cannot be promoted to writes by adding scopes. The clients are architecturally distinct.
 
@@ -97,7 +97,7 @@ Local Anthropic API latency was 7-9s for a Sonnet 4.6 final-response call with b
 
 ### 2.2 Bottlenecks
 
-**Sequential FHIR queries** in [`get_patient_card`](clinical-copilot/app/fhir/adapter.py). The adapter fires 6 queries one after another. `asyncio.gather` would parallelize these and cut the tool latency from ~3s to ~0.7s. Slated for Thursday.
+**Sequential FHIR queries** in [`get_patient_card`](../clinical-copilot/app/fhir/adapter.py). The adapter fires 6 queries one after another. `asyncio.gather` would parallelize these and cut the tool latency from ~3s to ~0.7s. Slated for Thursday.
 
 **No prompt caching.** The system prompt is ~1.5KB and re-sent every turn. Anthropic's prompt caching cuts repeat-input cost by ~90%. Slated for Thursday.
 
@@ -183,7 +183,7 @@ A single FHIR resource fetch traverses **three layers**:
 
 OpenEMR ships **5 example patients** in `sql/example_patient_data.sql`. Each has demographics only — no encounters, no problems, no medications, no labs, no clinical notes. None of them can support a hospitalist demo.
 
-We hand-seeded **Nora Cohen** with: 2 allergies, 4 active problems (HTN, T2DM, CKD3, AFib), 4 active medications (Lisinopril, Metformin, Apixaban, Atorvastatin), 1 active encounter, and 1 vitals set. Seeding script: [`clinical-copilot/scripts/seed_cohen.py`](clinical-copilot/scripts/seed_cohen.py).
+We hand-seeded **Nora Cohen** with: 2 allergies, 4 active problems (HTN, T2DM, CKD3, AFib), 4 active medications (Lisinopril, Metformin, Apixaban, Atorvastatin), 1 active encounter, and 1 vitals set. Seeding script: [`clinical-copilot/scripts/seed_cohen.py`](../clinical-copilot/scripts/seed_cohen.py).
 
 For richer eval datasets (Thursday), Synthea-generated FHIR bundles will fill the gap. Synthea was selected over hand-crafted in [`ARCHITECTURE.md` §7](ARCHITECTURE.md).
 
@@ -209,7 +209,7 @@ This is a **systemic data-quality issue** in OpenEMR FHIR output, not a one-off.
 | `MedicationRequest` | `status: active` ✓ | active |
 | `AllergyIntolerance` | `clinicalStatus: active`, `verificationStatus: unconfirmed` | unconfirmed is technically wrong for known allergies, but acceptable |
 
-The **encounter `finished`** mismatch was actively misleading — the agent's "current encounter" filter returned zero until we widened the status set in [`adapter.get_patient_card`](clinical-copilot/app/fhir/adapter.py).
+The **encounter `finished`** mismatch was actively misleading — the agent's "current encounter" filter returned zero until we widened the status set in [`adapter.get_patient_card`](../clinical-copilot/app/fhir/adapter.py).
 
 ### 4.4 Search-parameter inconsistencies
 
@@ -248,7 +248,7 @@ We did not exhaustively enumerate which search parameters work. Our defensive po
 OpenEMR has audit infrastructure: `audit_master`, `audit_master_id` foreign keys, `log` table, `OpenEMR\Logging\AuditUtils`. UI-driven changes (form saves, problem-list edits) write rows. **We did not find evidence that the FHIR or standard-API endpoints we exercised wrote to these tables in the same way.** The PHP error log surfaces auth events; there's no equivalent surface for "user X read Patient Y at time Z" through the API.
 
 For HIPAA, the requirement is *complete* who-accessed-what-when. OpenEMR's API surface, in its current state, **does not meet this bar**. A production deployment of the co-pilot would need either:
-- An app-layer audit log (what we plan in [clinical-copilot](clinical-copilot/) for Thursday — append-only Postgres table written by the FHIR adapter on every call), OR
+- An app-layer audit log (what we plan in [clinical-copilot](../clinical-copilot/) for Thursday — append-only Postgres table written by the FHIR adapter on every call), OR
 - Patches to OpenEMR's FHIR + standard-API controllers to call AuditUtils on every request.
 
 The first is faster; the second is the right long-term answer because it captures all consumers, not just our agent.
