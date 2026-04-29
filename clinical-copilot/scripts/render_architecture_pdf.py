@@ -26,11 +26,12 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-# Repo root is one level above clinical-copilot/, where ARCHITECTURE.md lives
-# alongside USERS.md and AUDIT.md per the brief's submission layout.
+# Repo root is one level above clinical-copilot/. Submission docs live in
+# `0-mvp/` so they cluster at the top of GitHub's file listing.
 ROOT = Path(__file__).resolve().parents[2]
-ARCH_MD = ROOT / "ARCHITECTURE.md"
-OUT_PDF = ROOT / "ARCHITECTURE.pdf"
+MVP_DIR = ROOT / "0-mvp"
+ARCH_MD = MVP_DIR / "ARCHITECTURE.md"
+OUT_PDF = MVP_DIR / "ARCHITECTURE.pdf"
 DIAGRAM_DIR = ROOT / "build" / "diagrams"
 DIAGRAM_DIR.mkdir(parents=True, exist_ok=True)
 

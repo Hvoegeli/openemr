@@ -24,7 +24,7 @@ The architecture is shaped by one specific failure mode: a confidently-stated ha
 
 **Stack:** FastAPI + LangGraph + Anthropic Claude Sonnet 4.6 + httpx; deployed to Fly.io as a sibling app to the OpenEMR fork; OpenEMR backed by a private MariaDB on Fly's 6PN network. The full stack ships from a single repo (`Hvoegeli/openemr`).
 
-**Known gaps the brief expects us to flag:** no app-layer auth yet (Thursday), no audit log writing yet (Thursday), no LangSmith tracing wired (Thursday), no clinical-rules tool (slated Sunday final), no Postgres for sessions (in-memory MVP only). Latency is ~14s per turn vs the 8s target — addressed in Thursday work via parallel tool calls + prompt caching + streaming.
+**Known gaps the brief expects us to flag:** no audit log writing yet (Thursday), no LangSmith tracing wired (Thursday), no clinical-rules tool (slated Sunday final), no Postgres for sessions (in-memory MVP only). Chat-turn latency is still ~14s — dominated by the LLM call; further drop comes Thursday from prompt caching and tool-call parallelism. **MVP-day deltas vs the original plan:** cookie-session login validating against OpenEMR's password grant is shipped; SSE token streaming is shipped; a server-side TTL cache + startup prewarm makes dashboard endpoints ~10ms warm (calendar/card/documents); citation clicks now navigate (Patient → card tab; Encounter → doc viewer; Allergy/Condition/Med/Obs → scroll-and-flash on the card).
 
 ## 1.1 Implementation status (as of MVP)
 
@@ -32,16 +32,20 @@ What is actually shipped tonight versus aspirational, organized by sprint gate:
 
 | Component | MVP (tonight) | Early submission (Thu) | Final (Sun) |
 |---|---|---|---|
-| Forked OpenEMR | ✅ deployed at `openemr.fly.dev` (PHP/Apache + private MariaDB) | persistence on `/sites` via volume rehydration; OAuth client preconfigured | hardened: TLS managed certs, default creds rotated |
+| Forked OpenEMR | ✅ public via cloudflared (PHP/Apache + private MariaDB); Fly.io deploy in flight | Fly.io deploy completed; persistence on `/sites` via volume rehydration; OAuth client preconfigured | hardened: TLS managed certs, default creds rotated |
 | Agent code lives in `clinical-copilot/` | ✅ pushed to `Hvoegeli/openemr` | — | — |
 | Citation validator | ✅ regex + cumulative-sources check + retry-on-miss | + LangSmith trace per validation event | — |
+| **Citation-click navigation** | ✅ `[Patient]` → card tab; `[Encounter]` → doc viewer; `[Allergy/Condition/Med/Obs]` → scroll + flash matching `<li>` | — | — |
 | Tools | ✅ `current_time`, `resolve_patient`, `get_patient_card` | + 24h-window `get_observations`, `get_notes`, `get_med_changes` | + `clinical_rules(meds, problems, labs)` |
 | LLM forbidden from clinical reasoning beyond tools | ✅ enforced via system prompt | downgraded once `clinical_rules` tool exists | — |
-| Audit log | ❌ in-memory state only | ✅ append-only Postgres, written per FHIR call | + retention enforcement (90d chats / 7y audit) |
-| App-layer auth | ❌ none — anyone with the URL can `/chat` | ✅ session cookie → user → role | + SSO (SAML/OIDC) for hospital deploy |
+| **App-layer auth** | ✅ cookie session validating creds against OpenEMR's password-grant OAuth; all data endpoints gated | + role mapping (physician/nurse/resident) | + SSO (SAML/OIDC) for hospital deploy |
+| **Streaming** | ✅ token-by-token SSE via `astream_events`; tool-progress events drive UI status pills | — | — |
+| **Dashboard UI** | ✅ 2-pane layout: tabs (Today's Calendar default → Patient Card → Supporting Documents) on left, chat on right; doc viewer overlay with Close button | + Clinical Notes tab persisting into OpenEMR encounter SOAP note | — |
+| **Dashboard cache + prewarm** | ✅ in-process TTL cache (5-min); lifespan prewarms calendar + every patient on it; warm calendar/card/documents endpoints ~10ms | + event-driven invalidation on chart writes | + Redis for cross-machine cache |
+| Audit log | ❌ in-memory session dict only; no audit-log writes yet | ✅ append-only Postgres, written per FHIR call | + retention enforcement (90d chats / 7y audit) |
 | LangSmith observability | ❌ env wired, integration not active | ✅ traces every node + tool + token + cost | — |
 | Sessions / conversation history | in-memory dict (MVP) | Postgres, per session_id | + Redis for cross-machine state |
-| Streaming | ❌ non-streaming responses | ✅ token-by-token via SSE | — |
+| Anthropic prompt caching | ❌ system prompt re-sent every turn | ✅ cached per turn for ~90% repeat-input cost reduction | — |
 | Eval framework | ❌ ad-hoc smokes | ✅ ~140 cases (40A + 50B + 30C + 20 adversarial) | + CI gate on every PR |
 | BAA / HIPAA-grade hosting | ❌ Anthropic direct, Fly.io | route via AWS Bedrock for BAA; relocate hosting if needed | — |
 

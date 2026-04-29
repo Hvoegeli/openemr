@@ -93,15 +93,15 @@ Against the local `docker/development-easy` stack with Cohen seeded:
 | **Full `get_patient_card` adapter call** (1 patient + 5 list searches, sequential) | 2.8s | 4.2s | Dominated by the 5 sequential queries. |
 | **Full agent turn** (resolve_patient → current_time → get_patient_card → LLM synthesis) | 11s | 14s | LLM latency dominates; tool-call latency is ~30%. |
 
-Local Anthropic API latency was 7-9s for a Sonnet 4.6 final-response call with bound tools. The first-token latency was not measured; we don't stream yet.
+Local Anthropic API latency was 7-9s for a Sonnet 4.6 final-response call with bound tools. **MVP-day update:** the chat now streams token-by-token via SSE — first token typically lands in ~2s with tool-progress indicators ("Searching for patient…", "Loading chart…") in between, so the perceived wait is much shorter than the 14s end-to-end p95.
 
 ### 2.2 Bottlenecks
 
-**Sequential FHIR queries** in [`get_patient_card`](../clinical-copilot/app/fhir/adapter.py). The adapter fires 6 queries one after another. `asyncio.gather` would parallelize these and cut the tool latency from ~3s to ~0.7s. Slated for Thursday.
+**~~Sequential~~ Parallel FHIR queries** in [`get_patient_card`](../clinical-copilot/app/fhir/adapter.py) — **shipped MVP.** The adapter fans out its 6 queries via `asyncio.gather`. The new calendar fetcher does the same for Appointment + Encounter searches and Patient lookups. Note: OpenEMR serializes responses on the server side (PHP session locking + MariaDB), so wall-clock parallelism saves less than expected — the bigger win is the dashboard cache below.
+
+**Dashboard TTL cache + startup prewarm** — **shipped MVP.** In-process cache with a 5-minute TTL backs `/api/calendar/today`, `/api/patient/{id}/card`, `/api/patient/{id}/documents`. A lifespan task prewarms the calendar + every patient on it before the first user request. Warm reads are ~10ms vs ~10s cold. Agent tool calls still hit FHIR cold (Thursday).
 
 **No prompt caching.** The system prompt is ~1.5KB and re-sent every turn. Anthropic's prompt caching cuts repeat-input cost by ~90%. Slated for Thursday.
-
-**No FHIR-layer cache.** Every `Patient/{id}` lookup hits MariaDB, even though the data changes rarely within a session. A session-scoped cache (15-30s TTL) would absorb most repeat-fetch patterns.
 
 **Sequential LLM tool-call rounds.** The LLM currently calls `resolve_patient`, then `current_time`, then `get_patient_card` in three separate round-trips. If the LLM emitted all three calls in parallel, we'd save ~3-5s. Tool-call parallelism is supported by Sonnet but our prompt does not explicitly encourage it.
 
@@ -117,9 +117,10 @@ For the brief's "500-bed hospital, 300 concurrent users" question, the most impo
 
 | Finding | Reflected in ARCHITECTURE.md as |
 |---|---|
-| Sequential FHIR fetches dominate tool latency | Thursday: parallelize with `asyncio.gather` in adapter |
+| Sequential FHIR fetches dominate tool latency | ✅ MVP: `asyncio.gather` in `get_patient_card`, `get_calendar_today`, and the prewarm fanout |
 | No prompt caching | Thursday: enable Anthropic prompt caching for system prompt + per-patient context |
-| FHIR-layer cache absent | Sunday: introduce a session-scoped patient-card cache |
+| FHIR-layer cache absent | ✅ MVP (dashboard): in-process TTL cache + lifespan prewarm; agent tools still hit FHIR cold (Thursday) |
+| OpenEMR serializes FHIR responses on the server side | Documented bottleneck — caching renders it moot for repeat reads; production needs PHP-FPM tuning + connection pooling |
 | OpenEMR session storage is FS-based | Production-readiness gap: switch to Redis-backed sessions |
 
 ---

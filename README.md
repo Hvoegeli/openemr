@@ -134,8 +134,8 @@ This is the same mechanism we used for the MVP "deployed app" link above.
 
 | Sprint gate | Date | What's in |
 |---|---|---|
-| **MVP (this submission)** | 2026-04-28 | Forked + deployed OpenEMR, Stage 3-5 docs, working local agent against Cohen, demo video |
-| **Early submission** | 2026-04-30 | Deployed agent on same infra, eval framework (~140 cases), LangSmith observability, app-layer auth, audit-log Postgres |
+| **MVP (this submission)** | 2026-04-28 | Forked + deployed OpenEMR, Stage 3-5 docs, working agent against Cohen, cookie-session login, SSE streaming, dashboard TTL cache + startup prewarm, citation-click navigation, demo video |
+| **Early submission** | 2026-04-30 | Deployed agent on Fly.io same-infra, eval framework (~140 cases), LangSmith observability, audit-log Postgres, prompt caching, role mapping (physician/nurse/resident), Clinical Notes → encounter SOAP note round trip |
 | **Final** | 2026-05-03 | `clinical_rules` tool, Use Case C, cost analysis (100/1K/10K/100K), social post, production-readiness gaps closed |
 
 ---
