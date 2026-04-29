@@ -1,0 +1,29 @@
+{
+  "case_id": "typo_recovery",
+  "patient_id": null,
+  "recorded_at": "2026-04-29T20:16:57+00:00",
+  "agent_sha": "ba182da8b",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "Catch me up on Roberst.",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Roberst"
+          },
+          "result_data": {
+            "found": false,
+            "query": "Roberst"
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "No patient found for \"Roberst.\" This may be a typo \u2014 did you mean **Roberts**? If so, I can search again with the corrected spelling. Please confirm the name and I'll pull the chart right away."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

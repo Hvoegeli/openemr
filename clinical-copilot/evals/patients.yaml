@@ -1,0 +1,78 @@
+# Logical demo-patient registry for the eval suite.
+#
+# Cases declare a `patient_selector` (e.g. `tag: no_bp_charted`); the runner
+# expands that to a list of patient ids by looking here. When you seed a new
+# demo patient (see scripts/seed_*.py), add a row below with appropriate
+# tags so existing cases can exercise it.
+#
+# Tags are documentation-driven (i.e. you assert here what the patient's data
+# looks like). The runner trusts the tag → snapshot. If you change the
+# underlying seed data, refresh tags here AND re-record snapshots.
+
+version: 1
+patients:
+  - id: cohen
+    fname: Nora
+    lname: Cohen
+    dob: "1967-06-04"
+    tags:
+      - has_problems
+      - has_meds
+      - has_active_encounter
+      - has_allergies
+      - has_anticoagulant
+      - has_complex_med_list
+      - has_renal_disease
+      - has_diabetes
+      - has_htn
+      - no_bp_charted               # Cohen seed has vitals only on encounter — used by B1 cases
+    notes: "HTN / T2DM / CKD3 / AFib on Lisinopril / Metformin / Apixaban / Atorvastatin."
+
+  - id: roberts
+    fname: Marcus
+    lname: Roberts
+    dob: "1948-03-22"
+    tags:
+      - has_problems
+      - has_meds
+      - has_active_encounter
+      - has_allergies
+      - has_anticoagulant
+      - has_complex_med_list
+      - has_renal_disease
+      - has_heart_failure
+      - has_afib
+      - has_copd
+      - has_bp_charted
+    notes: "78yo M, decompensated HFrEF (LVEF 25%), on Apixaban."
+
+  - id: patel
+    fname: Anjali
+    lname: Patel
+    dob: "1942-09-08"
+    tags:
+      - has_problems
+      - has_meds
+      - has_active_encounter
+      - has_allergies
+      - has_complex_med_list
+      - has_renal_disease
+      - has_dementia
+      - has_iv_meds
+      - has_bp_charted
+    notes: "83yo F, urosepsis, mild dementia, CKD3."
+
+  - id: hale
+    fname: Liam
+    lname: Hale
+    dob: "2009-11-14"
+    tags:
+      - has_problems
+      - has_meds
+      - has_active_encounter
+      - is_pediatric
+      - nkda
+      - no_anticoagulant
+      - has_minimal_chart
+      - has_bp_charted
+    notes: "16yo M, distal radius fracture, otherwise healthy."

@@ -149,3 +149,16 @@ repos:
     language: system
     stages:
     - commit-msg
+
+  # Clinical Co-Pilot eval suite — deterministic snapshot replay.
+  # Runs only when clinical-copilot/ files changed in the push range.
+  # Goldens must be 100%, labeled must be ≥ 90%, or the push is blocked.
+  # Bypass in emergencies with `git push --no-verify` (don't make a habit of it).
+  - id: clinical-copilot-evals
+    name: Clinical Co-Pilot eval gate
+    entry: bash -c 'cd clinical-copilot && PYTHONPATH=. uv run python -m evals.runner --gate'
+    language: system
+    pass_filenames: false
+    stages:
+    - pre-push
+    files: ^clinical-copilot/

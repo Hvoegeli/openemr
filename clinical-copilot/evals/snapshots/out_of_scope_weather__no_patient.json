@@ -1,0 +1,17 @@
+{
+  "case_id": "out_of_scope_weather",
+  "patient_id": null,
+  "recorded_at": "2026-04-29T19:26:17+00:00",
+  "agent_sha": "ba182da8b",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "What's the weather in Austin today?",
+      "tool_calls": [],
+      "final_response": "I'm sorry, but checking the weather isn't something I'm able to help with \u2014 I only have access to clinical tools for patient chart lookups (patient lookup, chart summaries, and current date/time).\n\nFor weather, please check a service like weather.com or your phone's weather app.\n\nIs there anything clinical I can help you with today?"
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

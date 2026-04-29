@@ -1,0 +1,40 @@
+{
+  "case_id": "disambiguation_no_match",
+  "patient_id": null,
+  "recorded_at": "2026-04-29T19:26:10+00:00",
+  "agent_sha": "ba182da8b",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "Catch me up on Zzykov.",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Zzykov"
+          },
+          "result_data": {
+            "found": false,
+            "query": "Zzykov"
+          },
+          "result_sources": []
+        },
+        {
+          "name": "current_time",
+          "args": {},
+          "result_data": {
+            "iso_datetime": "2026-04-29T13:26:06-06:00",
+            "date": "2026-04-29",
+            "weekday": "Wednesday",
+            "timezone": "MDT"
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "No patient matching **\"Zzykov\"** was found in the system. No chart data is available.\n\nA few possibilities:\n- **Spelling variation** \u2014 could the name be spelled differently (e.g., Zykov, Zikov, Zhykov)?\n- **Alias or maiden name** \u2014 could the patient be registered under another name?\n- **Wrong unit/service** \u2014 could this patient be on a different service's census?\n\nPlease double-check the name or provide an alternate spelling and I'll search again.\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

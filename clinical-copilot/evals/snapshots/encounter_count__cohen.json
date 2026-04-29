@@ -1,0 +1,282 @@
+{
+  "case_id": "encounter_count",
+  "patient_id": "cohen",
+  "recorded_at": "2026-04-29T20:04:27+00:00",
+  "agent_sha": "ba182da8b",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "How many encounters has Cohen had?",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Cohen"
+          },
+          "result_data": {
+            "found": true,
+            "patient_id": "a1a6044b-c6af-40a4-80aa-4c5ce61014da",
+            "name": "Nora Cohen",
+            "alternatives": []
+          },
+          "result_sources": [
+            "Patient/a1a6044b-c6af-40a4-80aa-4c5ce61014da"
+          ]
+        },
+        {
+          "name": "get_patient_card",
+          "args": {
+            "patient_id": "a1a6044b-c6af-40a4-80aa-4c5ce61014da"
+          },
+          "result_data": {
+            "name": "Nora Cohen",
+            "mrn": "a1a6044b-c6af-40a4-80aa-4c5ce61014da",
+            "age": 58,
+            "sex": "female",
+            "current_encounter": {
+              "id": "a1a70d4b-e1da-4b99-9833-ce5c4e37ac3a",
+              "meta": {
+                "versionId": "1",
+                "lastUpdated": "2026-04-28T15:02:26+00:00"
+              },
+              "resourceType": "Encounter",
+              "identifier": [
+                {
+                  "system": "urn:uuid:a1a70d4b-e1da-4b99-9833-ce5c4e37ac3a",
+                  "value": "a1a70d4b-e1da-4b99-9833-ce5c4e37ac3a"
+                }
+              ],
+              "status": "finished",
+              "class": {
+                "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                "code": "AMB",
+                "display": "ambulatory"
+              },
+              "type": [
+                {
+                  "coding": [
+                    {
+                      "system": "http://snomed.info/sct",
+                      "code": "185349003",
+                      "display": "Encounter for check up (procedure)"
+                    }
+                  ]
+                }
+              ],
+              "subject": {
+                "reference": "Patient/a1a6044b-c6af-40a4-80aa-4c5ce61014da",
+                "type": "Patient"
+              },
+              "period": {
+                "start": "2026-04-28T00:00:00+00:00"
+              },
+              "reasonCode": [
+                {
+                  "text": "Hypertensive urgency, headache, mild SOB"
+                }
+              ],
+              "location": [
+                {
+                  "location": {
+                    "reference": "Location/a1a5fe25-925d-47eb-8d71-c69e07627009",
+                    "type": "Location"
+                  }
+                }
+              ],
+              "serviceProvider": {
+                "reference": "Organization/a1a5fdf7-1f80-4540-8179-fca12eef887c",
+                "type": "Organization"
+              }
+            },
+            "allergies": [
+              {
+                "id": "a1a70d41-c308-4ba9-8fff-a3838ce2111c",
+                "substance": "Penicillin",
+                "reaction": [],
+                "severity": null
+              },
+              {
+                "id": "a1a70d43-104b-4f47-8412-41a4d2268649",
+                "substance": "Sulfa drugs",
+                "reaction": [],
+                "severity": null
+              }
+            ],
+            "active_problems": [
+              {
+                "id": "a1a70d44-1ac7-4754-a3f6-bd1a7964f6a5",
+                "name": "Hypertension",
+                "onset": "2024-10-01T00:00:00+00:00"
+              },
+              {
+                "id": "a1a70d45-df56-4dee-a9f3-10763f962cd8",
+                "name": "Type 2 diabetes mellitus",
+                "onset": "2023-05-12T00:00:00+00:00"
+              },
+              {
+                "id": "a1a70d46-d4bc-4aeb-a425-d2921d4ae4fc",
+                "name": "Chronic kidney disease, stage 3",
+                "onset": "2025-02-08T00:00:00+00:00"
+              },
+              {
+                "id": "a1a70d47-b5fb-4c1b-b451-2949df847873",
+                "name": "Atrial fibrillation",
+                "onset": "2024-11-20T00:00:00+00:00"
+              }
+            ],
+            "active_medications": [
+              {
+                "id": "a1a70d6e-4239-4c13-9f14-1c7214fb5542",
+                "drug": "Lisinopril 20 mg PO daily",
+                "dose_text": null,
+                "started": "2026-04-28T15:02:24+00:00"
+              },
+              {
+                "id": "a1a70d6e-44ca-4308-9bc5-fa611c4c2962",
+                "drug": "Metformin 1000 mg PO BID",
+                "dose_text": null,
+                "started": "2026-04-28T15:02:25+00:00"
+              },
+              {
+                "id": "a1a70d6e-44d2-4353-8220-48d023721596",
+                "drug": "Apixaban 5 mg PO BID",
+                "dose_text": null,
+                "started": "2026-04-28T15:02:25+00:00"
+              },
+              {
+                "id": "a1a70d6e-44d8-419f-9ac3-1e020ec9f8fc",
+                "drug": "Atorvastatin 40 mg PO QHS",
+                "dose_text": null,
+                "started": "2026-04-28T15:02:26+00:00"
+              }
+            ],
+            "recent_vitals": [
+              {
+                "id": "a1a70d4c-e0cb-4b59-8355-3049f6ee5845",
+                "name": "Vital signs, weight, height, head circumference, oxygen saturation and BMI panel",
+                "value": null,
+                "unit": null,
+                "time": "2026-04-28T15:02:27+00:00"
+              },
+              {
+                "id": "a1a70d4c-e0d6-4e6f-9f11-ebdc5b280053",
+                "name": "Respiratory Rate",
+                "value": 16,
+                "unit": "/min",
+                "time": "2026-04-28T15:02:27+00:00"
+              },
+              {
+                "id": "a1a70d4c-e0dc-4394-92e4-2efa9bfbc414",
+                "name": "Heart rate",
+                "value": 78,
+                "unit": "/min",
+                "time": "2026-04-28T15:02:27+00:00"
+              },
+              {
+                "id": "a1a70d4c-e0e2-497b-8721-d84f460466a2",
+                "name": "oxygen_saturation",
+                "value": 97,
+                "unit": "%",
+                "time": "2026-04-28T15:02:27+00:00"
+              },
+              {
+                "id": "a1a70d4c-e0ee-42d8-837c-2d2e39715215",
+                "name": "oxygen_saturation",
+                "value": null,
+                "unit": null,
+                "time": "2026-04-28T15:02:27+00:00"
+              },
+              {
+                "id": "a1a70d4c-e0f4-4a5d-9e40-b388d7300b6b",
+                "name": "Body Temperature",
+                "value": 98.6,
+                "unit": "degF",
+                "time": "2026-04-28T15:02:27+00:00"
+              },
+              {
+                "id": "a1a70d4c-e0fa-40b3-9844-d1eda0a18cb5",
+                "name": "Temperature Location",
+                "value": null,
+                "unit": null,
+                "time": "2026-04-28T15:02:27+00:00"
+              },
+              {
+                "id": "a1a70d4c-e0ff-42db-9cc2-1b85cbf9ac63",
+                "name": "Body height",
+                "value": 65,
+                "unit": "in_i",
+                "time": "2026-04-28T15:02:27+00:00"
+              },
+              {
+                "id": "a1a70d4c-e105-4e76-8281-eb5f025ffd23",
+                "name": "Head Occipital-frontal circumference",
+                "value": null,
+                "unit": null,
+                "time": "2026-04-28T15:02:27+00:00"
+              },
+              {
+                "id": "a1a70d4c-e10a-4ee9-94b0-2911eeca2f92",
+                "name": "Body weight",
+                "value": 175,
+                "unit": "lb_av",
+                "time": "2026-04-28T15:02:27+00:00"
+              }
+            ]
+          },
+          "result_sources": [
+            "Patient/a1a6044b-c6af-40a4-80aa-4c5ce61014da",
+            "Encounter/a1a70d4b-e1da-4b99-9833-ce5c4e37ac3a",
+            "AllergyIntolerance/a1a70d41-c308-4ba9-8fff-a3838ce2111c",
+            "AllergyIntolerance/a1a70d43-104b-4f47-8412-41a4d2268649",
+            "Condition/a1a70d44-1ac7-4754-a3f6-bd1a7964f6a5",
+            "Condition/a1a70d45-df56-4dee-a9f3-10763f962cd8",
+            "Condition/a1a70d46-d4bc-4aeb-a425-d2921d4ae4fc",
+            "Condition/a1a70d47-b5fb-4c1b-b451-2949df847873",
+            "MedicationRequest/a1a70d6e-4239-4c13-9f14-1c7214fb5542",
+            "MedicationRequest/a1a70d6e-44ca-4308-9bc5-fa611c4c2962",
+            "MedicationRequest/a1a70d6e-44d2-4353-8220-48d023721596",
+            "MedicationRequest/a1a70d6e-44d8-419f-9ac3-1e020ec9f8fc",
+            "Observation/a1a70d4c-e0cb-4b59-8355-3049f6ee5845",
+            "Observation/a1a70d4c-e0d6-4e6f-9f11-ebdc5b280053",
+            "Observation/a1a70d4c-e0dc-4394-92e4-2efa9bfbc414",
+            "Observation/a1a70d4c-e0e2-497b-8721-d84f460466a2",
+            "Observation/a1a70d4c-e0ee-42d8-837c-2d2e39715215",
+            "Observation/a1a70d4c-e0f4-4a5d-9e40-b388d7300b6b",
+            "Observation/a1a70d4c-e0fa-40b3-9844-d1eda0a18cb5",
+            "Observation/a1a70d4c-e0ff-42db-9cc2-1b85cbf9ac63",
+            "Observation/a1a70d4c-e105-4e76-8281-eb5f025ffd23",
+            "Observation/a1a70d4c-e10a-4ee9-94b0-2911eeca2f92"
+          ]
+        }
+      ],
+      "final_response": "The chart for Nora Cohen [Patient/a1a6044b-c6af-40a4-80aa-4c5ce61014da] surfaces **1 encounter** [Encounter/a1a70d4b-e1da-4b99-9833-ce5c4e37ac3a]. The chart tool only returns the current/most recent encounter \u2014 a full encounter history is not available from this toolset, so a lifetime count cannot be confirmed.\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [
+    "Patient/a1a6044b-c6af-40a4-80aa-4c5ce61014da",
+    "Patient/a1a6044b-c6af-40a4-80aa-4c5ce61014da",
+    "Encounter/a1a70d4b-e1da-4b99-9833-ce5c4e37ac3a",
+    "AllergyIntolerance/a1a70d41-c308-4ba9-8fff-a3838ce2111c",
+    "AllergyIntolerance/a1a70d43-104b-4f47-8412-41a4d2268649",
+    "Condition/a1a70d44-1ac7-4754-a3f6-bd1a7964f6a5",
+    "Condition/a1a70d45-df56-4dee-a9f3-10763f962cd8",
+    "Condition/a1a70d46-d4bc-4aeb-a425-d2921d4ae4fc",
+    "Condition/a1a70d47-b5fb-4c1b-b451-2949df847873",
+    "MedicationRequest/a1a70d6e-4239-4c13-9f14-1c7214fb5542",
+    "MedicationRequest/a1a70d6e-44ca-4308-9bc5-fa611c4c2962",
+    "MedicationRequest/a1a70d6e-44d2-4353-8220-48d023721596",
+    "MedicationRequest/a1a70d6e-44d8-419f-9ac3-1e020ec9f8fc",
+    "Observation/a1a70d4c-e0cb-4b59-8355-3049f6ee5845",
+    "Observation/a1a70d4c-e0d6-4e6f-9f11-ebdc5b280053",
+    "Observation/a1a70d4c-e0dc-4394-92e4-2efa9bfbc414",
+    "Observation/a1a70d4c-e0e2-497b-8721-d84f460466a2",
+    "Observation/a1a70d4c-e0ee-42d8-837c-2d2e39715215",
+    "Observation/a1a70d4c-e0f4-4a5d-9e40-b388d7300b6b",
+    "Observation/a1a70d4c-e0fa-40b3-9844-d1eda0a18cb5",
+    "Observation/a1a70d4c-e0ff-42db-9cc2-1b85cbf9ac63",
+    "Observation/a1a70d4c-e105-4e76-8281-eb5f025ffd23",
+    "Observation/a1a70d4c-e10a-4ee9-94b0-2911eeca2f92"
+  ],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

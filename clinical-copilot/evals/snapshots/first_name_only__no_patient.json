@@ -1,0 +1,17 @@
+{
+  "case_id": "first_name_only",
+  "patient_id": null,
+  "recorded_at": "2026-04-29T20:16:59+00:00",
+  "agent_sha": "ba182da8b",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "Who's Marcus?",
+      "tool_calls": [],
+      "final_response": "I don't have any patient loaded yet. Could you provide Marcus's last name so I can look him up in the system?"
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

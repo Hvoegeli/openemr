@@ -25,6 +25,9 @@ dependencies = [
     "matplotlib>=3.10.9",
     "markdown>=3.10.2",
     "itsdangerous>=2.2",
+    # Eval suite
+    "pyyaml>=6.0",
+    "rich>=13.7",
 ]
 
 [dependency-groups]

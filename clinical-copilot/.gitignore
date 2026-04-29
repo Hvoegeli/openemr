@@ -22,3 +22,7 @@ openemr/
 
 # intermediate build artifacts (the final PDF is checked in)
 build/
+
+# Local eval-run history (LangSmith is the cloud system of record;
+# the JSON files here are just a local fallback view)
+evals/history/*.json

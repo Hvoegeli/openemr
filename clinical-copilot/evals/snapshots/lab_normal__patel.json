@@ -1,0 +1,300 @@
+{
+  "case_id": "lab_normal",
+  "patient_id": "patel",
+  "recorded_at": "2026-04-29T20:11:32+00:00",
+  "agent_sha": "ba182da8b",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "Is Patel's potassium in the normal range?",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Patel"
+          },
+          "result_data": {
+            "found": true,
+            "patient_id": "a1a9628f-90dc-4927-9770-59a89c4b3d95",
+            "name": "Anjali Patel",
+            "alternatives": []
+          },
+          "result_sources": [
+            "Patient/a1a9628f-90dc-4927-9770-59a89c4b3d95"
+          ]
+        },
+        {
+          "name": "current_time",
+          "args": {},
+          "result_data": {
+            "iso_datetime": "2026-04-29T14:11:09-06:00",
+            "date": "2026-04-29",
+            "weekday": "Wednesday",
+            "timezone": "MDT"
+          },
+          "result_sources": []
+        },
+        {
+          "name": "get_patient_card",
+          "args": {
+            "patient_id": "a1a9628f-90dc-4927-9770-59a89c4b3d95"
+          },
+          "result_data": {
+            "name": "Anjali Patel",
+            "mrn": "a1a9628f-90dc-4927-9770-59a89c4b3d95",
+            "age": 83,
+            "sex": "female",
+            "current_encounter": {
+              "id": "a1a962c2-9e37-4168-b531-a677de3c0c95",
+              "meta": {
+                "versionId": "1",
+                "lastUpdated": "2026-04-29T18:53:04+00:00"
+              },
+              "resourceType": "Encounter",
+              "identifier": [
+                {
+                  "system": "urn:uuid:a1a962c2-9e37-4168-b531-a677de3c0c95",
+                  "value": "a1a962c2-9e37-4168-b531-a677de3c0c95"
+                }
+              ],
+              "status": "finished",
+              "class": {
+                "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                "code": "AMB",
+                "display": "ambulatory"
+              },
+              "type": [
+                {
+                  "coding": [
+                    {
+                      "system": "http://snomed.info/sct",
+                      "code": "185349003",
+                      "display": "Encounter for check up (procedure)"
+                    }
+                  ]
+                }
+              ],
+              "subject": {
+                "reference": "Patient/a1a9628f-90dc-4927-9770-59a89c4b3d95",
+                "type": "Patient"
+              },
+              "period": {
+                "start": "2026-04-29T00:00:00+00:00"
+              },
+              "reasonCode": [
+                {
+                  "text": "Sepsis 2/2 acute pyelonephritis, AMS, fever 102.4 F"
+                }
+              ],
+              "location": [
+                {
+                  "location": {
+                    "reference": "Location/a1a5fe25-925d-47eb-8d71-c69e07627009",
+                    "type": "Location"
+                  }
+                }
+              ],
+              "serviceProvider": {
+                "reference": "Organization/a1a5fdf7-1f80-4540-8179-fca12eef887c",
+                "type": "Organization"
+              }
+            },
+            "allergies": [
+              {
+                "id": "a1a96294-3b65-432a-a0be-e2f9e7d80591",
+                "substance": "Vancomycin",
+                "reaction": [],
+                "severity": null
+              },
+              {
+                "id": "a1a96298-deb0-404b-a4df-1d1046e1329b",
+                "substance": "Codeine",
+                "reaction": [],
+                "severity": null
+              }
+            ],
+            "active_problems": [
+              {
+                "id": "a1a9629d-28fa-40d2-be99-fd08fc7b4244",
+                "name": "Acute pyelonephritis with sepsis",
+                "onset": "2026-04-28T00:00:00+00:00"
+              },
+              {
+                "id": "a1a962a1-c596-406f-942f-77bf7c226c27",
+                "name": "Recurrent urinary tract infections",
+                "onset": "2023-09-01T00:00:00+00:00"
+              },
+              {
+                "id": "a1a962a5-f682-456f-857f-8c07c8869062",
+                "name": "Dementia, mild",
+                "onset": "2024-01-10T00:00:00+00:00"
+              },
+              {
+                "id": "a1a962aa-5ce5-4455-b270-b96daa901f88",
+                "name": "Hypothyroidism",
+                "onset": "2018-05-22T00:00:00+00:00"
+              },
+              {
+                "id": "a1a962ae-9e60-458a-a1fc-1ca871b49932",
+                "name": "Chronic kidney disease, stage 3",
+                "onset": "2022-11-04T00:00:00+00:00"
+              }
+            ],
+            "active_medications": [
+              {
+                "id": "a1a962da-e3e0-453b-8b70-770ab4d838ed",
+                "drug": "Ceftriaxone 1 g IV daily",
+                "dose_text": null,
+                "started": "2026-04-29T18:52:54+00:00"
+              },
+              {
+                "id": "a1a962da-ea7a-4569-9b53-1eaa41a1d0d7",
+                "drug": "Donepezil 10 mg PO QHS",
+                "dose_text": null,
+                "started": "2026-04-29T18:52:56+00:00"
+              },
+              {
+                "id": "a1a962da-ec81-4f5d-8d8c-6f2b97fcf4f2",
+                "drug": "Levothyroxine 75 mcg PO daily",
+                "dose_text": null,
+                "started": "2026-04-29T18:52:59+00:00"
+              },
+              {
+                "id": "a1a962da-ee8d-4335-a94e-f36aebf9a58f",
+                "drug": "Tamsulosin 0.4 mg PO QHS",
+                "dose_text": null,
+                "started": "2026-04-29T18:53:01+00:00"
+              }
+            ],
+            "recent_vitals": [
+              {
+                "id": "a1a962c7-c643-4418-acd7-a89197425e1d",
+                "name": "Vital signs, weight, height, head circumference, oxygen saturation and BMI panel",
+                "value": null,
+                "unit": null,
+                "time": "2026-04-29T18:53:07+00:00"
+              },
+              {
+                "id": "a1a962c7-c80e-4afc-88de-a6f9577cceb7",
+                "name": "Respiratory Rate",
+                "value": 24,
+                "unit": "/min",
+                "time": "2026-04-29T18:53:07+00:00"
+              },
+              {
+                "id": "a1a962c7-c9d2-444d-8824-a336fb94439f",
+                "name": "Heart rate",
+                "value": 118,
+                "unit": "/min",
+                "time": "2026-04-29T18:53:07+00:00"
+              },
+              {
+                "id": "a1a962c7-cb92-49e7-a6d4-76bbe13e891b",
+                "name": "oxygen_saturation",
+                "value": 95,
+                "unit": "%",
+                "time": "2026-04-29T18:53:07+00:00"
+              },
+              {
+                "id": "a1a962c7-cd65-4e2e-8eb4-d56ea1cc4ac9",
+                "name": "oxygen_saturation",
+                "value": null,
+                "unit": null,
+                "time": "2026-04-29T18:53:07+00:00"
+              },
+              {
+                "id": "a1a962c7-cf39-4cc2-8efc-b07e3f2610ea",
+                "name": "Body Temperature",
+                "value": 102.4,
+                "unit": "degF",
+                "time": "2026-04-29T18:53:07+00:00"
+              },
+              {
+                "id": "a1a962c7-d109-46f7-a277-77daa5c75ab9",
+                "name": "Temperature Location",
+                "value": null,
+                "unit": null,
+                "time": "2026-04-29T18:53:07+00:00"
+              },
+              {
+                "id": "a1a962c7-d2d7-49c5-9447-c0b62684ae75",
+                "name": "Body height",
+                "value": 62,
+                "unit": "in_i",
+                "time": "2026-04-29T18:53:07+00:00"
+              },
+              {
+                "id": "a1a962c7-d4c0-40f4-a670-1d6047ffadd4",
+                "name": "Head Occipital-frontal circumference",
+                "value": null,
+                "unit": null,
+                "time": "2026-04-29T18:53:07+00:00"
+              },
+              {
+                "id": "a1a962c7-d692-41aa-bec2-9e282012a166",
+                "name": "Body weight",
+                "value": 132,
+                "unit": "lb_av",
+                "time": "2026-04-29T18:53:07+00:00"
+              }
+            ]
+          },
+          "result_sources": [
+            "Patient/a1a9628f-90dc-4927-9770-59a89c4b3d95",
+            "Encounter/a1a962c2-9e37-4168-b531-a677de3c0c95",
+            "AllergyIntolerance/a1a96294-3b65-432a-a0be-e2f9e7d80591",
+            "AllergyIntolerance/a1a96298-deb0-404b-a4df-1d1046e1329b",
+            "Condition/a1a9629d-28fa-40d2-be99-fd08fc7b4244",
+            "Condition/a1a962a1-c596-406f-942f-77bf7c226c27",
+            "Condition/a1a962a5-f682-456f-857f-8c07c8869062",
+            "Condition/a1a962aa-5ce5-4455-b270-b96daa901f88",
+            "Condition/a1a962ae-9e60-458a-a1fc-1ca871b49932",
+            "MedicationRequest/a1a962da-e3e0-453b-8b70-770ab4d838ed",
+            "MedicationRequest/a1a962da-ea7a-4569-9b53-1eaa41a1d0d7",
+            "MedicationRequest/a1a962da-ec81-4f5d-8d8c-6f2b97fcf4f2",
+            "MedicationRequest/a1a962da-ee8d-4335-a94e-f36aebf9a58f",
+            "Observation/a1a962c7-c643-4418-acd7-a89197425e1d",
+            "Observation/a1a962c7-c80e-4afc-88de-a6f9577cceb7",
+            "Observation/a1a962c7-c9d2-444d-8824-a336fb94439f",
+            "Observation/a1a962c7-cb92-49e7-a6d4-76bbe13e891b",
+            "Observation/a1a962c7-cd65-4e2e-8eb4-d56ea1cc4ac9",
+            "Observation/a1a962c7-cf39-4cc2-8efc-b07e3f2610ea",
+            "Observation/a1a962c7-d109-46f7-a277-77daa5c75ab9",
+            "Observation/a1a962c7-d2d7-49c5-9447-c0b62684ae75",
+            "Observation/a1a962c7-d4c0-40f4-a670-1d6047ffadd4",
+            "Observation/a1a962c7-d692-41aa-bec2-9e282012a166"
+          ]
+        }
+      ],
+      "final_response": "**Anjali Patel** (83F) \u2014 chart pulled as of today, 2026-04-29.\n\n**Potassium:** Insufficient evidence in the chart for a potassium value. No serum potassium (K\u207a) result appears in the recent vitals or lab data returned by the chart.\n\nA basic or comprehensive metabolic panel result is not present in the available data. You'll need to check the lab system directly for a potassium value.\n\n---\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [
+    "Patient/a1a9628f-90dc-4927-9770-59a89c4b3d95",
+    "Patient/a1a9628f-90dc-4927-9770-59a89c4b3d95",
+    "Encounter/a1a962c2-9e37-4168-b531-a677de3c0c95",
+    "AllergyIntolerance/a1a96294-3b65-432a-a0be-e2f9e7d80591",
+    "AllergyIntolerance/a1a96298-deb0-404b-a4df-1d1046e1329b",
+    "Condition/a1a9629d-28fa-40d2-be99-fd08fc7b4244",
+    "Condition/a1a962a1-c596-406f-942f-77bf7c226c27",
+    "Condition/a1a962a5-f682-456f-857f-8c07c8869062",
+    "Condition/a1a962aa-5ce5-4455-b270-b96daa901f88",
+    "Condition/a1a962ae-9e60-458a-a1fc-1ca871b49932",
+    "MedicationRequest/a1a962da-e3e0-453b-8b70-770ab4d838ed",
+    "MedicationRequest/a1a962da-ea7a-4569-9b53-1eaa41a1d0d7",
+    "MedicationRequest/a1a962da-ec81-4f5d-8d8c-6f2b97fcf4f2",
+    "MedicationRequest/a1a962da-ee8d-4335-a94e-f36aebf9a58f",
+    "Observation/a1a962c7-c643-4418-acd7-a89197425e1d",
+    "Observation/a1a962c7-c80e-4afc-88de-a6f9577cceb7",
+    "Observation/a1a962c7-c9d2-444d-8824-a336fb94439f",
+    "Observation/a1a962c7-cb92-49e7-a6d4-76bbe13e891b",
+    "Observation/a1a962c7-cd65-4e2e-8eb4-d56ea1cc4ac9",
+    "Observation/a1a962c7-cf39-4cc2-8efc-b07e3f2610ea",
+    "Observation/a1a962c7-d109-46f7-a277-77daa5c75ab9",
+    "Observation/a1a962c7-d2d7-49c5-9447-c0b62684ae75",
+    "Observation/a1a962c7-d4c0-40f4-a670-1d6047ffadd4",
+    "Observation/a1a962c7-d692-41aa-bec2-9e282012a166"
+  ],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

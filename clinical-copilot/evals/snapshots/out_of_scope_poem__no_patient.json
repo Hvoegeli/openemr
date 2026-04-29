@@ -1,0 +1,17 @@
+{
+  "case_id": "out_of_scope_poem",
+  "patient_id": null,
+  "recorded_at": "2026-04-29T19:26:14+00:00",
+  "agent_sha": "ba182da8b",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "Write me a short poem about cats.",
+      "tool_calls": [],
+      "final_response": "I'm here to help you with clinical tasks \u2014 things like patient chart lookups, pre-round summaries, and sign-out drafting. Writing poems is outside the scope of what I can do as your clinical co-pilot!\n\nIf you have a patient you'd like to round on or a chart you need pulled up, just say the word. For example:\n- *\"Pull up the chart for patient Smith.\"*\n- *\"Give me a pre-round summary for Johnson.\"*\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}
