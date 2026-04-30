@@ -186,7 +186,11 @@ class OpenEMRWriter:
             raise OpenEMRWriteError(f"vitals validation failed: {val}")
         data = payload.get("data") if isinstance(payload, dict) else None
         flat = data if isinstance(data, dict) else payload
-        vid = flat.get("id") if isinstance(flat, dict) else None
+        # OpenEMR's vitals POST returns the new row as `vid` (form_vitals
+        # primary key); patient/encounter writes use `id`. Try both.
+        vid = None
+        if isinstance(flat, dict):
+            vid = flat.get("vid") or flat.get("id") or flat.get("uuid")
         log.info(
             "wrote vitals to OpenEMR patient=%s encounter_eid=%s vital_id=%s",
             patient_uuid, eid, vid,

@@ -414,20 +414,45 @@ _VITAL_NAME_TO_KEY = {
 }
 
 
-def _decorate_card_vitals(card_data: dict, notes: list) -> dict:
+_BP_LABEL = {"bp_systolic": "Systolic BP", "bp_diastolic": "Diastolic BP"}
+
+
+def _decorate_card_vitals(card_data: dict, notes: list, trends: dict) -> dict:
     """Attach clinical-note provenance to FHIR vital observations and inject
     any unsynced note readings as additional rows.
 
+    The FHIR adapter's `_format_vital` flattens an Observation by reading
+    valueQuantity directly — that drops BP because OpenEMR returns it as a
+    composite (panel with two `component` entries). We pull BP rows out of
+    the already-parsed trends data so they show up in the list.
+
     Returns a new dict with:
-      - recent_vitals: FHIR-as-before, each row optionally carrying a
-        ``from_note`` block (author, finalized_at, note_id) when the
-        reading was written by a finalized clinical note we already
-        pushed to the EHR.
+      - recent_vitals: FHIR rows, each optionally carrying a ``from_note``
+        block (author, finalized_at, note_id) when the reading was written
+        by a finalized clinical note we already pushed to the EHR.
       - ``note_only_vitals``: readings from notes whose FHIR push failed
         (or hasn't happened yet) — kept so they still surface on the card.
     """
     from datetime import datetime
     fhir_rows = list(card_data.get("recent_vitals") or [])
+
+    # Backfill BP rows that the flat-formatter dropped because the
+    # underlying Observation was a composite.
+    existing_names = {(r.get("name") or "").lower() for r in fhir_rows}
+    bp_already_listed = any("systolic" in n or "diastolic" in n for n in existing_names)
+    if not bp_already_listed:
+        for canonical in ("bp_systolic", "bp_diastolic"):
+            for pt in (trends.get(canonical) or []):
+                src = pt.get("source") or ""
+                if not src.startswith("Observation/"):
+                    continue
+                fhir_rows.append({
+                    "id": src.split("/", 1)[1],
+                    "name": _BP_LABEL[canonical],
+                    "value": pt.get("value"),
+                    "unit": pt.get("unit"),
+                    "time": pt.get("date"),
+                })
 
     synced_notes = [n for n in notes if n.fhir_synced_at]
     unsynced_finals = [n for n in notes if n.status == "final" and not n.fhir_synced_at]
@@ -490,7 +515,7 @@ async def patient_card(patient_id: str, _user: str = Depends(current_user)) -> d
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
     notes = app.state.clinical_notes.list_for_patient(patient_id, now=now_utc())
-    decorated = _decorate_card_vitals(card_data, notes)
+    decorated = _decorate_card_vitals(card_data, notes, trends_data["trends"])
     return {**decorated, "current_vitals": trends_data["current"]}
 
 
