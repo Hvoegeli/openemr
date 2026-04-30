@@ -1042,7 +1042,11 @@
         if (key === 'unknown') {
           headerLabel = 'Time unknown';
         } else {
-          const d = new Date(key + ':00');
+          // Use the first row's full ISO (with TZ) so JS converts UTC →
+          // browser-local correctly. `key` itself was sliced to YYYY-MM-DDTHH:MM
+          // for grouping, and JS treats a TZ-less date-time string as local —
+          // we'd render "8:33 PM" for a 20:33 UTC reading saved at 14:33 MST.
+          const d = new Date((rows[0] && rows[0].time) || (key + ':00Z'));
           headerLabel = isNaN(d.getTime())
             ? key
             : d.toLocaleString(undefined, {
