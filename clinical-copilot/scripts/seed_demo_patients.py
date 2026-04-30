@@ -49,6 +49,17 @@ BASE = os.environ.get("OPENEMR_BASE_URL", "https://localhost:9300")
 TOKEN_URL = f"{BASE}/oauth2/default/token"
 TODAY = date.today().isoformat()
 
+# Each profile gets a distinct admission time spread across the day so the
+# calendar dashboard shows them as four separate inpatients with realistic
+# admit timing rather than four overlapping 6 PM rows. UTC times here; the
+# UI renders in the viewer's local timezone.
+ADMIT_TIME = {
+    "roberts": "06:00:00",   # early-morning HF decompensation
+    "cohen":   "10:30:00",   # mid-morning hypertensive urgency
+    "patel":   "14:15:00",   # early-afternoon urosepsis admit
+    "hale":    "18:45:00",   # after-school injury / ED arrival
+}
+
 # Same scope set as seed_cohen.py + soap_note.crus (this script writes SOAP
 # notes; Cohen's seeder did not, so the existing seed client may need its
 # scope row extended for soap_note — see register_seed_client.py).
@@ -91,7 +102,7 @@ PROFILES: list[dict] = [
             "pc_catid": 5, "facility_id": 3, "billing_facility": 3,
             "sensitivity": "normal",
             "reason": "Acute decompensated heart failure, dyspnea, 8 lb weight gain in 5 days",
-            "date": TODAY, "onset_date": TODAY,
+            "date": f"{TODAY} {ADMIT_TIME['roberts']}", "onset_date": f"{TODAY} {ADMIT_TIME['roberts']}",
             "provider_id": 1, "class_code": "AMB",
         },
         "vitals": {
@@ -162,7 +173,7 @@ PROFILES: list[dict] = [
             "pc_catid": 5, "facility_id": 3, "billing_facility": 3,
             "sensitivity": "normal",
             "reason": "Sepsis 2/2 acute pyelonephritis, AMS, fever 102.4 F",
-            "date": TODAY, "onset_date": TODAY,
+            "date": f"{TODAY} {ADMIT_TIME['patel']}", "onset_date": f"{TODAY} {ADMIT_TIME['patel']}",
             "provider_id": 1, "class_code": "AMB",
         },
         "vitals": {
@@ -226,7 +237,7 @@ PROFILES: list[dict] = [
             "pc_catid": 5, "facility_id": 3, "billing_facility": 3,
             "sensitivity": "normal",
             "reason": "ED visit: fall from skateboard onto outstretched right hand, R wrist injury",
-            "date": TODAY, "onset_date": TODAY,
+            "date": f"{TODAY} {ADMIT_TIME['hale']}", "onset_date": f"{TODAY} {ADMIT_TIME['hale']}",
             "provider_id": 1, "class_code": "AMB",
         },
         "vitals": {
