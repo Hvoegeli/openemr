@@ -702,6 +702,27 @@
       }
     }
 
+    // Re-fetch a patient's documents and refresh the in-page buffer.
+    // Called after a clinical-note draft save or finalize so the
+    // Supporting Documents tab doesn't keep showing the pre-save snapshot.
+    async function refreshDocs(pid) {
+      if (!pid) return;
+      try {
+        const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/documents', { credentials: 'same-origin' });
+        if (!r.ok) return;
+        const docs = await r.json();
+        const e = buffer.get(pid) || {};
+        e.docs = docs;
+        buffer.set(pid, e);
+        if (activePatientId === pid && !tabDocs.classList.contains('hidden')) {
+          tabDocs.innerHTML = renderDocs(docs);
+          docsCount.textContent = (docs.items || []).length || '·';
+        } else if (activePatientId === pid) {
+          docsCount.textContent = (docs.items || []).length || '·';
+        }
+      } catch {}
+    }
+
     /* ── Selecting a patient (from calendar OR chat) ─────────────── */
     async function selectPatient(pid, opts = {}) {
       if (!pid) return;
@@ -1323,6 +1344,7 @@
           });
           if (r.ok) {
             savedMark.textContent = 'Draft saved · ' + new Date().toLocaleTimeString();
+            refreshDocs(pid);
           } else {
             const j = await r.json().catch(() => ({}));
             savedMark.textContent = 'Save failed: ' + (j.detail || r.status);
@@ -1368,6 +1390,7 @@
         const j = await r.json().catch(() => ({}));
         if (r.ok) {
           savedMark.textContent = 'Locked. Visible in Supporting Documents.';
+          refreshDocs(pid);
           // Reload the tab to show read-only state
           setTimeout(() => loadClinicalNotesTab(pid), 350);
         } else {
