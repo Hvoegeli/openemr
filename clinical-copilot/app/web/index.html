@@ -561,25 +561,6 @@
       40%  { background: #fef08a; outline: 2px solid #ca8a04; }
       100% { background: transparent; outline: 0 solid transparent; }
     }
-    .sources-inline {
-      margin-top: 0.55rem;
-      font-size: 0.72rem;
-      color: var(--muted);
-      border-top: 1px dashed var(--border);
-      padding-top: 0.5rem;
-      line-height: 1.6;
-    }
-    .sources-inline .src {
-      display: inline-block;
-      padding: 0.04rem 0.4rem;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      margin: 0 0.18rem 0.18rem 0;
-      background: var(--panel);
-      font-family: ui-monospace, "SF Mono", monospace;
-      font-size: 0.7rem;
-      color: var(--muted);
-    }
     #input-row {
       display: flex; gap: 0.5rem;
       padding: 0.6rem 1rem 0.75rem;
@@ -1521,10 +1502,6 @@
       bubble.appendChild(statusLine);
       const responseBox = document.createElement('div');
       bubble.appendChild(responseBox);
-      const sourcesBox = document.createElement('div');
-      sourcesBox.className = 'sources-inline';
-      sourcesBox.style.display = 'none';
-      bubble.appendChild(sourcesBox);
       log.appendChild(bubble);
       log.scrollTop = log.scrollHeight;
       setCtxStatus('Thinking…', 'live');
@@ -1582,12 +1559,6 @@
               lastValidationWarning = !!evt.validation_warning;
               lastPatientFromTurn = evt.patient_id;
               responseBox.innerHTML = decorateCitations(streamedText, new Set(lastSources));
-              if (lastSources.length) {
-                sourcesBox.innerHTML =
-                  '<strong>Sources cited (' + lastSources.length + ')</strong> ' +
-                  lastSources.map(s => '<span class="src">' + escapeHtml(s) + '</span>').join(' ');
-                sourcesBox.style.display = '';
-              }
               setCtxStatus(
                 lastValidationWarning ? 'Validation warning' : 'Validated',
                 lastValidationWarning ? 'warn' : 'live',
