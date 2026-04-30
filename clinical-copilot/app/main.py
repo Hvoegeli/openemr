@@ -54,7 +54,6 @@ from app.fhir.extras import get_calendar_today, get_supporting_documents  # noqa
 from app.fhir.writer import OpenEMRWriter, OpenEMRWriteError  # noqa: E402
 from app.observability import (  # noqa: E402
     TokenUsageCallback,
-    TraceStore,
     init_langsmith,
     new_request_trace,
     reset_current_trace,
@@ -66,6 +65,7 @@ from app.clinical_notes import (  # noqa: E402
     now_utc,
 )
 from app.vitals import collect_vital_trends, latest_per_vital  # noqa: E402
+from app.observability_db import SqliteTraceStore  # noqa: E402
 
 log = logging.getLogger("agent.main")
 
@@ -151,7 +151,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.openemr_writer = OpenEMRWriter()
     app.state.graph = build_graph(app.state.fhir, model_name=MODEL_NAME)
     app.state.cache = TTLCache(ttl_seconds=DATA_CACHE_TTL_S)
-    app.state.traces = TraceStore(capacity=200)
+    # Audit trail persists to SQLite so traces survive `systemctl restart`
+    # and every deploy. Path is overridable for tests / alternate volumes.
+    trace_db_path = Path(os.environ.get("TRACE_DB_PATH", "data/traces.db"))
+    app.state.traces = SqliteTraceStore(trace_db_path)
+    log.info("trace store: sqlite at %s", trace_db_path)
     # Clinical notes persist to disk so drafts survive `systemctl restart copilot`.
     notes_path = Path(os.environ.get("CLINICAL_NOTES_PATH", "data/clinical_notes.json"))
     app.state.clinical_notes = ClinicalNoteStore(notes_path)
@@ -165,6 +169,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         prewarm_task.cancel()
         await app.state.fhir.aclose()
         await app.state.openemr_writer.aclose()
+        app.state.traces.close()
 
 
 app = FastAPI(title="Clinical Co-pilot", lifespan=lifespan)
