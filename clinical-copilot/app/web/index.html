@@ -1073,7 +1073,13 @@
         groups.get(key).push(it);
       });
 
-      const groupHtml = Array.from(groups.entries()).map(([key, rows]) => {
+      // Only the latest reading group surfaces on the patient card — older
+      // groups are accessible via "View Vital Trends" (the button below).
+      // `items` is already sorted newest-first, so Map iteration preserves
+      // that order and the first entry is what we want.
+      const latestGroup = Array.from(groups.entries()).slice(0, 1);
+
+      const groupHtml = latestGroup.map(([key, rows]) => {
         let headerLabel;
         if (key === 'unknown') {
           headerLabel = 'Time unknown';
