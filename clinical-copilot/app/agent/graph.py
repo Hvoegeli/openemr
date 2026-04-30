@@ -25,7 +25,7 @@ from langgraph.graph import END, START, StateGraph
 from app.agent.state import AgentState
 from app.agent.system_prompt import SYSTEM_PROMPT
 from app.agent.tools import TOOLS, dispatch
-from app.agent.validator import find_invalid_citations
+from app.agent.validator import find_invalid_citations, find_uncited_clinical_claims
 from app.fhir.client import FhirClient
 from app.observability import record_tool_event
 
@@ -130,30 +130,46 @@ def build_graph(client: FhirClient, model_name: str = "claude-sonnet-4-6"):
         last = state["messages"][-1]
         text = message_text(last)
         invalid = find_invalid_citations(text, state["conversation_sources"])
+        uncited = find_uncited_clinical_claims(text)
         attempts = state.get("validation_attempts", 0)
 
-        if not invalid:
+        if not invalid and not uncited:
             log.info("validator: ok (attempts=%d)", attempts)
             return {}
 
         attempts += 1
-        log.warning("validator: invalid=%s attempts=%d", invalid, attempts)
+        log.warning(
+            "validator: invalid=%s uncited=%d attempts=%d",
+            invalid, len(uncited), attempts,
+        )
         if attempts >= MAX_VALIDATION_ATTEMPTS:
             # Attach a system-visible note rather than blocking the response
             # outright; the user will see the assistant's text with a warning
             # in the driver.
             return {"validation_attempts": attempts}
 
-        retry_msg = HumanMessage(
-            content=(
+        # Fake-cite errors take precedence in the retry message — they're
+        # the more dangerous failure mode (the LLM made up an ID).
+        if invalid:
+            retry_content = (
                 f"{VALIDATION_FAILURE_PREFIX} these citations are not in any tool "
                 f"result returned in this conversation: {', '.join(invalid)}. "
                 f"Either restate your response using only citations that appear in "
                 f"tool outputs, or say 'insufficient evidence in chart' for the "
                 f"affected claims."
             )
-        )
-        return {"messages": [retry_msg], "validation_attempts": attempts}
+        else:
+            sample = "; ".join(s[:120] for s in uncited[:3])
+            retry_content = (
+                f"{VALIDATION_FAILURE_PREFIX} the following clinical claims are "
+                f"missing inline `[ResourceType/ID]` citations: {sample}. "
+                f"R1 requires every clinical fact to end with an inline citation "
+                f"to a resource ID returned by a tool in this conversation. "
+                f"Restate the response with proper citations on each clinical "
+                f"claim, or say 'insufficient evidence in chart' for any claim "
+                f"you cannot back with a tool result."
+            )
+        return {"messages": [HumanMessage(content=retry_content)], "validation_attempts": attempts}
 
     def route_after_llm(state: AgentState) -> Literal["tools", "validate"]:
         last = state["messages"][-1]

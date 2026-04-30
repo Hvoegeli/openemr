@@ -19,6 +19,7 @@ MVP; production would persist to Postgres alongside the audit log.
 import asyncio
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -52,12 +53,12 @@ from app.fhir.client import FhirClient  # noqa: E402
 from app.fhir.extras import get_calendar_today, get_supporting_documents  # noqa: E402
 from app.observability import (  # noqa: E402
     TokenUsageCallback,
-    TraceStore,
     init_langsmith,
     new_request_trace,
     reset_current_trace,
     set_current_trace,
 )
+from app.observability_db import SqliteTraceStore  # noqa: E402
 
 log = logging.getLogger("agent.main")
 
@@ -142,7 +143,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.fhir = FhirClient()
     app.state.graph = build_graph(app.state.fhir, model_name=MODEL_NAME)
     app.state.cache = TTLCache(ttl_seconds=DATA_CACHE_TTL_S)
-    app.state.traces = TraceStore(capacity=200)
+    # Audit trail persists to SQLite so traces survive `systemctl restart`
+    # and every deploy. Path is overridable for tests / alternate volumes.
+    trace_db_path = Path(os.environ.get("TRACE_DB_PATH", "data/traces.db"))
+    app.state.traces = SqliteTraceStore(trace_db_path)
+    log.info("trace store: sqlite at %s", trace_db_path)
 
     # Don't block startup on the prewarm — let it run while uvicorn binds.
     prewarm_task = asyncio.create_task(_prewarm_dashboard(app))
@@ -151,6 +156,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         prewarm_task.cancel()
         await app.state.fhir.aclose()
+        app.state.traces.close()
 
 
 app = FastAPI(title="Clinical Co-pilot", lifespan=lifespan)
