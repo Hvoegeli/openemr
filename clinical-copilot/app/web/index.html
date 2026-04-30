@@ -114,17 +114,21 @@
     }
     .tab-body.hidden { display: none; }
 
+    /* The patient card gets extra breathing room — denser layouts feel
+       cramped when the content is read at-a-glance during rounds. */
+    #tab-card { padding: 1.5rem 1.6rem; }
+
     /* ── Patient card content ───────────────────────────────────────── */
     .empty { color: var(--muted); font-style: italic; }
-    .meta { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.5rem; }
-    h2.patient-name { margin: 0 0 0.1rem; font-size: 1.15rem; }
+    .meta { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.75rem; }
+    h2.patient-name { margin: 0 0 0.2rem; font-size: 1.18rem; }
     h3 {
-      margin: 1.1rem 0 0.35rem;
+      margin: 1.35rem 0 0.5rem;
       font-size: 0.78rem; color: var(--muted);
       text-transform: uppercase; letter-spacing: 0.05em;
     }
-    ul.kv { margin: 0; padding-left: 1.1rem; }
-    ul.kv li { margin-bottom: 0.2rem; }
+    ul.kv { margin: 0; padding-left: 1.25rem; }
+    ul.kv li { margin-bottom: 0.32rem; line-height: 1.45; }
     code { background: rgba(0,0,0,0.05); padding: 0 0.3em; border-radius: 3px; font-size: 0.85em; }
 
     /* ── Calendar list ──────────────────────────────────────────────── */
@@ -294,16 +298,40 @@
     }
     .msg {
       max-width: 92%;
-      padding: 0.6rem 0.9rem;
+      padding: 0.65rem 1rem;
       border-radius: 8px;
-      line-height: 1.5;
+      line-height: 1.55;
       white-space: pre-wrap;
       word-wrap: break-word;
       font-size: 0.94rem;
     }
     .msg.user { align-self: flex-end; background: var(--accent); color: white; }
-    .msg.assistant { align-self: flex-start; background: var(--panel-soft); border: 1px solid var(--border); }
+    .msg.assistant {
+      align-self: flex-start; background: var(--panel-soft); border: 1px solid var(--border);
+      white-space: normal;            /* rendered as HTML blocks, not whitespace-preserved */
+    }
     .msg.system { align-self: center; background: var(--warn-bg); color: var(--warn-text); font-size: 0.82rem; }
+    /* Rendered-markdown styling inside an assistant bubble */
+    .msg.assistant > :first-child { margin-top: 0; }
+    .msg.assistant > :last-child  { margin-bottom: 0; }
+    .msg.assistant p  { margin: 0 0 0.55rem; }
+    .msg.assistant h1 { margin: 0.75rem 0 0.25rem; font-size: 1.02rem; }
+    .msg.assistant h2 { margin: 0.7rem 0 0.25rem; font-size: 0.96rem; }
+    .msg.assistant h3 {
+      margin: 0.6rem 0 0.2rem; font-size: 0.78rem;
+      color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .msg.assistant ul, .msg.assistant ol { margin: 0.25rem 0 0.55rem; padding-left: 1.4rem; }
+    .msg.assistant li { margin-bottom: 0.18rem; }
+    .msg.assistant hr {
+      border: 0; border-top: 1px solid var(--border); margin: 0.7rem 0;
+    }
+    .msg.assistant strong { font-weight: 600; }
+    .msg.assistant em     { font-style: italic; }
+    .msg.assistant code   {
+      background: rgba(0,0,0,0.05); padding: 0 0.3em;
+      border-radius: 3px; font-size: 0.88em;
+    }
     .stream-status {
       color: var(--muted);
       font-style: italic;
@@ -434,9 +462,7 @@
       <span class="pill" id="ctx-patient" style="display:none"></span>
     </div>
     <div id="log">
-      <div class="msg assistant">
-        Sign in confirmed. Pick a patient from <strong>Today's Calendar</strong> on the left, or ask me anything — try <em>"Catch me up on Cohen."</em>
-      </div>
+      <div class="msg assistant"><p>Sign in confirmed. Pick a patient from <strong>Today's Calendar</strong> on the left, or ask me anything — try <em>"Catch me up on Cohen."</em></p></div>
     </div>
     <form id="input-row">
       <input id="msg" placeholder='Try: "Catch me up on Cohen."' autofocus autocomplete="off">
@@ -949,16 +975,79 @@
       log.appendChild(div);
       log.scrollTop = log.scrollHeight;
     }
+    /* ── Lightweight markdown renderer ─────────────────────────────
+       Handles the subset the agent emits: paragraphs, headings (#/##/###),
+       bullet & numbered lists, horizontal rules, **bold**, *italic*,
+       `inline code`. Citations [Type/ID] are protected via placeholder
+       so markdown formatting can't break them, then re-substituted as
+       clickable spans afterwards. */
+    const CITE_RE = /\[([A-Z][a-zA-Z]+)\/([a-zA-Z0-9._-]+)\]/g;
+
+    function renderInline(text) {
+      let s = escapeHtml(text);
+      s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+      s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+      s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+      return s;
+    }
+    function renderBlock(block) {
+      block = block.replace(/^\s+|\s+$/g, '');
+      if (!block) return '';
+      if (/^---+$/.test(block)) return '<hr>';
+      const hashMatch = block.match(/^(#{1,3})\s+(.*)$/);
+      if (hashMatch) {
+        const lvl = hashMatch[1].length;
+        return '<h' + lvl + '>' + renderInline(hashMatch[2]) + '</h' + lvl + '>';
+      }
+      // Line-by-line: group consecutive bullets / numbered, treat
+      // a `**Section**` line alone as a small h3, and any other line
+      // as a paragraph. The agent emits sections without blank lines
+      // before bullets, so we can't split on blank lines alone.
+      const lines = block.split('\n');
+      let html = '';
+      let bullets = [];
+      let numbered = [];
+      const flushBullets  = () => { if (bullets.length)  { html += '<ul>'  + bullets.map(t  => '<li>' + renderInline(t) + '</li>').join('')  + '</ul>';  bullets  = []; } };
+      const flushNumbered = () => { if (numbered.length) { html += '<ol>'  + numbered.map(t => '<li>' + renderInline(t) + '</li>').join('')  + '</ol>';  numbered = []; } };
+      const flushAll = () => { flushBullets(); flushNumbered(); };
+      for (const raw of lines) {
+        const line = raw.replace(/\s+$/, '');
+        if (!line) { continue; }
+        const bm = line.match(/^\s*[-•]\s+(.*)$/);
+        const nm = line.match(/^\s*\d+\.\s+(.*)$/);
+        const sec = line.match(/^\*\*([^*]+)\*\*\s*:?\s*$/); // **Section** alone
+        if (bm)        { flushNumbered(); bullets.push(bm[1]); }
+        else if (nm)   { flushBullets();  numbered.push(nm[1]); }
+        else if (sec)  { flushAll();      html += '<h3>' + renderInline(sec[1]) + '</h3>'; }
+        else           { flushAll();      html += '<p>'  + renderInline(line)   + '</p>'; }
+      }
+      flushAll();
+      return html;
+    }
+    function mdToHtml(md) {
+      return md.split(/\n\s*\n/).map(renderBlock).join('');
+    }
+
     function decorateCitations(text, sourceSet) {
-      const escaped = escapeHtml(text);
-      return escaped.replace(/\[([A-Z][a-zA-Z]+)\/([a-zA-Z0-9._-]+)\]/g, (m, type, id) => {
-        const ref = type + '/' + id;
+      // 1) Stash citations as unique placeholders so markdown can't mangle them.
+      const cites = [];
+      const protectedText = text.replace(CITE_RE, (m, type, id) => {
+        cites.push({ type, id });
+        return '☃CITE' + (cites.length - 1) + '☃';
+      });
+      // 2) Render markdown (escapes inner content).
+      let html = mdToHtml(protectedText);
+      // 3) Restore citations as clickable spans.
+      html = html.replace(/☃CITE(\d+)☃/g, (m, idx) => {
+        const c = cites[+idx];
+        const ref = c.type + '/' + c.id;
         const cls = sourceSet.has(ref) ? 'citation' : 'citation invalid';
         return '<span class="' + cls +
                '" data-fhir-ref="' + escapeHtml(ref) +
-               '" title="' + escapeHtml(ref) + ' — click to view">' +
-               '[' + type + ']</span>';
+               '" title="' + escapeHtml(ref) + ' — click to view">[' +
+               c.type + ']</span>';
       });
+      return html;
     }
 
     /* ── Citation click navigation ───────────────────────────────── */
