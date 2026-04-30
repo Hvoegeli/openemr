@@ -19,6 +19,7 @@ MVP; production would persist to Postgres alongside the audit log.
 import asyncio
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -57,6 +58,12 @@ from app.observability import (  # noqa: E402
     new_request_trace,
     reset_current_trace,
     set_current_trace,
+)
+from app.clinical_notes import (  # noqa: E402
+    ClinicalNoteStore,
+    NotFoundError as ClinicalNoteNotFound,
+    ShiftEndedError,
+    now_utc,
 )
 
 log = logging.getLogger("agent.main")
@@ -143,6 +150,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.graph = build_graph(app.state.fhir, model_name=MODEL_NAME)
     app.state.cache = TTLCache(ttl_seconds=DATA_CACHE_TTL_S)
     app.state.traces = TraceStore(capacity=200)
+    # Clinical notes persist to disk so drafts survive `systemctl restart copilot`.
+    notes_path = Path(os.environ.get("CLINICAL_NOTES_PATH", "data/clinical_notes.json"))
+    app.state.clinical_notes = ClinicalNoteStore(notes_path)
+    log.info("clinical-notes store loaded from %s (%d notes)", notes_path, len(app.state.clinical_notes._notes))
 
     # Don't block startup on the prewarm — let it run while uvicorn binds.
     prewarm_task = asyncio.create_task(_prewarm_dashboard(app))
@@ -392,9 +403,16 @@ async def patient_documents(patient_id: str, _user: str = Depends(current_user))
         result = await get_supporting_documents(app.state.fhir, patient_id=patient_id)
         return result["data"]
     try:
-        return await app.state.cache.get_or_compute(f"docs:{patient_id}", _compute)
+        data = await app.state.cache.get_or_compute(f"docs:{patient_id}", _compute)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    # Merge clinical notes (drafts + finals) alongside FHIR documents +
+    # encounters. Re-sort the combined list by date so the most recent
+    # item — usually the prior shift's clinical note — is on top.
+    cn_items = [n.to_doc_item() for n in app.state.clinical_notes.list_for_patient(patient_id, now=now_utc())]
+    items = list(data.get("items") or []) + cn_items
+    items.sort(key=lambda x: x.get("date") or "", reverse=True)
+    return {"items": items}
 
 
 @app.get("/api/calendar/today")
@@ -406,6 +424,78 @@ async def calendar_today(_user: str = Depends(current_user)) -> dict:
         return await app.state.cache.get_or_compute("calendar:today", _compute)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+
+
+# ─── clinical notes ──────────────────────────────────────────────────────
+
+
+class ClinicalNoteRequest(BaseModel):
+    notes_md: str = ""
+    recs_md: str = ""
+    vitals: dict | None = None
+
+
+@app.get("/api/patient/{patient_id}/clinical-notes/draft")
+async def get_clinical_note_draft(
+    patient_id: str,
+    username: str = Depends(current_user),
+) -> dict:
+    """Return the current author's open draft for this patient × current shift,
+    or a stub indicating no draft exists yet."""
+    note = app.state.clinical_notes.get_draft(patient_id, username, now=now_utc())
+    if note is None:
+        return {"draft": None}
+    return {"draft": note.to_doc_item()}
+
+
+@app.post("/api/patient/{patient_id}/clinical-notes/draft")
+async def upsert_clinical_note_draft(
+    patient_id: str,
+    body: ClinicalNoteRequest,
+    username: str = Depends(current_user),
+) -> dict:
+    """Create or update the author's open draft. Multiple saves within a
+    shift consolidate into the same note (the spec's 'consolidate' rule)."""
+    try:
+        note = app.state.clinical_notes.upsert_draft(
+            patient_id=patient_id,
+            author=username,
+            notes_md=body.notes_md or "",
+            recs_md=body.recs_md or "",
+            vitals=body.vitals,
+            now=now_utc(),
+        )
+    except ShiftEndedError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    # Invalidate the supporting-docs cache for this patient so the new
+    # draft (or its label change) shows immediately on next fetch.
+    app.state.cache.invalidate(f"docs:{patient_id}")
+    return {"draft": note.to_doc_item()}
+
+
+@app.post("/api/patient/{patient_id}/clinical-notes/save")
+async def finalize_clinical_note(
+    patient_id: str,
+    username: str = Depends(current_user),
+) -> dict:
+    """Explicit Save — promote the open draft to immutable 'final' status."""
+    try:
+        note = app.state.clinical_notes.finalize(patient_id, username, now=now_utc())
+    except ClinicalNoteNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    app.state.cache.invalidate(f"docs:{patient_id}")
+    return {"note": note.to_doc_item()}
+
+
+@app.get("/api/patient/{patient_id}/clinical-notes/latest-prior-shift")
+async def latest_prior_shift_note(
+    patient_id: str,
+    _user: str = Depends(current_user),
+) -> dict:
+    """Most recent finalized note from a *prior* shift — what a doctor sees
+    first when they click into a patient at the start of their shift."""
+    note = app.state.clinical_notes.latest_prior_shift(patient_id, now=now_utc())
+    return {"note": note.to_doc_item() if note else None}
 
 
 @app.get("/healthz")

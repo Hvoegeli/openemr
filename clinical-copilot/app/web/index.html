@@ -117,6 +117,75 @@
     /* The patient card gets extra breathing room — denser layouts feel
        cramped when the content is read at-a-glance during rounds. */
     #tab-card { padding: 1.5rem 1.6rem; }
+    #tab-notes { padding: 1.4rem 1.55rem; }
+
+    /* ── Clinical Notes form ─────────────────────────────────────────── */
+    .cn-status { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.6rem; }
+    .cn-status .pill { padding: 0.05rem 0.5rem; border-radius: 999px; border: 1px solid var(--border); }
+    .cn-status .pill.draft { color: var(--warn-text); background: var(--warn-bg); border-color: #fde68a; }
+    .cn-status .pill.final { color: var(--good); background: #f0fdf4; border-color: #bbf7d0; }
+    .cn-section-title {
+      font-size: 0.78rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.05em;
+      margin: 1rem 0 0.35rem;
+    }
+    .cn-section-title:first-child { margin-top: 0; }
+    .cn-textarea {
+      width: 100%; min-height: 6rem;
+      padding: 0.55rem 0.7rem; border: 1px solid var(--border);
+      border-radius: 6px; font: inherit; font-size: 0.9rem;
+      resize: vertical; background: white;
+    }
+    .cn-textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    .cn-vitals {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 0.6rem;
+      margin-top: 0.2rem;
+    }
+    .cn-vitals label { display: flex; flex-direction: column; font-size: 0.78rem; color: var(--muted); }
+    .cn-vitals input {
+      padding: 0.4rem 0.55rem; border: 1px solid var(--border);
+      border-radius: 5px; font: inherit; font-size: 0.88rem;
+      margin-top: 0.15rem;
+    }
+    .cn-actions {
+      display: flex; gap: 0.6rem; align-items: center;
+      margin-top: 1.1rem;
+    }
+    .cn-actions .saved-mark { font-size: 0.78rem; color: var(--muted); }
+    .cn-btn {
+      padding: 0.45rem 1rem; border: 0; border-radius: 6px;
+      background: var(--accent); color: white; font: inherit;
+      font-weight: 500; cursor: pointer;
+    }
+    .cn-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .cn-btn.secondary {
+      background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    }
+    .cn-readonly {
+      background: #fafafb; border: 1px solid var(--border);
+      border-radius: 6px; padding: 0.6rem 0.8rem;
+      white-space: pre-wrap; font-size: 0.9rem;
+      color: var(--text);
+    }
+    .cn-meta { font-size: 0.78rem; color: var(--muted); margin-top: 0.4rem; }
+
+    /* ── Save-without-vitals modal ───────────────────────────────────── */
+    .modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(15, 23, 42, 0.45);
+      display: none; align-items: center; justify-content: center;
+      z-index: 100;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal-card {
+      background: var(--panel);
+      border: 1px solid var(--border); border-radius: 10px;
+      max-width: 28rem; padding: 1.2rem 1.3rem;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.18);
+    }
+    .modal-card h3 { margin: 0 0 0.4rem; font-size: 1rem; text-transform: none; letter-spacing: 0; color: var(--text); }
+    .modal-card p { margin: 0 0 1rem; color: var(--muted); font-size: 0.88rem; line-height: 1.5; }
+    .modal-actions { display: flex; gap: 0.6rem; justify-content: flex-end; }
 
     /* ── Patient card content ───────────────────────────────────────── */
     .empty { color: var(--muted); font-style: italic; }
@@ -184,6 +253,8 @@
     }
     .doc-row .kind.encounter { background: var(--accent-soft); color: var(--accent); }
     .doc-row .kind.document  { background: #ecfeff; color: #0e7490; }
+    .doc-row .kind.note      { background: #f0fdf4; color: var(--good); }
+    .doc-row .kind.draft     { background: var(--warn-bg); color: var(--warn-text); }
     .doc-row { cursor: pointer; transition: border-color 0.12s, background 0.12s; }
     .doc-row:hover { border-color: var(--accent); background: var(--accent-soft); }
 
@@ -421,6 +492,9 @@
       <button class="tab" data-tab="card" role="tab" aria-selected="false">
         Patient Card
       </button>
+      <button class="tab" data-tab="notes" role="tab" aria-selected="false">
+        Clinical Notes
+      </button>
       <button class="tab" data-tab="docs" role="tab" aria-selected="false">
         Supporting Documents <span class="count" id="docs-count">·</span>
       </button>
@@ -431,6 +505,9 @@
     </div>
     <div class="tab-body hidden" id="tab-card" role="tabpanel">
       <div class="empty">No patient selected. Pick one from <strong>Today's Calendar</strong> or ask the chat.</div>
+    </div>
+    <div class="tab-body hidden" id="tab-notes" role="tabpanel">
+      <div class="empty">Select a patient first.</div>
     </div>
     <div class="tab-body hidden" id="tab-docs" role="tabpanel">
       <div class="empty">Select a patient first.</div>
@@ -477,9 +554,10 @@
     const msg = document.getElementById('msg');
     const send = document.getElementById('send');
 
-    const tabCard = document.getElementById('tab-card');
-    const tabDocs = document.getElementById('tab-docs');
-    const tabCal  = document.getElementById('tab-cal');
+    const tabCard  = document.getElementById('tab-card');
+    const tabDocs  = document.getElementById('tab-docs');
+    const tabCal   = document.getElementById('tab-cal');
+    const tabNotes = document.getElementById('tab-notes');
     const docsCount = document.getElementById('docs-count');
     const calCount  = document.getElementById('cal-count');
 
@@ -522,9 +600,15 @@
         t.classList.toggle('active', on);
         t.setAttribute('aria-selected', on ? 'true' : 'false');
       });
-      tabCard.classList.toggle('hidden', name !== 'card');
-      tabDocs.classList.toggle('hidden', name !== 'docs');
-      tabCal.classList.toggle('hidden',  name !== 'cal');
+      tabCard.classList.toggle('hidden',  name !== 'card');
+      tabDocs.classList.toggle('hidden',  name !== 'docs');
+      tabCal.classList.toggle('hidden',   name !== 'cal');
+      tabNotes.classList.toggle('hidden', name !== 'notes');
+      // Reload the active tab's data lazily — clinical notes are user-mutable
+      // so we want fresh state every visit.
+      if (name === 'notes' && activePatientId) {
+        loadClinicalNotesTab(activePatientId);
+      }
     }
 
     /* ── Calendar + buffered prefetch ─────────────────────────────── */
@@ -657,7 +741,22 @@
         }
       }
 
-      if (opts.fromCalendar) switchTab('card');
+      // Per spec: clicking a patient from the calendar should land the
+      // doctor on the prior shift's saved Clinical Note (if one exists),
+      // not the patient card. Falls back to card otherwise.
+      if (opts.fromCalendar) {
+        try {
+          const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/clinical-notes/latest-prior-shift', { credentials: 'same-origin' });
+          if (r.ok) {
+            const j = await r.json();
+            if (j && j.note) {
+              switchTab('notes');
+              return;
+            }
+          }
+        } catch {}
+        switchTab('card');
+      }
     }
 
     function waitForBuffer(pid, key, timeoutMs = 15000) {
@@ -726,13 +825,22 @@
         const dateStr = it.date
           ? new Date(it.date).toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'})
           : '—';
-        const sub = [it.status, it.category, it.summary].filter(Boolean).map(escapeHtml).join(' · ');
-        const kind = it.kind === 'document' ? 'document' : 'encounter';
+        let kindLabel = 'encounter';
+        if (it.kind === 'document') kindLabel = 'document';
+        else if (it.kind === 'clinical-note') kindLabel = it.is_draft ? 'draft' : 'note';
+        const subBits = [];
+        if (it.kind === 'clinical-note') {
+          if (it.author) subBits.push('by ' + it.author);
+          if (it.shift)  subBits.push(it.shift === 'day' ? 'Day Shift' : 'Night Shift');
+        } else {
+          [it.status, it.category, it.summary].forEach(b => { if (b) subBits.push(b); });
+        }
+        const sub = subBits.map(escapeHtml).join(' · ');
         return (
           '<div class="doc-row" data-doc-idx="' + i + '">' +
             '<div class="row1">' +
               '<div class="title">' +
-                '<span class="kind ' + kind + '">' + kind + '</span>' +
+                '<span class="kind ' + escapeHtml(kindLabel) + '">' + escapeHtml(kindLabel) + '</span>' +
                 escapeHtml(it.title || '(untitled)') +
               '</div>' +
               '<div class="date">' + escapeHtml(dateStr) + '</div>' +
@@ -771,11 +879,15 @@
       const dateStr = item.date
         ? new Date(item.date).toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'short'})
         : '—';
+      let kindLabel = 'Visit';
+      if (item.kind === 'document')      kindLabel = 'Document';
+      else if (item.kind === 'clinical-note') kindLabel = item.is_draft ? 'Clinical Note (DRAFT)' : 'Clinical Note';
       const pieces = [
-        item.kind === 'document' ? 'Document' : 'Visit',
+        kindLabel,
         dateStr,
         item.status ? 'Status: ' + item.status : null,
         item.category ? 'Category: ' + item.category : null,
+        item.author ? 'Author: ' + item.author : null,
         item.ref ? item.ref : null,
       ].filter(Boolean);
       docMeta.innerHTML = pieces.map(p => '<span>' + escapeHtml(p) + '</span>').join('');
@@ -786,6 +898,26 @@
 
       // Body
       const fields = [];
+      if (item.kind === 'clinical-note') {
+        if (item.notes_md) {
+          fields.push('<h3>Clinical notes</h3><div style="white-space:pre-wrap">' + escapeHtml(item.notes_md) + '</div>');
+        }
+        if (item.recs_md) {
+          fields.push('<h3>Recommendations for next shift</h3><div style="white-space:pre-wrap">' + escapeHtml(item.recs_md) + '</div>');
+        }
+        const v = item.vitals || {};
+        const vRows = [];
+        if (v.bp_systolic && v.bp_diastolic) vRows.push(['Blood pressure', v.bp_systolic + '/' + v.bp_diastolic + ' mmHg']);
+        if (v.heart_rate)        vRows.push(['Heart rate',       v.heart_rate + ' bpm']);
+        if (v.respiratory_rate)  vRows.push(['Respiratory rate', v.respiratory_rate + '/min']);
+        if (v.temp_f)            vRows.push(['Temperature',      v.temp_f + ' °F']);
+        if (v.spo2)              vRows.push(['SpO₂',             v.spo2 + ' %']);
+        if (vRows.length) {
+          fields.push('<h3>Vitals</h3>' + vRows.map(([k, val]) =>
+            '<div class="field"><div class="k">' + escapeHtml(k) + '</div><div>' + escapeHtml(val) + '</div></div>'
+          ).join(''));
+        }
+      }
       if (item.summary) {
         fields.push('<h3>Summary</h3><div>' + escapeHtml(item.summary) + '</div>');
       }
@@ -794,6 +926,11 @@
         kvFields.push(['Type',   item.title]);
         kvFields.push(['Status', item.status]);
         kvFields.push(['Date',   dateStr]);
+      } else if (item.kind === 'clinical-note') {
+        kvFields.push(['Status', item.is_draft ? 'DRAFT' : 'Final']);
+        kvFields.push(['Author', item.author]);
+        kvFields.push(['Shift',  item.shift === 'day' ? 'Day Shift' : (item.shift === 'night' ? 'Night Shift' : null)]);
+        kvFields.push(['Written', dateStr]);
       } else {
         kvFields.push(['Type',     item.title]);
         kvFields.push(['Category', item.category]);
@@ -1050,6 +1187,226 @@
       return html;
     }
 
+    /* ── Clinical Notes tab ──────────────────────────────────────── */
+    let cnDebounce = null;
+    let cnDraftPatientId = null;     // pid this draft belongs to (for staleness checks)
+
+    async function loadClinicalNotesTab(pid) {
+      tabNotes.innerHTML = '<div class="empty">Loading clinical notes…</div>';
+      try {
+        const [draftRes, priorRes] = await Promise.all([
+          fetch('/api/patient/' + encodeURIComponent(pid) + '/clinical-notes/draft'),
+          fetch('/api/patient/' + encodeURIComponent(pid) + '/clinical-notes/latest-prior-shift'),
+        ]);
+        const draft = draftRes.ok ? (await draftRes.json()).draft : null;
+        const prior = priorRes.ok ? (await priorRes.json()).note  : null;
+        renderClinicalNotesTab(pid, draft, prior);
+      } catch (e) {
+        tabNotes.innerHTML = '<div class="empty">Failed to load clinical notes.</div>';
+      }
+    }
+
+    function renderClinicalNotesTab(pid, draft, prior) {
+      cnDraftPatientId = pid;
+      const draftHtml = renderEditableDraft(pid, draft);
+      const priorHtml = renderPriorShiftSection(prior);
+      tabNotes.innerHTML = priorHtml + draftHtml;
+      wireNotesForm(pid);
+    }
+
+    function renderPriorShiftSection(prior) {
+      if (!prior) return '';
+      const dt = prior.finalized_at || prior.date;
+      return (
+        '<div class="cn-section-title">From the previous shift</div>' +
+        '<div class="cn-readonly">' + escapeHtml(prior.notes_md || '(no notes)') + '</div>' +
+        (prior.recs_md ? (
+          '<div class="cn-section-title" style="margin-top:0.7rem">Recommendations</div>' +
+          '<div class="cn-readonly">' + escapeHtml(prior.recs_md) + '</div>'
+        ) : '') +
+        renderVitalsReadonly(prior.vitals) +
+        '<div class="cn-meta">' + escapeHtml(prior.title || 'Clinical Notes') +
+          ' · written by ' + escapeHtml(prior.author || '?') +
+          (dt ? ' · ' + new Date(dt).toLocaleString() : '') +
+          '</div>'
+      );
+    }
+
+    function renderVitalsReadonly(v) {
+      if (!v || Object.keys(v || {}).length === 0) return '';
+      const rows = [];
+      if (v.bp_systolic && v.bp_diastolic) rows.push('BP ' + v.bp_systolic + '/' + v.bp_diastolic);
+      if (v.heart_rate)        rows.push('HR '   + v.heart_rate);
+      if (v.respiratory_rate)  rows.push('RR '   + v.respiratory_rate);
+      if (v.temp_f)            rows.push('Temp ' + v.temp_f + '°F');
+      if (v.spo2)              rows.push('SpO₂ ' + v.spo2 + '%');
+      if (!rows.length) return '';
+      return '<div class="cn-section-title" style="margin-top:0.7rem">Vitals</div>' +
+             '<div class="cn-readonly">' + rows.map(escapeHtml).join('  ·  ') + '</div>';
+    }
+
+    function renderEditableDraft(pid, draft) {
+      const heading = '<div class="cn-section-title" style="margin-top:1.4rem">Your draft for this shift</div>';
+      const status = draft
+        ? '<div class="cn-status">Status: <span class="pill draft">DRAFT</span> — last edited ' +
+          (draft.updated_at ? new Date(draft.updated_at).toLocaleString() : '?') + '</div>'
+        : '<div class="cn-status">Status: <span class="pill" style="background:#f3f4f6">No draft yet</span></div>';
+      const notes_md = (draft && draft.notes_md) || '';
+      const recs_md  = (draft && draft.recs_md)  || '';
+      const v = (draft && draft.vitals) || {};
+
+      return heading + status +
+        '<label class="cn-section-title" for="cn-notes" style="display:block">Clinical notes</label>' +
+        '<textarea class="cn-textarea" id="cn-notes" placeholder="Today\'s observations, exam findings, plan adjustments…">' + escapeHtml(notes_md) + '</textarea>' +
+
+        '<div class="cn-section-title">Recommendations for the next shift</div>' +
+        '<textarea class="cn-textarea" id="cn-recs" placeholder="What the next doctor should know — meds to titrate, labs to follow, watch-fors…">' + escapeHtml(recs_md) + '</textarea>' +
+
+        '<div class="cn-section-title">Vitals (optional)</div>' +
+        '<div class="cn-vitals">' +
+          vitalInput('BP systolic',   'bp_systolic',     v.bp_systolic,     'mmHg') +
+          vitalInput('BP diastolic',  'bp_diastolic',    v.bp_diastolic,    'mmHg') +
+          vitalInput('Heart rate',    'heart_rate',      v.heart_rate,      'bpm') +
+          vitalInput('Resp rate',     'respiratory_rate',v.respiratory_rate,'/min') +
+          vitalInput('Temperature',   'temp_f',          v.temp_f,          '°F') +
+          vitalInput('SpO₂',          'spo2',            v.spo2,            '%') +
+        '</div>' +
+
+        '<div class="cn-actions">' +
+          '<button class="cn-btn" type="button" id="cn-save">Save and lock</button>' +
+          '<span class="saved-mark" id="cn-saved-mark"></span>' +
+        '</div>';
+    }
+
+    function vitalInput(label, name, value, unit) {
+      const v = (value === null || value === undefined) ? '' : value;
+      return '<label>' + escapeHtml(label) + ' <span style="color:var(--muted);font-weight:normal">(' + unit + ')</span>' +
+             '<input data-vital="' + name + '" type="number" step="any" inputmode="decimal" value="' + escapeHtml(String(v)) + '">' +
+             '</label>';
+    }
+
+    function readVitalsFromForm() {
+      const out = {};
+      document.querySelectorAll('#tab-notes input[data-vital]').forEach(el => {
+        const v = el.value.trim();
+        if (v === '') return;
+        const n = Number(v);
+        if (!Number.isFinite(n)) return;
+        out[el.dataset.vital] = n;
+      });
+      return out;
+    }
+
+    function vitalsAllEmpty(v) {
+      return !v || Object.keys(v).length === 0;
+    }
+
+    function wireNotesForm(pid) {
+      const notesEl = document.getElementById('cn-notes');
+      const recsEl  = document.getElementById('cn-recs');
+      const saveBtn = document.getElementById('cn-save');
+      const savedMark = document.getElementById('cn-saved-mark');
+
+      const persistDraft = async () => {
+        if (cnDraftPatientId !== pid) return;
+        savedMark.textContent = 'Saving…';
+        try {
+          const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/clinical-notes/draft', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            credentials: 'same-origin',
+            body: JSON.stringify({
+              notes_md: notesEl.value,
+              recs_md: recsEl.value,
+              vitals: readVitalsFromForm(),
+            }),
+          });
+          if (r.ok) {
+            savedMark.textContent = 'Draft saved · ' + new Date().toLocaleTimeString();
+          } else {
+            const j = await r.json().catch(() => ({}));
+            savedMark.textContent = 'Save failed: ' + (j.detail || r.status);
+          }
+        } catch (e) {
+          savedMark.textContent = 'Network error — draft not saved';
+        }
+      };
+
+      const queueAutoSave = () => {
+        if (cnDebounce) clearTimeout(cnDebounce);
+        cnDebounce = setTimeout(persistDraft, 1200);
+      };
+
+      ['cn-notes', 'cn-recs'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('input', queueAutoSave);
+      });
+      document.querySelectorAll('#tab-notes input[data-vital]').forEach(el => {
+        el.addEventListener('input', queueAutoSave);
+      });
+
+      saveBtn.addEventListener('click', async () => {
+        const vitals = readVitalsFromForm();
+        if (vitalsAllEmpty(vitals)) {
+          openSaveWithoutVitalsModal(pid, persistDraft);
+        } else {
+          await persistDraft();
+          await finalizeNote(pid);
+        }
+      });
+    }
+
+    async function finalizeNote(pid) {
+      const saveBtn = document.getElementById('cn-save');
+      const savedMark = document.getElementById('cn-saved-mark');
+      saveBtn.disabled = true;
+      savedMark.textContent = 'Saving and locking…';
+      try {
+        const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/clinical-notes/save', {
+          method: 'POST', credentials: 'same-origin',
+        });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok) {
+          savedMark.textContent = 'Locked. Visible in Supporting Documents.';
+          // Reload the tab to show read-only state
+          setTimeout(() => loadClinicalNotesTab(pid), 350);
+        } else {
+          savedMark.textContent = 'Save failed: ' + (j.detail || r.status);
+          saveBtn.disabled = false;
+        }
+      } catch (e) {
+        savedMark.textContent = 'Network error during save.';
+        saveBtn.disabled = false;
+      }
+    }
+
+    /* ── Save-without-vitals confirmation modal ─────────────────── */
+    const cnModal = document.getElementById('cn-modal');
+    const cnModalCancel  = document.getElementById('cn-modal-cancel');
+    const cnModalConfirm = document.getElementById('cn-modal-confirm');
+    let cnModalAfter = null;
+
+    function openSaveWithoutVitalsModal(pid, beforeFinalize) {
+      cnModalAfter = async () => {
+        await beforeFinalize();
+        await finalizeNote(pid);
+      };
+      cnModal.classList.add('open');
+    }
+    function closeSaveModal() {
+      cnModal.classList.remove('open');
+      cnModalAfter = null;
+    }
+    cnModalCancel.addEventListener('click', closeSaveModal);
+    cnModal.addEventListener('click', (e) => {
+      if (e.target === cnModal) closeSaveModal();
+    });
+    cnModalConfirm.addEventListener('click', async () => {
+      const fn = cnModalAfter;
+      closeSaveModal();
+      if (fn) await fn();
+    });
+
     /* ── Citation click navigation ───────────────────────────────── */
     // Event delegation on #log so it works for streaming + historical messages.
     log.addEventListener('click', (e) => {
@@ -1132,5 +1489,17 @@
       return String(s).replace(/[^a-zA-Z0-9_-]/g, c => '\\' + c);
     }
   </script>
+
+  <!-- ── Save-without-vitals warning modal ─────────────────────────── -->
+  <div class="modal-backdrop" id="cn-modal" role="dialog" aria-modal="true" aria-labelledby="cn-modal-title">
+    <div class="modal-card">
+      <h3 id="cn-modal-title">Save without vitals?</h3>
+      <p>You haven't entered any vitals for this shift. Once saved, the note becomes immutable — you can't add vitals later. Are you sure you want to proceed?</p>
+      <div class="modal-actions">
+        <button class="cn-btn secondary" id="cn-modal-cancel" type="button">Go back</button>
+        <button class="cn-btn" id="cn-modal-confirm" type="button">Save anyway</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

@@ -39,6 +39,10 @@ class TTLCache:
     def set(self, key: str, value: Any) -> None:
         self._store[key] = (time.time(), value)
 
+    def invalidate(self, key: str) -> None:
+        """Drop a single key — used after writes that change downstream data."""
+        self._store.pop(key, None)
+
     async def get_or_compute(
         self, key: str, compute: Callable[[], Awaitable[Any]],
     ) -> Any:
