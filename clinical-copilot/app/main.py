@@ -65,6 +65,7 @@ from app.clinical_notes import (  # noqa: E402
     ShiftEndedError,
     now_utc,
 )
+from app.vitals import collect_vital_trends, latest_per_vital  # noqa: E402
 
 log = logging.getLogger("agent.main")
 
@@ -386,13 +387,48 @@ async def chat_stream(
 # ─── data endpoints (all gated by session) ───────────────────────────────
 
 
+async def _vital_trends_compute(patient_id: str) -> dict:
+    """Pull raw FHIR observations + clinical-note vitals into the trends shape.
+
+    Cached separately from the patient card because the card stays stable on
+    a chart that wasn't touched, while trends flip every time a doctor
+    finalizes a clinical note.
+    """
+    observations = await app.state.fhir.search(
+        "Observation",
+        {"patient": patient_id, "category": "vital-signs", "_count": 50},
+    )
+    notes = [n.to_doc_item() for n in app.state.clinical_notes.list_for_patient(patient_id, now=now_utc())]
+    trends = collect_vital_trends(observations, notes)
+    return {"current": latest_per_vital(trends), "trends": trends}
+
+
 @app.get("/api/patient/{patient_id}/card")
 async def patient_card(patient_id: str, _user: str = Depends(current_user)) -> dict:
     async def _compute() -> dict:
         result = await adapter.get_patient_card(app.state.fhir, patient_id=patient_id)
         return result["data"]
     try:
-        return await app.state.cache.get_or_compute(f"card:{patient_id}", _compute)
+        card_data = await app.state.cache.get_or_compute(f"card:{patient_id}", _compute)
+        trends_data = await app.state.cache.get_or_compute(
+            f"trends:{patient_id}",
+            lambda: _vital_trends_compute(patient_id),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    # The card surfaces the most-recent reading per vital — older points
+    # live behind the "Vital trends" button. Newest wins regardless of
+    # whether it came from FHIR or a clinical note.
+    return {**card_data, "current_vitals": trends_data["current"]}
+
+
+@app.get("/api/patient/{patient_id}/vital-trends")
+async def patient_vital_trends(patient_id: str, _user: str = Depends(current_user)) -> dict:
+    try:
+        return await app.state.cache.get_or_compute(
+            f"trends:{patient_id}",
+            lambda: _vital_trends_compute(patient_id),
+        )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
 
@@ -468,8 +504,12 @@ async def upsert_clinical_note_draft(
     except ShiftEndedError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     # Invalidate the supporting-docs cache for this patient so the new
-    # draft (or its label change) shows immediately on next fetch.
+    # draft (or its label change) shows immediately on next fetch. Trends
+    # only count finalized notes, so an in-progress draft can't move them
+    # — but if the doctor *deletes* values from a previously-saved draft
+    # we still need a fresh read on the next save.
     app.state.cache.invalidate(f"docs:{patient_id}")
+    app.state.cache.invalidate(f"trends:{patient_id}")
     return {"draft": note.to_doc_item()}
 
 
@@ -484,6 +524,7 @@ async def finalize_clinical_note(
     except ClinicalNoteNotFound as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     app.state.cache.invalidate(f"docs:{patient_id}")
+    app.state.cache.invalidate(f"trends:{patient_id}")
     return {"note": note.to_doc_item()}
 
 

@@ -169,6 +169,61 @@
     }
     .cn-meta { font-size: 0.78rem; color: var(--muted); margin-top: 0.4rem; }
 
+    /* ── Patient-card vitals snapshot + trends ───────────────────────── */
+    .vitals-snapshot {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0.3rem 1rem;
+      margin: 0.2rem 0 0.35rem;
+    }
+    .vs-row {
+      display: flex; justify-content: space-between; align-items: baseline;
+      padding: 0.2rem 0; border-bottom: 1px dashed #eef0f3;
+      font-size: 0.88rem;
+    }
+    .vs-row .label { color: var(--muted); font-size: 0.82rem; }
+    .vs-row .value { font-variant-numeric: tabular-nums; }
+    .vs-row .value.empty { color: var(--muted); }
+    .vs-row.from-note .value { color: var(--accent); }
+    .vs-actions { margin-top: 0.4rem; }
+    .trends-btn {
+      padding: 0.35rem 0.85rem; border: 1px solid var(--border);
+      border-radius: 6px; background: var(--panel); color: var(--text);
+      font: inherit; font-size: 0.82rem; cursor: pointer;
+    }
+    .trends-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    .trends-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem;
+      margin-top: 0.3rem;
+    }
+    .vc {
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 0.5rem 0.7rem 0.4rem; background: white;
+    }
+    .vc-head {
+      font-size: 0.78rem; color: var(--muted);
+      display: flex; align-items: baseline; gap: 0.4rem;
+      margin-bottom: 0.2rem;
+    }
+    .vc-head .vc-latest {
+      color: var(--text); font-size: 0.92rem; font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+    .vc-head .vc-count { margin-left: auto; font-size: 0.72rem; }
+    .vc-svg { display: block; }
+    .vc-svg .grid { stroke: #f1f3f6; stroke-width: 0.5; }
+    .vc-svg path.line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+    .vc-svg circle { fill: var(--accent); cursor: pointer; }
+    .vc-svg circle.from-note { fill: #16a34a; }
+    .vc-empty {
+      border: 1px dashed var(--border); border-radius: 8px;
+      padding: 0.8rem; font-size: 0.82rem; color: var(--muted);
+      background: #fafafb;
+    }
+    .trends-back {
+      display: inline-flex; align-items: center; gap: 0.3rem;
+      margin-bottom: 0.6rem;
+    }
+
     /* ── Save-without-vitals modal ───────────────────────────────────── */
     .modal-backdrop {
       position: fixed; inset: 0;
@@ -826,13 +881,161 @@
           escapeHtml(m.drug || '?') +
           (m.dose_text ? ' — ' + escapeHtml(m.dose_text) : ''),
         'None documented'),
-        '<h3 data-section="Observation">Recent Vitals</h3>',
-        list(d.recent_vitals, 'Observation', v =>
-          escapeHtml(v.name || '?') + ': ' +
-          (v.value != null ? escapeHtml(String(v.value)) : '?') +
-          (v.unit ? ' ' + escapeHtml(v.unit) : ''),
-        'None documented'),
+        '<h3 data-section="Observation">Latest Vitals</h3>',
+        renderCurrentVitals(d.current_vitals),
       ].join('');
+    }
+
+    /* ── Vitals snapshot + trend overlay ────────────────────────────── */
+    const VITAL_KEYS   = ['bp_systolic','bp_diastolic','heart_rate','respiratory_rate','temp_f','spo2'];
+    const VITAL_LABELS = {
+      bp_systolic:'Systolic BP', bp_diastolic:'Diastolic BP',
+      heart_rate:'Heart rate', respiratory_rate:'Resp rate',
+      temp_f:'Temperature', spo2:'SpO₂',
+    };
+    const VITAL_UNITS  = {
+      bp_systolic:'mmHg', bp_diastolic:'mmHg',
+      heart_rate:'bpm', respiratory_rate:'/min',
+      temp_f:'°F', spo2:'%',
+    };
+    // pid → 'snapshot' or 'trends' so toggling and re-renders preserve view choice
+    const cardView = new Map();
+
+    function renderCurrentVitals(current) {
+      const c = current || {};
+      const rows = VITAL_KEYS.map(k => {
+        const pt = c[k];
+        const fromNote = pt && typeof pt.source === 'string' && pt.source.startsWith('ClinicalNote/');
+        const valueHtml = pt
+          ? '<span class="value">' +
+              escapeHtml(String(pt.value)) +
+              ' <span class="label">' + escapeHtml(pt.unit || VITAL_UNITS[k]) + '</span>' +
+            '</span>'
+          : '<span class="value empty">—</span>';
+        const ref = pt ? pt.source : '';
+        return '<div class="vs-row' + (fromNote ? ' from-note' : '') +
+               '" data-fhir-ref="' + escapeHtml(ref) + '">' +
+                 '<span class="label">' + escapeHtml(VITAL_LABELS[k]) + '</span>' +
+                 valueHtml +
+               '</div>';
+      }).join('');
+      return '<div class="vitals-snapshot">' + rows + '</div>' +
+             '<div class="vs-actions">' +
+               '<button class="trends-btn" type="button" id="open-trends">View vital trends →</button>' +
+             '</div>';
+    }
+
+    async function showVitalTrends(pid) {
+      cardView.set(pid, 'trends');
+      tabCard.innerHTML = '<div class="empty">Loading vital trends…</div>';
+      try {
+        const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/vital-trends', { credentials: 'same-origin' });
+        if (!r.ok) {
+          tabCard.innerHTML = '<div class="empty">Failed to load vital trends.</div>';
+          return;
+        }
+        const data = await r.json();
+        const charts = VITAL_KEYS.map(k => renderVitalChart(k, (data.trends || {})[k] || [])).join('');
+        tabCard.innerHTML =
+          '<div class="trends-back"><button class="trends-btn" type="button" id="close-trends">← Back to patient card</button></div>' +
+          '<h2 class="patient-name">Vital trends</h2>' +
+          '<div class="meta">All known data points across FHIR observations and finalized clinical notes. Missing values are left blank — we don’t interpolate.</div>' +
+          '<div class="trends-grid">' + charts + '</div>';
+      } catch {
+        tabCard.innerHTML = '<div class="empty">Failed to load vital trends.</div>';
+      }
+    }
+
+    function renderVitalChart(key, points) {
+      const label = VITAL_LABELS[key];
+      const unit  = VITAL_UNITS[key];
+      if (!points || !points.length) {
+        return '<div class="vc-empty">' + escapeHtml(label) + ': no data points on file</div>';
+      }
+      const W = 280, H = 90, PX = 22, PY = 14;
+      const xs = points.map(p => new Date(p.date).getTime());
+      const ys = points.map(p => Number(p.value));
+      const xmin = Math.min.apply(null, xs);
+      const xmax = Math.max.apply(null, xs);
+      const ymin = Math.min.apply(null, ys);
+      const ymax = Math.max.apply(null, ys);
+      const xspan = Math.max(1, xmax - xmin);
+      const yspan = Math.max(1, ymax - ymin);
+      const xC = x => PX + ((x - xmin) / xspan) * (W - 2 * PX);
+      const yC = y => H - PY - ((y - ymin) / yspan) * (H - 2 * PY);
+
+      let path = '';
+      points.forEach((p, i) => {
+        const x = xC(new Date(p.date).getTime());
+        const y = yC(Number(p.value));
+        path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
+      });
+
+      const dots = points.map(p => {
+        const x = xC(new Date(p.date).getTime());
+        const y = yC(Number(p.value));
+        const fromNote = typeof p.source === 'string' && p.source.startsWith('ClinicalNote/');
+        const tip = String(p.value) + ' ' + (p.unit || unit) + ' · ' +
+                    new Date(p.date).toLocaleString();
+        return '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) +
+               '" r="3"' + (fromNote ? ' class="from-note"' : '') +
+               ' data-fhir-ref="' + escapeHtml(p.source || '') + '">' +
+               '<title>' + escapeHtml(tip) + '</title></circle>';
+      }).join('');
+
+      const latest = points[points.length - 1];
+      // Light y-axis tick lines at min/mid/max
+      const gridY = [yC(ymin), yC((ymin + ymax) / 2), yC(ymax)];
+      const grid = gridY.map(y =>
+        '<line class="grid" x1="' + PX + '" y1="' + y.toFixed(1) +
+        '" x2="' + (W - PX) + '" y2="' + y.toFixed(1) + '"/>').join('');
+
+      return '<div class="vc">' +
+        '<div class="vc-head">' +
+          escapeHtml(label) +
+          ' <span class="vc-latest">' + escapeHtml(String(latest.value) + ' ' + unit) + '</span>' +
+          '<span class="vc-count">' + points.length + ' point' + (points.length === 1 ? '' : 's') + '</span>' +
+        '</div>' +
+        '<svg class="vc-svg" viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="' + H + '" preserveAspectRatio="none">' +
+          grid +
+          '<path class="line" d="' + path + '"/>' +
+          dots +
+        '</svg>' +
+      '</div>';
+    }
+
+    // Delegated click handler for the patient-card panel — handles both
+    // "View vital trends →" and "← Back to patient card" buttons that
+    // get re-rendered every time the panel is repainted.
+    tabCard.addEventListener('click', (e) => {
+      const openBtn  = e.target.closest('#open-trends');
+      const closeBtn = e.target.closest('#close-trends');
+      if (!activePatientId) return;
+      if (openBtn)  { showVitalTrends(activePatientId); }
+      if (closeBtn) {
+        cardView.set(activePatientId, 'snapshot');
+        const e2 = buffer.get(activePatientId) || {};
+        if (e2.card) tabCard.innerHTML = renderCard(e2.card);
+        else refreshCard(activePatientId);
+      }
+    });
+
+    // Re-pull patient card (used after a clinical-note save: vitals on
+    // the snapshot row should reflect the just-saved values).
+    async function refreshCard(pid) {
+      if (!pid) return;
+      try {
+        const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/card', { credentials: 'same-origin' });
+        if (!r.ok) return;
+        const card = await r.json();
+        const e = buffer.get(pid) || {};
+        e.card = card;
+        buffer.set(pid, e);
+        if (activePatientId === pid && cardView.get(pid) !== 'trends' && !tabCard.classList.contains('hidden')) {
+          tabCard.innerHTML = renderCard(card);
+          updateCtxPatient(card.name, pid);
+        }
+      } catch {}
     }
 
     function renderDocs(d) {
@@ -1345,6 +1548,7 @@
           if (r.ok) {
             savedMark.textContent = 'Draft saved · ' + new Date().toLocaleTimeString();
             refreshDocs(pid);
+            refreshCard(pid);
           } else {
             const j = await r.json().catch(() => ({}));
             savedMark.textContent = 'Save failed: ' + (j.detail || r.status);
@@ -1391,6 +1595,7 @@
         if (r.ok) {
           savedMark.textContent = 'Locked. Visible in Supporting Documents.';
           refreshDocs(pid);
+          refreshCard(pid);
           // Reload the tab to show read-only state
           setTimeout(() => loadClinicalNotesTab(pid), 350);
         } else {
