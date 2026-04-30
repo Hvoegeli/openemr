@@ -42,11 +42,13 @@ What is actually shipped tonight versus aspirational, organized by sprint gate:
 | **Streaming** | ✅ token-by-token SSE via `astream_events`; tool-progress events drive UI status pills | — | — |
 | **Dashboard UI** | ✅ 2-pane layout: tabs (Today's Calendar default → Patient Card → Supporting Documents) on left, chat on right; doc viewer overlay with Close button | + Clinical Notes tab persisting into OpenEMR encounter SOAP note | — |
 | **Dashboard cache + prewarm** | ✅ in-process TTL cache (5-min); lifespan prewarms calendar + every patient on it; warm calendar/card/documents endpoints ~10ms | + event-driven invalidation on chart writes | + Redis for cross-machine cache |
-| Audit log | ❌ in-memory session dict only; no audit-log writes yet | ✅ append-only Postgres, written per FHIR call | + retention enforcement (90d chats / 7y audit) |
-| LangSmith observability | ❌ env wired, integration not active | ✅ traces every node + tool + token + cost | — |
+| Audit log | ❌ in-memory session dict only; no audit-log writes yet | ⚠️ in-memory `RequestTrace` ring buffer captures who/what/when per request (200-deep, see [observability.py](clinical-copilot/app/observability.py)); Postgres-backed audit log deferred to Sunday | + retention enforcement (90d chats / 7y audit) |
+| **In-app observability dashboard** | — | ✅ `/observability` page + `/api/traces` endpoint; per-request latency, tokens, $ cost, tool events, validator outcome | — |
+| LangSmith observability | ❌ env wired, integration not active | ✅ env wired, traces every node + tool + token + cost via langchain-anthropic | — |
 | Sessions / conversation history | in-memory dict (MVP) | Postgres, per session_id | + Redis for cross-machine state |
-| Anthropic prompt caching | ❌ system prompt re-sent every turn | ✅ cached per turn for ~90% repeat-input cost reduction | — |
-| Eval framework | ❌ ad-hoc smokes | ✅ ~140 cases (40A + 50B + 30C + 20 adversarial) | + CI gate on every PR |
+| Anthropic prompt caching | ❌ system prompt re-sent every turn | ⚠️ deferred — Sonnet 4.6 minimum cacheable prefix is empirically ~2048 tokens; current prompt is 952. Reaching threshold cleanly is a Sunday-track item alongside the deterministic intent-router (see §10.5) | — |
+| **Citation shorthand fix (A4)** | — | ✅ system prompt forbids `et al.` / `…` / `…` inside citation brackets; eval `lab_normal × cohen` re-recorded | — |
+| Eval framework | ❌ ad-hoc smokes | ✅ snapshot+replay gate at `clinical-copilot/evals/` (25 rules × 50 templates → 130 snapshots); golden 100% / labeled ≥90%; runs as prek pre-push hook | + CI gate on every PR |
 | BAA / HIPAA-grade hosting | ❌ Anthropic direct, Fly.io | route via AWS Bedrock for BAA; relocate hosting if needed | — |
 
 ## 2. System context
@@ -226,14 +228,63 @@ This is what would still be required to ship this to a real hospital:
 - **Clinical validation** — IRB review, physician evaluation panel before live use.
 - **The chart UI** — we ship a prototype; production needs a clinical UX review.
 
+### 8.1 Deterministic-first routing — known optimization (Sunday-track)
+
+The current architecture sends every chat turn through the LLM, which is the
+right default for a "multi-turn conversational agent" (the brief's framing) but
+overpays for **stock queries whose tool sequence is fully determined by intent**.
+Examples:
+
+- *"Catch me up on Cohen"* / *"update on Patel"* → always
+  `resolve_patient → current_time → get_patient_card`. The LLM is selecting
+  tools that an intent classifier could pick deterministically.
+- *"What was her creatinine 2 days ago?"* → if the value is on the card returned
+  by an earlier turn, code can extract it; the LLM is doing string formatting.
+- *"What is she on?"* → enumerates `MedicationRequest` rows from the card with
+  one citation each; templated prose suffices.
+
+A deterministic-first router would (a) regex-classify the doctor's message
+against a small set of stock intents, (b) run a fixed tool sequence, and (c)
+render a Jinja template carrying `[ResourceType/ID]` citations directly from
+tool output. The LLM is then reserved for genuinely free-form follow-ups
+(*"trending up?"*, *"any worse since admission?"*, *"compare to last
+admission"*) where intent is ambiguous or synthesis is required.
+
+**Why this is Sunday-track, not tonight:**
+
+- The eval suite is built around LLM-driven flow; rules like "agent calls
+  resolve_patient first" become trivially true if hardcoded, requiring eval
+  redesign.
+- Done well (intent grammar + synonym table + clinical-time parser + template
+  library + fallback rules), this is 1–2 weeks of engineering — not a deadline
+  task.
+- Done shoddily (regex-only matching), it would fail on real doctor phrasings
+  in the demo and look worse than today's agent.
+
+**Why this matters for reviewers:** the discipline of *"API calls only for
+things that cannot be deterministically solved"* is a real production concern
+for cost-per-turn and latency at hospital scale. We surface it explicitly here
+so the gap is documented rather than hidden.
+
+### 8.2 Anthropic prompt caching — known optimization (Sunday-track)
+
+Empirically, Sonnet 4.6's minimum cacheable prefix is ~2048 tokens; the current
+system prompt is 952. Cache markers are silently no-ops below threshold. Two
+paths for Sunday: (a) restructure the prompt to be cache-friendly (substantive
+content reaching ≥2200 tokens, with fresh eval recordings to capture any
+behavior shift), or (b) attach `cache_control` to the tool schema's last entry
+once `langchain-anthropic` exposes a clean way to do so. Either yields ~80–90%
+input-cost reduction on cache hits — measurable directly in the
+`/observability` dashboard's `cache_read_tokens` field.
+
 ## 9. Build sequencing
 
 | Sprint gate | Date | Scope | Status |
 |---|---|---|---|
 | Architecture defense | 2026-04-27 evening | This doc + presearch.md + verbal walkthrough | ✅ delivered |
 | **MVP** | **2026-04-28 (Tue) 11:59 PM CT** | Forked OpenEMR + publicly accessible deploy + AUDIT + USERS + ARCHITECTURE + 3-5 min demo. Working agent is a *bonus* (not required by the brief — Thursday's gate). | ✅ this submission |
-| Early submission | 2026-04-30 (Thu) 11:59 PM CT | Working agent deployed on same infra as OpenEMR + eval framework (~140 cases) + LangSmith observability + app-layer auth + audit-log Postgres + new demo video | next |
-| Final | 2026-05-03 (Sun) | + Use Case B (clinical_rules tool) + Use Case C (sign-out drafting) + cost analysis (100/1K/10K/100K) + social post + production-readiness gaps closed | planned |
+| Early submission | 2026-04-30 (Thu) 11:59 PM CT | Working agent deployed on same infra as OpenEMR + eval suite (130 snapshots, snapshot+replay gate as prek pre-push hook) + per-request observability dashboard (`/observability` + `/api/traces`) + LangSmith env wired + app-layer auth + new demo video. Audit-log-to-Postgres deferred to Sunday with in-memory `RequestTrace` ring buffer covering observability needs (200-deep). | in flight |
+| Final | 2026-05-03 (Sun) | + audit log → Postgres (per-FHIR-call append-only) + Use Case B (clinical_rules tool) + Use Case C (sign-out drafting) + deterministic-first intent router (§8.1) + cache-friendly prompt restructure (§8.2) + cost analysis (100/1K/10K/100K) + social post + production-readiness gaps closed | planned |
 
 **MVP-day decision log** (things not visible in the design but worth stating for the interview):
 
