@@ -12,7 +12,7 @@ tools like `current_time`, but the LLM is still forbidden from synthesizing
 facts that don't appear in some tool's `data`.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from langchain_core.tools import tool

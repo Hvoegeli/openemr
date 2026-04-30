@@ -444,10 +444,16 @@ def _decorate_card_vitals(card_data: dict, notes: list, trends: dict) -> dict:
         (or hasn't happened yet) — kept so they still surface on the card.
     """
     from datetime import datetime
+
+    from app.fhir.adapter import _clinical_iso
+
     fhir_rows = list(card_data.get("recent_vitals") or [])
 
     # Backfill BP rows that the flat-formatter dropped because the
-    # underlying Observation was a composite.
+    # underlying Observation was a composite. Times are re-stamped in
+    # clinical-local TZ so this fallback path doesn't disagree with the
+    # primary `_format_vital` rows (which are already clinical-local) on
+    # the minute-key the frontend uses to group readings.
     existing_names = {(r.get("name") or "").lower() for r in fhir_rows}
     bp_already_listed = any("systolic" in n or "diastolic" in n for n in existing_names)
     if not bp_already_listed:
@@ -461,7 +467,7 @@ def _decorate_card_vitals(card_data: dict, notes: list, trends: dict) -> dict:
                     "name": _BP_LABEL[canonical],
                     "value": pt.get("value"),
                     "unit": pt.get("unit"),
-                    "time": pt.get("date"),
+                    "time": _clinical_iso(pt.get("date")),
                 })
 
     synced_notes = [n for n in notes if n.fhir_synced_at]
@@ -528,7 +534,12 @@ def _decorate_card_vitals(card_data: dict, notes: list, trends: dict) -> dict:
     # truth either way — surface it regardless of FHIR roundtrip status.
     note_only_vitals: list[dict] = []
     for n in [*unsynced_finals, *synced_notes]:
-        when = n.finalized_at or n.updated_at
+        # Use clinical-local TZ to match `fhir_rows[].time` so the frontend's
+        # minute-precision group key lines up across both sources. Without
+        # this conversion, a synced note whose FHIR roundtrip dropped a key
+        # would surface here in UTC and split into a separate group on the
+        # card — and the slice-to-1 view would render only one of them.
+        when = _clinical_iso(n.finalized_at or n.updated_at)
         for canonical, value in (n.vitals or {}).items():
             if value in (None, ""):
                 continue
