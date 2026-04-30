@@ -191,6 +191,15 @@
     }
     .trends-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+    .trends-detail {
+      margin-top: 0.7rem; padding: 0.55rem 0.75rem;
+      border: 1px solid var(--border); border-radius: 8px;
+      background: #fafafb; font-size: 0.85rem; min-height: 1.4rem;
+    }
+    .trends-detail .vital-name { color: var(--muted); }
+    .trends-detail .source-ref { color: var(--accent); cursor: pointer; }
+    .trends-detail.empty { color: var(--muted); font-style: italic; }
+
     .trends-grid {
       display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem;
       margin-top: 0.3rem;
@@ -214,6 +223,10 @@
     .vc-svg path.line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
     .vc-svg circle { fill: var(--accent); cursor: pointer; }
     .vc-svg circle.from-note { fill: #16a34a; }
+    .vc-svg circle.selected { stroke: #0f172a; stroke-width: 1.5; r: 4; }
+    .vc-svg .axis-label {
+      font-size: 8px; fill: #64748b; font-family: inherit;
+    }
     .vc-empty {
       border: 1px dashed var(--border); border-radius: 8px;
       padding: 0.8rem; font-size: 0.82rem; color: var(--muted);
@@ -921,29 +934,41 @@
       }).join('');
       return '<div class="vitals-snapshot">' + rows + '</div>' +
              '<div class="vs-actions">' +
-               '<button class="trends-btn" type="button" id="open-trends">View vital trends →</button>' +
+               '<button class="trends-btn" type="button" id="open-trends">View Vital Trends →</button>' +
              '</div>';
     }
 
+    // Cache the most recent trends payload by pid so click handlers can
+    // resolve a clicked dot back to its full data point without re-fetching.
+    const trendsCache = new Map();
+
     async function showVitalTrends(pid) {
       cardView.set(pid, 'trends');
-      tabCard.innerHTML = '<div class="empty">Loading vital trends…</div>';
+      tabCard.innerHTML = '<div class="empty">Loading Vital Trends…</div>';
       try {
         const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/vital-trends', { credentials: 'same-origin' });
         if (!r.ok) {
-          tabCard.innerHTML = '<div class="empty">Failed to load vital trends.</div>';
+          tabCard.innerHTML = '<div class="empty">Failed to load Vital Trends.</div>';
           return;
         }
         const data = await r.json();
+        trendsCache.set(pid, data);
         const charts = VITAL_KEYS.map(k => renderVitalChart(k, (data.trends || {})[k] || [])).join('');
         tabCard.innerHTML =
           '<div class="trends-back"><button class="trends-btn" type="button" id="close-trends">← Back to patient card</button></div>' +
-          '<h2 class="patient-name">Vital trends</h2>' +
-          '<div class="meta">All known data points across FHIR observations and finalized clinical notes. Missing values are left blank — we don’t interpolate.</div>' +
-          '<div class="trends-grid">' + charts + '</div>';
+          '<h2 class="patient-name">Vital Trends</h2>' +
+          '<div class="meta">Each plotted dot is a known reading. Missing days remain blank — we don’t interpolate. Click any dot to see its source.</div>' +
+          '<div class="trends-grid">' + charts + '</div>' +
+          '<div class="trends-detail empty" id="trends-detail">Click a data point to see when it was recorded and where it came from.</div>';
       } catch {
-        tabCard.innerHTML = '<div class="empty">Failed to load vital trends.</div>';
+        tabCard.innerHTML = '<div class="empty">Failed to load Vital Trends.</div>';
       }
+    }
+
+    function fmtAxisDate(ts) {
+      const d = new Date(ts);
+      // Compact "Apr 29" style — short month + day, dropping the year.
+      return d.toLocaleDateString(undefined, {month: 'short', day: 'numeric'});
     }
 
     function renderVitalChart(key, points) {
@@ -952,7 +977,10 @@
       if (!points || !points.length) {
         return '<div class="vc-empty">' + escapeHtml(label) + ': no data points on file</div>';
       }
-      const W = 280, H = 90, PX = 22, PY = 14;
+      // ViewBox is fixed; CSS scales the SVG to its container width.
+      // Extra bottom padding (PB) leaves room for x-axis date labels.
+      const W = 280, H = 110, PX = 22, PY = 14, PB = 22;
+      const innerH = H - PY - PB;
       const xs = points.map(p => new Date(p.date).getTime());
       const ys = points.map(p => Number(p.value));
       const xmin = Math.min.apply(null, xs);
@@ -962,7 +990,7 @@
       const xspan = Math.max(1, xmax - xmin);
       const yspan = Math.max(1, ymax - ymin);
       const xC = x => PX + ((x - xmin) / xspan) * (W - 2 * PX);
-      const yC = y => H - PY - ((y - ymin) / yspan) * (H - 2 * PY);
+      const yC = y => PY + (1 - (y - ymin) / yspan) * innerH;
 
       let path = '';
       points.forEach((p, i) => {
@@ -971,26 +999,41 @@
         path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
       });
 
-      const dots = points.map(p => {
+      const dots = points.map((p, i) => {
         const x = xC(new Date(p.date).getTime());
         const y = yC(Number(p.value));
         const fromNote = typeof p.source === 'string' && p.source.startsWith('ClinicalNote/');
-        const tip = String(p.value) + ' ' + (p.unit || unit) + ' · ' +
+        const tip = String(p.value) + ' ' + (p.unit || unit) + ' on ' +
                     new Date(p.date).toLocaleString();
         return '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) +
-               '" r="3"' + (fromNote ? ' class="from-note"' : '') +
+               '" r="3.2"' + (fromNote ? ' class="from-note"' : '') +
+               ' data-vital-key="' + escapeHtml(key) + '"' +
+               ' data-point-idx="' + i + '"' +
                ' data-fhir-ref="' + escapeHtml(p.source || '') + '">' +
                '<title>' + escapeHtml(tip) + '</title></circle>';
       }).join('');
 
       const latest = points[points.length - 1];
-      // Light y-axis tick lines at min/mid/max
       const gridY = [yC(ymin), yC((ymin + ymax) / 2), yC(ymax)];
       const grid = gridY.map(y =>
         '<line class="grid" x1="' + PX + '" y1="' + y.toFixed(1) +
         '" x2="' + (W - PX) + '" y2="' + y.toFixed(1) + '"/>').join('');
 
-      return '<div class="vc">' +
+      // X-axis: a horizontal line + start/mid/end date labels.
+      const axisY = PY + innerH + 2;
+      const xMid = (xmin + xmax) / 2;
+      const labelY = axisY + 12;
+      const xAxisLabels =
+        '<line class="grid" x1="' + PX + '" y1="' + axisY + '" x2="' + (W - PX) + '" y2="' + axisY + '"/>' +
+        '<text class="axis-label" x="' + PX + '" y="' + labelY + '" text-anchor="start">' + escapeHtml(fmtAxisDate(xmin)) + '</text>' +
+        (points.length > 2
+          ? '<text class="axis-label" x="' + ((W) / 2) + '" y="' + labelY + '" text-anchor="middle">' + escapeHtml(fmtAxisDate(xMid)) + '</text>'
+          : '') +
+        (points.length > 1
+          ? '<text class="axis-label" x="' + (W - PX) + '" y="' + labelY + '" text-anchor="end">' + escapeHtml(fmtAxisDate(xmax)) + '</text>'
+          : '');
+
+      return '<div class="vc" data-vital-key="' + escapeHtml(key) + '">' +
         '<div class="vc-head">' +
           escapeHtml(label) +
           ' <span class="vc-latest">' + escapeHtml(String(latest.value) + ' ' + unit) + '</span>' +
@@ -999,24 +1042,64 @@
         '<svg class="vc-svg" viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="' + H + '" preserveAspectRatio="none">' +
           grid +
           '<path class="line" d="' + path + '"/>' +
+          xAxisLabels +
           dots +
         '</svg>' +
       '</div>';
     }
 
-    // Delegated click handler for the patient-card panel — handles both
-    // "View vital trends →" and "← Back to patient card" buttons that
-    // get re-rendered every time the panel is repainted.
+    function showTrendDetail(pid, key, idx) {
+      const data = trendsCache.get(pid);
+      if (!data) return;
+      const pts = (data.trends || {})[key] || [];
+      if (idx < 0 || idx >= pts.length) return;
+      const pt = pts[idx];
+      const detailEl = document.getElementById('trends-detail');
+      if (!detailEl) return;
+
+      const refType = (pt.source || '').split('/')[0];
+      const sourceText = refType === 'ClinicalNote'
+        ? 'Clinical note (finalized) · click to open'
+        : refType === 'Observation'
+          ? 'FHIR Observation · ' + (pt.source || '')
+          : (pt.source || 'unknown source');
+
+      detailEl.classList.remove('empty');
+      detailEl.innerHTML =
+        '<span class="vital-name">' + escapeHtml(VITAL_LABELS[key]) + ':</span> ' +
+        '<strong>' + escapeHtml(String(pt.value)) + ' ' + escapeHtml(pt.unit || VITAL_UNITS[key]) + '</strong>' +
+        ' · ' + escapeHtml(new Date(pt.date).toLocaleString()) +
+        ' · <span class="source-ref" data-fhir-ref="' + escapeHtml(pt.source || '') + '">' +
+          escapeHtml(sourceText) + '</span>';
+
+      // Visually mark the selected dot in the relevant chart.
+      tabCard.querySelectorAll('.vc-svg circle.selected').forEach(c => c.classList.remove('selected'));
+      const dot = tabCard.querySelector(
+        'circle[data-vital-key="' + cssEscape(key) + '"][data-point-idx="' + idx + '"]'
+      );
+      if (dot) dot.classList.add('selected');
+    }
+
+    // Delegated click handler for the patient-card panel — handles the
+    // "View Vital Trends →" / "← Back to patient card" toggles AND
+    // clicks on individual chart data-points (which open the detail row).
     tabCard.addEventListener('click', (e) => {
       const openBtn  = e.target.closest('#open-trends');
       const closeBtn = e.target.closest('#close-trends');
+      const dot      = e.target.closest('circle[data-vital-key]');
       if (!activePatientId) return;
-      if (openBtn)  { showVitalTrends(activePatientId); }
+      if (openBtn)  { showVitalTrends(activePatientId); return; }
       if (closeBtn) {
         cardView.set(activePatientId, 'snapshot');
         const e2 = buffer.get(activePatientId) || {};
         if (e2.card) tabCard.innerHTML = renderCard(e2.card);
         else refreshCard(activePatientId);
+        return;
+      }
+      if (dot) {
+        const key = dot.getAttribute('data-vital-key');
+        const idx = Number(dot.getAttribute('data-point-idx'));
+        showTrendDetail(activePatientId, key, idx);
       }
     });
 

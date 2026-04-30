@@ -148,10 +148,15 @@ class ClinicalNote:
 class ClinicalNoteStore:
     """JSON-backed clinical-note store with lazy auto-finalize on read.
 
+    Internally keyed by note UUID — a (patient × author × shift) slot can
+    therefore hold *multiple* finalized notes plus at most one open draft.
+    The first-pass spec was strict ("one note per shift") but the demo
+    needs per-shift addenda so trends actually accumulate data points;
+    each finalized note remains immutable, but a new draft can be opened
+    after the previous one is locked.
+
     Thread-safe at the file write boundary; in-memory operations rely on
-    the GIL since we never hold cross-await locks. Concurrent doctors on
-    the same patient share the same file but write to different keys
-    (one per author per shift), so contention is structural-only.
+    the GIL since we never hold cross-await locks.
     """
 
     def __init__(self, path: Path) -> None:
@@ -169,11 +174,15 @@ class ClinicalNoteStore:
         except Exception as e:  # noqa: BLE001
             log.warning("failed to load clinical notes from %s: %s", self.path, e)
             return
-        for nid, payload in (raw.get("notes") or {}).items():
+        # Old on-disk files may have keyed entries by composite
+        # ``pid|author|shift_start``; rekey to the note's own id so the
+        # in-memory dict is always uuid → ClinicalNote.
+        for _, payload in (raw.get("notes") or {}).items():
             try:
-                self._notes[nid] = ClinicalNote(**payload)
+                note = ClinicalNote(**payload)
+                self._notes[note.id] = note
             except Exception as e:  # noqa: BLE001
-                log.warning("skipping malformed note %s: %s", nid, e)
+                log.warning("skipping malformed note: %s", e)
 
     def _flush(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,11 +190,6 @@ class ClinicalNoteStore:
         tmp = self.path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2))
         tmp.replace(self.path)
-
-    # ── identity ───────────────────────────────────────────────────────
-    @staticmethod
-    def _key(patient_id: str, author: str, shift_start_iso: str) -> str:
-        return f"{patient_id}|{author}|{shift_start_iso}"
 
     # ── auto-finalize ──────────────────────────────────────────────────
     def _maybe_finalize(self, note: ClinicalNote, now: datetime) -> ClinicalNote:
@@ -211,21 +215,31 @@ class ClinicalNoteStore:
                 changed = True
         return changed
 
+    def _find_open_draft(
+        self, patient_id: str, author: str, shift_start_iso: str, *, now: datetime,
+    ) -> ClinicalNote | None:
+        """Return the unique open draft for this (patient × author × shift), if any.
+
+        At most one draft can be open per shift — `upsert_draft` enforces
+        that — but multiple finalized notes from the same shift may exist
+        from earlier addenda. Auto-finalize is applied during the scan.
+        """
+        for n in self._notes.values():
+            if n.patient_id != patient_id or n.author != author:
+                continue
+            if shift_window(datetime.fromisoformat(n.written_at))[0].isoformat() != shift_start_iso:
+                continue
+            self._maybe_finalize(n, now)
+            if n.status == "draft":
+                return n
+        return None
+
     # ── operations ─────────────────────────────────────────────────────
     def get_draft(self, patient_id: str, author: str, *, now: datetime) -> ClinicalNote | None:
         """Return the current author's open draft for this patient × current shift."""
         with self._lock:
             shift_start, _ = shift_window(now)
-            target = self._key(patient_id, author, shift_start.isoformat())
-            note = self._notes.get(target)
-            if note is None:
-                return None
-            self._maybe_finalize(note, now)
-            if note.status == "final":
-                # Crossed shift boundary mid-session — no draft available
-                self._flush()
-                return None
-            return note
+            return self._find_open_draft(patient_id, author, shift_start.isoformat(), now=now)
 
     def upsert_draft(
         self,
@@ -237,11 +251,17 @@ class ClinicalNoteStore:
         *,
         now: datetime,
     ) -> ClinicalNote:
-        """Create or overwrite the author's open draft for this patient × shift."""
+        """Edit the current open draft, or create a new one if none exists.
+
+        Once a draft is finalized, the next `upsert_draft` opens a fresh
+        draft instead of refusing the call — this is what lets a doctor
+        record additional readings within the same shift.
+        """
         with self._lock:
             shift_start, _ = shift_window(now)
-            target = self._key(patient_id, author, shift_start.isoformat())
-            existing = self._notes.get(target)
+            existing = self._find_open_draft(
+                patient_id, author, shift_start.isoformat(), now=now,
+            )
             if existing is None:
                 note = ClinicalNote(
                     id=str(uuid.uuid4()),
@@ -256,18 +276,8 @@ class ClinicalNoteStore:
                     recs_md=recs_md,
                     vitals=vitals or {},
                 )
-                self._notes[target] = note
+                self._notes[note.id] = note
             else:
-                # Auto-finalize check: if shift already ended, refuse to
-                # update the now-locked note. Caller should treat as "start
-                # a new draft for the next shift."
-                self._maybe_finalize(existing, now)
-                if existing.status == "final":
-                    self._flush()
-                    raise ShiftEndedError(
-                        "this note is already finalized — either you saved it explicitly or "
-                        "the shift ended. start a new draft on the next shift."
-                    )
                 existing.notes_md = notes_md
                 existing.recs_md = recs_md
                 existing.vitals = vitals or {}
@@ -280,13 +290,11 @@ class ClinicalNoteStore:
         """Explicit Save — promote the open draft to immutable 'final'."""
         with self._lock:
             shift_start, _ = shift_window(now)
-            target = self._key(patient_id, author, shift_start.isoformat())
-            note = self._notes.get(target)
+            note = self._find_open_draft(
+                patient_id, author, shift_start.isoformat(), now=now,
+            )
             if note is None:
                 raise NotFoundError("no open draft to finalize")
-            if note.status == "final":
-                # Already finalized (e.g. by lazy auto-finalize); idempotent
-                return note
             note.status = "final"
             note.finalized_at = now.isoformat()
             self._flush()

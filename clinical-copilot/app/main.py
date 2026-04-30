@@ -62,7 +62,6 @@ from app.observability import (  # noqa: E402
 from app.clinical_notes import (  # noqa: E402
     ClinicalNoteStore,
     NotFoundError as ClinicalNoteNotFound,
-    ShiftEndedError,
     now_utc,
 )
 from app.vitals import collect_vital_trends, latest_per_vital  # noqa: E402
@@ -491,18 +490,16 @@ async def upsert_clinical_note_draft(
     username: str = Depends(current_user),
 ) -> dict:
     """Create or update the author's open draft. Multiple saves within a
-    shift consolidate into the same note (the spec's 'consolidate' rule)."""
-    try:
-        note = app.state.clinical_notes.upsert_draft(
-            patient_id=patient_id,
-            author=username,
-            notes_md=body.notes_md or "",
-            recs_md=body.recs_md or "",
-            vitals=body.vitals,
-            now=now_utc(),
-        )
-    except ShiftEndedError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+    shift consolidate into the same draft until it is finalized; once
+    finalized, a subsequent save opens a fresh draft (an addendum)."""
+    note = app.state.clinical_notes.upsert_draft(
+        patient_id=patient_id,
+        author=username,
+        notes_md=body.notes_md or "",
+        recs_md=body.recs_md or "",
+        vitals=body.vitals,
+        now=now_utc(),
+    )
     # Invalidate the supporting-docs cache for this patient so the new
     # draft (or its label change) shows immediately on next fetch. Trends
     # only count finalized notes, so an in-progress draft can't move them
