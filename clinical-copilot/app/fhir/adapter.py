@@ -122,7 +122,11 @@ async def get_patient_card(client: FhirClient, *, patient_id: str) -> SourcedRes
         client.search("MedicationRequest", {"patient": patient_id, "_count": 10}),
         client.search(
             "Observation",
-            {"patient": patient_id, "category": "vital-signs", "_count": 10},
+            # 50 observations = roughly 5 vitals-panel timepoints (one rounding
+            # event encodes as ~6-10 separate Observation resources). 10 was
+            # too tight — the agent only ever saw a single timepoint and
+            # couldn't form trends. Matches the trends endpoint's _count.
+            {"patient": patient_id, "category": "vital-signs", "_count": 50},
         ),
     )
 
