@@ -183,8 +183,22 @@
     .vs-row .value { font-variant-numeric: tabular-nums; }
     .vs-row .value.empty { color: var(--muted); }
     .vs-row.from-note .value { color: var(--accent); }
-    /* Full vitals list (the "Recent Vitals" rendering) */
-    .recent-vitals { margin: 0.2rem 0 0.4rem; padding: 0; list-style: none; }
+    /* Full vitals list (the "Recent Vitals" rendering), grouped by
+       recording time. Each group of readings recorded at the same minute
+       shares one .rv-group block; between groups we draw a clear break
+       so noon and 3pm panels look like separate "events" at a glance. */
+    .rv-groups { margin: 0.2rem 0 0.4rem; }
+    .rv-group + .rv-group {
+      margin-top: 0.85rem;
+      padding-top: 0.55rem;
+      border-top: 1px solid #e5e7eb;
+    }
+    .rv-group-header {
+      font-size: 0.72rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.05em;
+      margin-bottom: 0.2rem;
+    }
+    .recent-vitals { margin: 0; padding: 0; list-style: none; }
     .recent-vitals li {
       display: grid; grid-template-columns: 1fr auto auto;
       gap: 0.5rem; align-items: baseline;
@@ -1028,34 +1042,61 @@
         return '<div class="empty">None documented</div>' + trendsButtonRow();
       }
 
-      const rows = items.map(it => {
-        const meta = [];
-        if (it.fromNote) {
-          const author = it.fromNote.author || '?';
-          const when = relTime(it.fromNote.finalized_at);
-          meta.push(
-            '<span class="pill note">via clinical note</span>',
-            escapeHtml(author),
-            escapeHtml(when),
-            (it.unsynced ? '<span class="pill" title="EHR push pending">unsynced</span>' : ''),
-          );
-        } else if (it.time) {
-          meta.push(
-            '<span class="pill fhir">FHIR</span>',
-            escapeHtml(relTime(it.time)),
-          );
+      // Group by the minute the reading was recorded. Items from one
+      // vitals-panel POST share an effectiveDateTime down to the second,
+      // so minute-precision keeps a single "noon" reading and a separate
+      // "3pm" reading visually distinct without splitting items that
+      // happen to land milliseconds apart from the same panel.
+      const groups = new Map();
+      items.forEach(it => {
+        const key = (it.time || 'unknown').slice(0, 16);  // YYYY-MM-DDTHH:MM
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(it);
+      });
+
+      const groupHtml = Array.from(groups.entries()).map(([key, rows]) => {
+        let headerLabel;
+        if (key === 'unknown') {
+          headerLabel = 'Time unknown';
+        } else {
+          const d = new Date(key + ':00');
+          headerLabel = isNaN(d.getTime())
+            ? key
+            : d.toLocaleString(undefined, {
+                month: 'short', day: 'numeric',
+                hour: 'numeric', minute: '2-digit',
+              });
         }
-        return '<li' + (it.fromNote ? ' class="from-note"' : '') +
-               ' data-fhir-ref="' + escapeHtml(it.ref) + '">' +
-                 '<span class="rv-name">' + escapeHtml(it.name) + '</span>' +
-                 '<span class="rv-val">' + escapeHtml(String(it.value)) +
-                   (it.unit ? ' <span class="rv-name">' + escapeHtml(it.unit) + '</span>' : '') +
-                 '</span>' +
-                 '<span class="rv-meta">' + meta.filter(Boolean).join(' · ') + '</span>' +
-               '</li>';
+        const rowsHtml = rows.map(renderRecentVitalRow).join('');
+        return '<div class="rv-group">' +
+                 '<div class="rv-group-header">' + escapeHtml(headerLabel) + '</div>' +
+                 '<ul class="recent-vitals">' + rowsHtml + '</ul>' +
+               '</div>';
       }).join('');
 
-      return '<ul class="recent-vitals">' + rows + '</ul>' + trendsButtonRow();
+      return '<div class="rv-groups">' + groupHtml + '</div>' + trendsButtonRow();
+    }
+
+    function renderRecentVitalRow(it) {
+      const meta = [];
+      if (it.fromNote) {
+        const author = it.fromNote.author || '?';
+        meta.push('<span class="pill note">via clinical note</span>');
+        meta.push(escapeHtml(author));
+        meta.push(escapeHtml(relTime(it.fromNote.finalized_at)));
+        if (it.unsynced) meta.push('<span class="pill" title="EHR push pending">unsynced</span>');
+      } else if (it.time) {
+        meta.push('<span class="pill fhir">FHIR</span>');
+        meta.push(escapeHtml(relTime(it.time)));
+      }
+      return '<li' + (it.fromNote ? ' class="from-note"' : '') +
+             ' data-fhir-ref="' + escapeHtml(it.ref) + '">' +
+               '<span class="rv-name">' + escapeHtml(it.name) + '</span>' +
+               '<span class="rv-val">' + escapeHtml(String(it.value)) +
+                 (it.unit ? ' <span class="rv-name">' + escapeHtml(it.unit) + '</span>' : '') +
+               '</span>' +
+               '<span class="rv-meta">' + meta.filter(Boolean).join(' · ') + '</span>' +
+             '</li>';
     }
 
     function trendsButtonRow() {
