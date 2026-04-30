@@ -51,6 +51,7 @@ from app.config import settings  # noqa: E402
 from app.fhir import adapter  # noqa: E402
 from app.fhir.client import FhirClient  # noqa: E402
 from app.fhir.extras import get_calendar_today, get_supporting_documents  # noqa: E402
+from app.fhir.writer import OpenEMRWriter, OpenEMRWriteError  # noqa: E402
 from app.observability import (  # noqa: E402
     TokenUsageCallback,
     TraceStore,
@@ -147,6 +148,7 @@ MODEL_NAME = "claude-sonnet-4-6"
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_langsmith()  # idempotent; no-op when LANGSMITH_TRACING is unset
     app.state.fhir = FhirClient()
+    app.state.openemr_writer = OpenEMRWriter()
     app.state.graph = build_graph(app.state.fhir, model_name=MODEL_NAME)
     app.state.cache = TTLCache(ttl_seconds=DATA_CACHE_TTL_S)
     app.state.traces = TraceStore(capacity=200)
@@ -162,6 +164,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         prewarm_task.cancel()
         await app.state.fhir.aclose()
+        await app.state.openemr_writer.aclose()
 
 
 app = FastAPI(title="Clinical Co-pilot", lifespan=lifespan)
@@ -402,6 +405,77 @@ async def _vital_trends_compute(patient_id: str) -> dict:
     return {"current": latest_per_vital(trends), "trends": trends}
 
 
+_VITAL_NAME_TO_KEY = {
+    "heart rate": "heart_rate", "pulse": "heart_rate",
+    "respiratory rate": "respiratory_rate", "resp rate": "respiratory_rate",
+    "body temperature": "temp_f", "temperature": "temp_f",
+    "oxygen_saturation": "spo2", "oxygen saturation": "spo2", "spo2": "spo2",
+    "systolic blood pressure": "bp_systolic", "diastolic blood pressure": "bp_diastolic",
+}
+
+
+def _decorate_card_vitals(card_data: dict, notes: list) -> dict:
+    """Attach clinical-note provenance to FHIR vital observations and inject
+    any unsynced note readings as additional rows.
+
+    Returns a new dict with:
+      - recent_vitals: FHIR-as-before, each row optionally carrying a
+        ``from_note`` block (author, finalized_at, note_id) when the
+        reading was written by a finalized clinical note we already
+        pushed to the EHR.
+      - ``note_only_vitals``: readings from notes whose FHIR push failed
+        (or hasn't happened yet) — kept so they still surface on the card.
+    """
+    from datetime import datetime
+    fhir_rows = list(card_data.get("recent_vitals") or [])
+
+    synced_notes = [n for n in notes if n.fhir_synced_at]
+    unsynced_finals = [n for n in notes if n.status == "final" and not n.fhir_synced_at]
+
+    # Pair FHIR vitals to synced notes by time proximity (±5 min).
+    if synced_notes and fhir_rows:
+        note_pairs = [(datetime.fromisoformat(n.finalized_at), n) for n in synced_notes if n.finalized_at]
+        for v in fhir_rows:
+            t = v.get("time")
+            if not t:
+                continue
+            try:
+                v_ts = datetime.fromisoformat(t.replace("Z", "+00:00") if "Z" in t else t)
+            except (ValueError, TypeError):
+                continue
+            for note_ts, n in note_pairs:
+                if abs((v_ts - note_ts).total_seconds()) <= 300:
+                    v["from_note"] = {
+                        "author": n.author,
+                        "finalized_at": n.finalized_at,
+                        "note_id": n.id,
+                    }
+                    break
+
+    note_only_vitals: list[dict] = []
+    for n in unsynced_finals:
+        for canonical, value in (n.vitals or {}).items():
+            if value in (None, ""):
+                continue
+            note_only_vitals.append({
+                "kind": "note-vital",
+                "key": canonical,
+                "value": value,
+                "time": n.finalized_at or n.updated_at,
+                "from_note": {
+                    "author": n.author,
+                    "finalized_at": n.finalized_at,
+                    "note_id": n.id,
+                },
+            })
+
+    return {
+        **card_data,
+        "recent_vitals": fhir_rows,
+        "note_only_vitals": note_only_vitals,
+    }
+
+
 @app.get("/api/patient/{patient_id}/card")
 async def patient_card(patient_id: str, _user: str = Depends(current_user)) -> dict:
     async def _compute() -> dict:
@@ -415,10 +489,9 @@ async def patient_card(patient_id: str, _user: str = Depends(current_user)) -> d
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
-    # The card surfaces the most-recent reading per vital — older points
-    # live behind the "Vital trends" button. Newest wins regardless of
-    # whether it came from FHIR or a clinical note.
-    return {**card_data, "current_vitals": trends_data["current"]}
+    notes = app.state.clinical_notes.list_for_patient(patient_id, now=now_utc())
+    decorated = _decorate_card_vitals(card_data, notes)
+    return {**decorated, "current_vitals": trends_data["current"]}
 
 
 @app.get("/api/patient/{patient_id}/vital-trends")
@@ -515,14 +588,48 @@ async def finalize_clinical_note(
     patient_id: str,
     username: str = Depends(current_user),
 ) -> dict:
-    """Explicit Save — promote the open draft to immutable 'final' status."""
+    """Explicit Save — promote the open draft to immutable 'final' status,
+    then best-effort push the vitals to OpenEMR's vitals chart so the EHR
+    sees what the doctor entered. A push failure does not roll back the
+    local finalize — the note remains the canonical record either way.
+    """
     try:
         note = app.state.clinical_notes.finalize(patient_id, username, now=now_utc())
     except ClinicalNoteNotFound as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+
+    push_status: dict = {"attempted": False, "ok": False, "error": None, "vital_id": None}
+    if note.vitals:
+        push_status["attempted"] = True
+        try:
+            result = await app.state.openemr_writer.write_vitals(
+                patient_uuid=patient_id,
+                vitals=note.vitals,
+                when_iso=note.finalized_at or note.updated_at,
+            )
+            app.state.clinical_notes.mark_fhir_synced(
+                note.id, vital_id=result.get("vital_id"), now=now_utc(),
+            )
+            push_status.update(ok=True, vital_id=result.get("vital_id"))
+            # The newly written observations need to surface on the next
+            # FHIR search — invalidate the card-level FHIR cache too.
+            app.state.cache.invalidate(f"card:{patient_id}")
+        except OpenEMRWriteError as e:
+            log.warning("FHIR vitals push failed for note %s: %s", note.id, e)
+            push_status["error"] = str(e)
+        except Exception as e:  # noqa: BLE001
+            log.exception("unexpected error pushing vitals for note %s", note.id)
+            push_status["error"] = f"{type(e).__name__}: {e}"
+
     app.state.cache.invalidate(f"docs:{patient_id}")
     app.state.cache.invalidate(f"trends:{patient_id}")
-    return {"note": note.to_doc_item()}
+    # Re-read the note so we pick up the freshly-stamped fhir_synced_at.
+    refreshed = next(
+        (n for n in app.state.clinical_notes.list_for_patient(patient_id, now=now_utc())
+         if n.id == note.id),
+        note,
+    )
+    return {"note": refreshed.to_doc_item(), "ehr_push": push_status}
 
 
 @app.get("/api/patient/{patient_id}/clinical-notes/latest-prior-shift")

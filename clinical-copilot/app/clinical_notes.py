@@ -112,6 +112,10 @@ class ClinicalNote:
     notes_md: str
     recs_md: str
     vitals: dict[str, Any]        # dict so JSON serialization round-trips cleanly
+    # Set when finalized vitals are pushed to OpenEMR; None means the
+    # JSON-store note is still the only place those readings exist.
+    fhir_synced_at: str | None = None
+    fhir_vital_id: str | None = None
 
     @property
     def shift_started(self) -> datetime:
@@ -140,6 +144,8 @@ class ClinicalNote:
             "recs_md": self.recs_md,
             "vitals": self.vitals,
             "finalized_at": self.finalized_at,
+            "fhir_synced_at": self.fhir_synced_at,
+            "fhir_vital_id": self.fhir_vital_id,
         }
 
 
@@ -303,6 +309,21 @@ class ClinicalNoteStore:
                 note.id, note.patient_id, note.author,
             )
             return note
+
+    def mark_fhir_synced(self, note_id: str, *, vital_id: str | None, now: datetime) -> None:
+        """Stamp a finalized note as having been pushed to OpenEMR's vitals chart.
+
+        Idempotent — re-stamping is fine. Used by the post-finalize hook so
+        future cards/trends know to skip this note's vitals when reading
+        FHIR (the same readings will surface as Observations there)."""
+        with self._lock:
+            n = self._notes.get(note_id)
+            if n is None:
+                return
+            n.fhir_synced_at = now.isoformat()
+            if vital_id is not None:
+                n.fhir_vital_id = str(vital_id)
+            self._flush()
 
     def list_for_patient(self, patient_id: str, *, now: datetime) -> list[ClinicalNote]:
         """All notes for a patient (drafts + finals), most recent first."""

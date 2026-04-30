@@ -159,6 +159,11 @@ def collect_vital_trends(
     for n in note_dicts:
         if n.get("status") != "final":
             continue
+        # Once a finalized note's vitals have been pushed to OpenEMR, the
+        # FHIR Observation search picks them up — counting them again from
+        # the JSON store would double-plot the same readings.
+        if n.get("fhir_synced_at"):
+            continue
         when = n.get("finalized_at") or n.get("date")
         if not when:
             continue

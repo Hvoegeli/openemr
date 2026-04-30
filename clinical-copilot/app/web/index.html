@@ -183,6 +183,28 @@
     .vs-row .value { font-variant-numeric: tabular-nums; }
     .vs-row .value.empty { color: var(--muted); }
     .vs-row.from-note .value { color: var(--accent); }
+    /* Full vitals list (the "Recent Vitals" rendering) */
+    .recent-vitals { margin: 0.2rem 0 0.4rem; padding: 0; list-style: none; }
+    .recent-vitals li {
+      display: grid; grid-template-columns: 1fr auto auto;
+      gap: 0.5rem; align-items: baseline;
+      padding: 0.28rem 0;
+      border-bottom: 1px dashed #eef0f3;
+      font-size: 0.9rem;
+    }
+    .recent-vitals li:last-child { border-bottom: 0; }
+    .recent-vitals .rv-name { color: var(--muted); font-size: 0.85rem; }
+    .recent-vitals .rv-val  { font-variant-numeric: tabular-nums; font-weight: 500; }
+    .recent-vitals .rv-meta { font-size: 0.74rem; color: var(--muted); }
+    .recent-vitals .rv-meta .pill {
+      display: inline-block; padding: 0.05rem 0.45rem; border-radius: 999px;
+      border: 1px solid var(--border); font-size: 0.7rem;
+      vertical-align: 1px;
+    }
+    .recent-vitals .rv-meta .pill.fhir { color: #1e40af; border-color: #bfdbfe; background: #eff6ff; }
+    .recent-vitals .rv-meta .pill.note { color: #166534; border-color: #bbf7d0; background: #f0fdf4; }
+    .recent-vitals li.from-note { background: #f8fafc; border-radius: 5px; padding-left: 0.4rem; padding-right: 0.4rem; margin: 0.05rem -0.4rem; }
+
     .vs-actions { margin-top: 0.4rem; }
     .trends-btn {
       padding: 0.35rem 0.85rem; border: 1px solid var(--border);
@@ -919,12 +941,12 @@
           escapeHtml(m.drug || '?') +
           (m.dose_text ? ' — ' + escapeHtml(m.dose_text) : ''),
         'None documented'),
-        '<h3 data-section="Observation">Latest Vitals</h3>',
-        renderCurrentVitals(d.current_vitals),
+        '<h3 data-section="Observation">Recent Vitals</h3>',
+        renderRecentVitals(d.recent_vitals, d.note_only_vitals),
       ].join('');
     }
 
-    /* ── Vitals snapshot + trend overlay ────────────────────────────── */
+    /* ── Vitals list + trend overlay ────────────────────────────────── */
     const VITAL_KEYS   = ['bp_systolic','bp_diastolic','heart_rate','respiratory_rate','temp_f','spo2'];
     const VITAL_LABELS = {
       bp_systolic:'Systolic BP', bp_diastolic:'Diastolic BP',
@@ -939,26 +961,95 @@
     // pid → 'snapshot' or 'trends' so toggling and re-renders preserve view choice
     const cardView = new Map();
 
-    function renderCurrentVitals(current) {
-      const c = current || {};
-      const rows = VITAL_KEYS.map(k => {
-        const pt = c[k];
-        const fromNote = pt && typeof pt.source === 'string' && pt.source.startsWith('ClinicalNote/');
-        const valueHtml = pt
-          ? '<span class="value">' +
-              escapeHtml(String(pt.value)) +
-              ' <span class="label">' + escapeHtml(pt.unit || VITAL_UNITS[k]) + '</span>' +
-            '</span>'
-          : '<span class="value empty">—</span>';
-        const ref = pt ? pt.source : '';
-        return '<div class="vs-row' + (fromNote ? ' from-note' : '') +
-               '" data-fhir-ref="' + escapeHtml(ref) + '">' +
-                 '<span class="label">' + escapeHtml(VITAL_LABELS[k]) + '</span>' +
-                 valueHtml +
-               '</div>';
+    function relTime(iso) {
+      if (!iso) return '';
+      const ms = Date.now() - new Date(iso).getTime();
+      if (Number.isNaN(ms)) return '';
+      const m = Math.floor(ms / 60000);
+      if (m < 1) return 'just now';
+      if (m < 60)  return m + 'm ago';
+      const h = Math.floor(m / 60);
+      if (h < 24)  return h + 'h ago';
+      const d = Math.floor(h / 24);
+      if (d < 30)  return d + 'd ago';
+      return new Date(iso).toLocaleDateString(undefined, {month:'short', day:'numeric'});
+    }
+
+    function renderRecentVitals(fhirRows, noteOnly) {
+      const items = [];
+
+      // FHIR observations: same flat list as the original card view, but
+      // rows that we know originated from a finalized clinical note get a
+      // "via clinical note" badge + author + timestamp so a doctor can tell
+      // at a glance which entries the EHR received from the co-pilot.
+      (fhirRows || []).forEach(v => {
+        if (v.value == null) return;  // skip narrative panels with no numeric value
+        items.push({
+          name: v.name || '?',
+          value: v.value,
+          unit: v.unit || '',
+          time: v.time,
+          ref: 'Observation/' + v.id,
+          fromNote: v.from_note || null,
+        });
+      });
+
+      // Notes whose FHIR push failed (or hasn't happened yet) — surface
+      // them as their own rows so the doctor never thinks the data
+      // disappeared when the EHR was unreachable.
+      (noteOnly || []).forEach(n => {
+        items.push({
+          name: VITAL_LABELS[n.key] || n.key,
+          value: n.value,
+          unit: VITAL_UNITS[n.key] || '',
+          time: n.time,
+          ref: 'ClinicalNote/' + (n.from_note && n.from_note.note_id || ''),
+          fromNote: n.from_note || null,
+          unsynced: true,
+        });
+      });
+
+      // Newest first, then alphabetical name as tiebreaker so the order
+      // is stable across refreshes.
+      items.sort((a, b) =>
+        (b.time || '').localeCompare(a.time || '') || a.name.localeCompare(b.name));
+
+      if (!items.length) {
+        return '<div class="empty">None documented</div>' + trendsButtonRow();
+      }
+
+      const rows = items.map(it => {
+        const meta = [];
+        if (it.fromNote) {
+          const author = it.fromNote.author || '?';
+          const when = relTime(it.fromNote.finalized_at);
+          meta.push(
+            '<span class="pill note">via clinical note</span>',
+            escapeHtml(author),
+            escapeHtml(when),
+            (it.unsynced ? '<span class="pill" title="EHR push pending">unsynced</span>' : ''),
+          );
+        } else if (it.time) {
+          meta.push(
+            '<span class="pill fhir">FHIR</span>',
+            escapeHtml(relTime(it.time)),
+          );
+        }
+        return '<li' + (it.fromNote ? ' class="from-note"' : '') +
+               ' data-fhir-ref="' + escapeHtml(it.ref) + '">' +
+                 '<span class="rv-name">' + escapeHtml(it.name) + '</span>' +
+                 '<span class="rv-val">' + escapeHtml(String(it.value)) +
+                   (it.unit ? ' <span class="rv-name">' + escapeHtml(it.unit) + '</span>' : '') +
+                 '</span>' +
+                 '<span class="rv-meta">' + meta.filter(Boolean).join(' · ') + '</span>' +
+               '</li>';
       }).join('');
-      return '<div class="vitals-snapshot">' + rows + '</div>' +
-             '<div class="vs-actions">' +
+
+      return '<ul class="recent-vitals">' + rows + '</ul>' + trendsButtonRow();
+    }
+
+    function trendsButtonRow() {
+      return '<div class="vs-actions">' +
                '<button class="trends-btn" type="button" id="open-trends">View Vital Trends →</button>' +
              '</div>';
     }
@@ -1749,31 +1840,46 @@
     }
 
     /* ── Save-without-vitals confirmation modal ─────────────────── */
-    const cnModal = document.getElementById('cn-modal');
-    const cnModalCancel  = document.getElementById('cn-modal-cancel');
-    const cnModalConfirm = document.getElementById('cn-modal-confirm');
+    // The modal HTML lives at the bottom of the body, AFTER this script
+    // closes, so document.getElementById would return null at script-load
+    // time. We resolve the refs lazily on first use and wire its click
+    // handlers exactly once — that fixes the silent failure where the
+    // page-load TypeError used to halt every following statement.
     let cnModalAfter = null;
+    let cnModalWired = false;
+
+    function ensureCnModalWired() {
+      if (cnModalWired) return true;
+      const cnModal        = document.getElementById('cn-modal');
+      const cnModalCancel  = document.getElementById('cn-modal-cancel');
+      const cnModalConfirm = document.getElementById('cn-modal-confirm');
+      if (!cnModal || !cnModalCancel || !cnModalConfirm) return false;
+      cnModalCancel.addEventListener('click', closeSaveModal);
+      cnModal.addEventListener('click', (e) => {
+        if (e.target === cnModal) closeSaveModal();
+      });
+      cnModalConfirm.addEventListener('click', async () => {
+        const fn = cnModalAfter;
+        closeSaveModal();
+        if (fn) await fn();
+      });
+      cnModalWired = true;
+      return true;
+    }
 
     function openSaveWithoutVitalsModal(pid, beforeFinalize) {
+      if (!ensureCnModalWired()) return;
       cnModalAfter = async () => {
         await beforeFinalize();
         await finalizeNote(pid);
       };
-      cnModal.classList.add('open');
+      document.getElementById('cn-modal').classList.add('open');
     }
     function closeSaveModal() {
-      cnModal.classList.remove('open');
+      const m = document.getElementById('cn-modal');
+      if (m) m.classList.remove('open');
       cnModalAfter = null;
     }
-    cnModalCancel.addEventListener('click', closeSaveModal);
-    cnModal.addEventListener('click', (e) => {
-      if (e.target === cnModal) closeSaveModal();
-    });
-    cnModalConfirm.addEventListener('click', async () => {
-      const fn = cnModalAfter;
-      closeSaveModal();
-      if (fn) await fn();
-    });
 
     /* ── Citation click navigation ───────────────────────────────── */
     // Event delegation on #log so it works for streaming + historical messages.
