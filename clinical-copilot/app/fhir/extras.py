@@ -33,81 +33,53 @@ class CalendarEntry(TypedDict, total=False):
 
 
 async def get_calendar_today(client: FhirClient) -> SourcedResult:
-    """Return today's appointments grouped by patient.
+    """Return the inpatient roster for the dashboard.
 
-    Optimized for cold-start latency: Appointment + Encounter searches
-    fire in parallel, then all unique Patient lookups fire in parallel.
-    Each FHIR call against the local OpenEMR dev stack is ~3s; doing
-    them sequentially compounded to 8-13s on cold cache. With this
-    layout the wall-clock time is roughly max(call_times) + 1.
+    Demo behavior: every seeded patient is treated as currently admitted —
+    they carry over day to day, regardless of encounter date. Production
+    deployment would filter on encounter status (in-progress / arrived) or
+    a separate "active inpatient" flag, but the demo has no discharge
+    workflow so we surface every patient in the system.
+
+    Each row carries the latest encounter's start time + reason for the
+    chip's secondary line. Endpoint name kept as `today` for backwards
+    compatibility with the front-end.
     """
     today_iso = date.today().isoformat()
     sources: list[str] = []
 
-    # Fan out the two primary searches at the same time. We always end
-    # up using one of them, but spending 3s extra to find out which is
-    # empty is wasteful.
-    appts, encs = await asyncio.gather(
-        _safe_search(
-            client, "Appointment",
-            {"date": [f"ge{today_iso}", f"le{today_iso}"], "_count": 50},
-        ),
+    patients = await _safe_search(client, "Patient", {"_count": 50})
+    if not patients:
+        return {"data": {"date": today_iso, "patients": []}, "sources": sources}
+
+    for p in patients:
+        sources.append(_ref(p))
+
+    # Latest encounter per patient — gives "reason" + "time" without forcing
+    # encounters to be re-dated daily. One round-trip in wall-clock time.
+    latest_encs = await asyncio.gather(*[
         _safe_search(
             client, "Encounter",
-            {"date": [f"ge{today_iso}", f"le{today_iso}"], "_count": 50},
-        ),
-    )
-
-    # Source-of-truth selection: appointments win if present, else encounters.
-    if appts:
-        for a in appts:
-            sources.append(_ref(a))
-        unique_refs, ref_to_meta = _patient_refs_from_appts(appts)
-    else:
-        for e in encs:
-            sources.append(_ref(e))
-        unique_refs, ref_to_meta = _patient_refs_from_encs(encs)
-
-    # Parallel patient fetch — one round trip in time, regardless of count.
-    patients_list = await asyncio.gather(
-        *[_safe_get(client, ref) for ref in unique_refs]
-    )
-    patient_by_ref = {ref: p for ref, p in zip(unique_refs, patients_list) if p}
+            {"patient": p["id"], "_count": 1, "_sort": "-date"},
+        )
+        for p in patients
+    ])
 
     entries: list[CalendarEntry] = []
-    for ref, p in patient_by_ref.items():
-        sources.append(_ref(p))
-        meta = ref_to_meta.get(ref, {})
+    for p, enc_list in zip(patients, latest_encs):
+        enc = enc_list[0] if enc_list else None
+        if enc:
+            sources.append(_ref(enc))
         entries.append({
-            "appointment_id": meta.get("appointment_id"),
+            "appointment_id": None,
             "patient_id": p["id"],
             "name": _format_name(p),
             "age": _calc_age(p.get("birthDate")),
             "sex": p.get("gender"),
-            "time": meta.get("time"),
-            "reason": meta.get("reason"),
+            "time": (enc.get("period") or {}).get("start") if enc else None,
+            "reason": _coded_display((enc.get("type") or [{}])[0]) if enc else None,
             "seeded": False,
         })
-
-    if not entries:
-        # Last resort: name-search for Cohen so the demo never shows
-        # an empty calendar. Cheap fallback (single call).
-        cohen_matches = await _safe_search(
-            client, "Patient", {"family": "Cohen", "_count": 1},
-        )
-        if cohen_matches:
-            p = cohen_matches[0]
-            sources.append(_ref(p))
-            entries.append({
-                "appointment_id": None,
-                "patient_id": p["id"],
-                "name": _format_name(p),
-                "age": _calc_age(p.get("birthDate")),
-                "sex": p.get("gender"),
-                "time": None,
-                "reason": "Hypertensive urgency (demo)",
-                "seeded": True,
-            })
 
     return {"data": {"date": today_iso, "patients": entries}, "sources": sources}
 
