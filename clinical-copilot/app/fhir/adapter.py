@@ -7,11 +7,34 @@ tool call in the same conversation.
 """
 
 import re
+from datetime import datetime, timezone
 from typing import TypedDict
+from zoneinfo import ZoneInfo
 
 from app.fhir.client import FhirClient
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clinical_iso(iso_str: str | None) -> str | None:
+    """Re-stamp a UTC ISO timestamp with the clinical-local TZ offset baked in.
+
+    FHIR returns `effectiveDateTime` in UTC (e.g. `2026-04-30T21:35:48Z`).
+    Surfacing that string directly to the agent makes it talk about "21:35"
+    when the doctor's wall clock said 15:35 MDT — confusing in chat output.
+    Convert here so the offset is on the wire (`2026-04-30T15:35:48-06:00`)
+    and downstream parsers (Python, JS) still get an unambiguous instant.
+    """
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    except ValueError:
+        return iso_str
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    from app.config import settings  # lazy to avoid circular import on module load
+    return dt.astimezone(ZoneInfo(settings.clinical_tz)).isoformat(timespec="seconds")
 
 
 class SourcedResult(TypedDict):
@@ -160,7 +183,7 @@ async def get_patient_card(client: FhirClient, *, patient_id: str) -> SourcedRes
             "allergies": [_format_allergy(a) for a in allergies],
             "active_problems": [_format_condition(c) for c in problems],
             "active_medications": [_format_med(m) for m in meds],
-            "recent_vitals": [_format_vital(v) for v in vitals],
+            "recent_vitals": [r for v in vitals for r in _format_vital(v)],
         },
         "sources": sources,
     }
@@ -215,11 +238,48 @@ def _format_med(m: dict) -> dict:
     }
 
 
-def _format_vital(v: dict) -> dict:
-    return {
-        "id": v["id"],
-        "name": _coded_display(v.get("code", {})) or _narrative_text(v),
+def _format_vital(v: dict) -> list[dict]:
+    """Flatten one Observation into one or more vital rows.
+
+    A blood-pressure Observation in FHIR is a single resource with two
+    `component` entries (systolic + diastolic) and no top-level
+    `valueQuantity`. Reading `valueQuantity` directly returns None, which
+    propagates as "not recorded" to every consumer (agent answers, card UI).
+    Split composite BP into two flat rows so the values are visible.
+
+    Times are re-stamped in clinical-local TZ — the agent narrates "15:35
+    MDT" instead of "21:35" UTC.
+    """
+    name = _coded_display(v.get("code", {})) or _narrative_text(v) or ""
+    name_lower = name.lower()
+    eff_time = _clinical_iso(v.get("effectiveDateTime"))
+    obs_id = v["id"]
+    components = v.get("component") or []
+
+    is_bp_composite = (
+        ("blood pressure" in name_lower or name_lower in ("bp", "bp panel"))
+        and components
+    )
+    if is_bp_composite:
+        rows: list[dict] = []
+        for comp in components:
+            comp_name = (_coded_display(comp.get("code", {})) or "").lower()
+            qty = comp.get("valueQuantity") or {}
+            val = qty.get("value")
+            if val is None:
+                continue
+            if "systolic" in comp_name:
+                rows.append({"id": obs_id, "name": "Systolic BP",
+                             "value": val, "unit": qty.get("unit"), "time": eff_time})
+            elif "diastolic" in comp_name:
+                rows.append({"id": obs_id, "name": "Diastolic BP",
+                             "value": val, "unit": qty.get("unit"), "time": eff_time})
+        return rows
+
+    return [{
+        "id": obs_id,
+        "name": name or None,
         "value": v.get("valueQuantity", {}).get("value"),
         "unit": v.get("valueQuantity", {}).get("unit"),
-        "time": v.get("effectiveDateTime"),
-    }
+        "time": eff_time,
+    }]

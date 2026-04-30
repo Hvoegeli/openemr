@@ -13,9 +13,11 @@ facts that don't appear in some tool's `data`.
 """
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from langchain_core.tools import tool
 
+from app.config import settings
 from app.fhir import adapter
 from app.fhir.adapter import SourcedResult
 from app.fhir.client import FhirClient
@@ -68,7 +70,10 @@ TOOLS = [current_time, resolve_patient, get_patient_card]
 
 
 async def _current_time_impl() -> SourcedResult:
-    now = datetime.now(timezone.utc).astimezone()
+    # Use the clinical TZ explicitly — astimezone() with no arg returns the
+    # system's local time, but Hetzner runs UTC so the agent would otherwise
+    # narrate "21:35" when the doctor's wall clock said 15:35 MDT.
+    now = datetime.now(ZoneInfo(settings.clinical_tz))
     return {
         "data": {
             "iso_datetime": now.isoformat(timespec="seconds"),
