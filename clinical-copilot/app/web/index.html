@@ -131,6 +131,23 @@
     ul.kv li { margin-bottom: 0.32rem; line-height: 1.45; }
     code { background: rgba(0,0,0,0.05); padding: 0 0.3em; border-radius: 3px; font-size: 0.85em; }
 
+    /* Recent Vitals — grouped by recording timestamp so a noon panel and
+       a 3pm panel land in visually separate blocks. */
+    .rv-groups { margin: 0.2rem 0 0.4rem; }
+    .rv-group + .rv-group {
+      margin-top: 0.85rem;
+      padding-top: 0.55rem;
+      border-top: 1px solid var(--border);
+    }
+    .rv-group-header {
+      font-size: 0.72rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.05em;
+      margin-bottom: 0.2rem;
+    }
+    .recent-vitals { margin: 0; padding-left: 1.25rem; list-style: disc; }
+    .recent-vitals li { margin-bottom: 0.28rem; line-height: 1.45; font-size: 0.9rem; }
+    .recent-vitals .rv-name { color: var(--muted); font-size: 0.85rem; }
+
     /* ── Calendar list ──────────────────────────────────────────────── */
     .cal-row {
       display: grid;
@@ -707,12 +724,55 @@
           (m.dose_text ? ' — ' + escapeHtml(m.dose_text) : ''),
         'None documented'),
         '<h3 data-section="Observation">Recent Vitals</h3>',
-        list(d.recent_vitals, 'Observation', v =>
-          escapeHtml(v.name || '?') + ': ' +
-          (v.value != null ? escapeHtml(String(v.value)) : '?') +
-          (v.unit ? ' ' + escapeHtml(v.unit) : ''),
-        'None documented'),
+        renderRecentVitals(d.recent_vitals),
       ].join('');
+    }
+
+    /* Recent Vitals — group by minute-precision recording timestamp.
+       FHIR Observations from one vitals panel share an effectiveDateTime,
+       so this gives one block per panel with a clear break between them. */
+    function renderRecentVitals(rows) {
+      const items = (rows || []).filter(v => v && v.value != null);
+      if (!items.length) {
+        return '<div class="empty">None documented</div>';
+      }
+      items.sort((a, b) =>
+        (b.time || '').localeCompare(a.time || '') ||
+        (a.name || '').localeCompare(b.name || ''));
+
+      const groups = new Map();
+      items.forEach(v => {
+        const key = (v.time || 'unknown').slice(0, 16);  // YYYY-MM-DDTHH:MM
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(v);
+      });
+
+      return '<div class="rv-groups">' + Array.from(groups.entries()).map(([key, vs]) => {
+        let label;
+        if (key === 'unknown') {
+          label = 'Time unknown';
+        } else {
+          const d = new Date(key + ':00');
+          label = isNaN(d.getTime())
+            ? key
+            : d.toLocaleString(undefined, {
+                month: 'short', day: 'numeric',
+                hour: 'numeric', minute: '2-digit',
+              });
+        }
+        const lis = vs.map(v => {
+          const ref = 'Observation/' + v.id;
+          return '<li data-fhir-ref="' + escapeHtml(ref) + '">' +
+                   escapeHtml(v.name || '?') + ': ' +
+                   escapeHtml(String(v.value)) +
+                   (v.unit ? ' <span class="rv-name">' + escapeHtml(v.unit) + '</span>' : '') +
+                 '</li>';
+        }).join('');
+        return '<div class="rv-group">' +
+                 '<div class="rv-group-header">' + escapeHtml(label) + '</div>' +
+                 '<ul class="recent-vitals">' + lis + '</ul>' +
+               '</div>';
+      }).join('') + '</div>';
     }
 
     function renderDocs(d) {
