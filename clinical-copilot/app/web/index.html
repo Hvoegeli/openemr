@@ -966,6 +966,42 @@
     // pid → 'snapshot' or 'trends' so toggling and re-renders preserve view choice
     const cardView = new Map();
 
+    // ── Browser-local shift labels ──────────────────────────────────
+    // The server computes shift labels in CLINICAL_TZ (the clinic's house
+    // timezone) for internal mechanics: auto-finalize, draft slot
+    // uniqueness, etc. For the *displayed* shift label, recompute in the
+    // viewer's own timezone so a grader in EST sees a coherent label
+    // against their wall clock instead of seeing whatever Denver's clock
+    // said at write time. UTC timestamp is canonical either way.
+    function browserShift(utcIso) {
+      if (!utcIso) return null;
+      const d = new Date(utcIso);
+      if (isNaN(d.getTime())) return null;
+      const h = d.getHours();  // local hour
+      return (h >= 6 && h < 18) ? 'day' : 'night';
+    }
+    function browserShiftLabel(utcIso) {
+      const s = browserShift(utcIso);
+      return s === 'day' ? 'Day Shift' : (s === 'night' ? 'Night Shift' : null);
+    }
+    function browserNoteTitle(item) {
+      if (!item || item.kind !== 'clinical-note' || !item.date) {
+        return item ? item.title : null;
+      }
+      const d = new Date(item.date);
+      if (isNaN(d.getTime())) return item.title;
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const yyyy = d.getFullYear();
+      const shift = browserShiftLabel(item.date) || '';
+      const base = 'Clinical Notes - ' + mm + dd + yyyy + ' - ' + shift;
+      return item.is_draft ? 'DRAFT - ' + base : base;
+    }
+    function displayTitle(item) {
+      if (item && item.kind === 'clinical-note') return browserNoteTitle(item) || item.title;
+      return item ? item.title : null;
+    }
+
     function relTime(iso) {
       if (!iso) return '';
       const ms = Date.now() - new Date(iso).getTime();
@@ -1329,7 +1365,8 @@
         const subBits = [];
         if (it.kind === 'clinical-note') {
           if (it.author) subBits.push('by ' + it.author);
-          if (it.shift)  subBits.push(it.shift === 'day' ? 'Day Shift' : 'Night Shift');
+          const shiftLabel = browserShiftLabel(it.date);
+          if (shiftLabel) subBits.push(shiftLabel);
         } else {
           [it.status, it.category, it.summary].forEach(b => { if (b) subBits.push(b); });
         }
@@ -1339,7 +1376,7 @@
             '<div class="row1">' +
               '<div class="title">' +
                 '<span class="kind ' + escapeHtml(kindLabel) + '">' + escapeHtml(kindLabel) + '</span>' +
-                escapeHtml(it.title || '(untitled)') +
+                escapeHtml(displayTitle(it) || '(untitled)') +
               '</div>' +
               '<div class="date">' + escapeHtml(dateStr) + '</div>' +
             '</div>' +
@@ -1373,7 +1410,7 @@
 
     function openDoc(item) {
       // Header
-      docTitle.textContent = item.title || '(untitled)';
+      docTitle.textContent = displayTitle(item) || '(untitled)';
       const dateStr = item.date
         ? new Date(item.date).toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'short'})
         : '—';
@@ -1427,7 +1464,7 @@
       } else if (item.kind === 'clinical-note') {
         kvFields.push(['Status', item.is_draft ? 'DRAFT' : 'Final']);
         kvFields.push(['Author', item.author]);
-        kvFields.push(['Shift',  item.shift === 'day' ? 'Day Shift' : (item.shift === 'night' ? 'Night Shift' : null)]);
+        kvFields.push(['Shift',  browserShiftLabel(item.date)]);
         kvFields.push(['Written', dateStr]);
       } else {
         kvFields.push(['Type',     item.title]);
@@ -1713,7 +1750,7 @@
           '<div class="cn-readonly">' + escapeHtml(prior.recs_md) + '</div>'
         ) : '') +
         renderVitalsReadonly(prior.vitals) +
-        '<div class="cn-meta">' + escapeHtml(prior.title || 'Clinical Notes') +
+        '<div class="cn-meta">' + escapeHtml(displayTitle(prior) || 'Clinical Notes') +
           ' · written by ' + escapeHtml(prior.author || '?') +
           (dt ? ' · ' + new Date(dt).toLocaleString() : '') +
           '</div>'
