@@ -39,5 +39,12 @@ class Settings(BaseSettings):
     # App database
     database_url: str = "postgresql://agent_forge:dev@localhost:5432/agent_forge"
 
+    # Clinical timezone — drives shift detection and the "MMDDYYYY - Day/Night
+    # Shift" label on clinical notes. UTC default keeps existing behavior; the
+    # Hetzner deploy is set to America/Denver via systemd Environment=. Audit
+    # and storage timestamps stay UTC regardless (FHIR-compliant); only the
+    # *clinical interpretation* of "what shift was this?" honors this setting.
+    clinical_tz: str = Field("UTC", description="IANA timezone name, e.g. America/Denver")
+
 
 settings = Settings()

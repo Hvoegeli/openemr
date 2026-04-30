@@ -416,6 +416,11 @@ _VITAL_NAME_TO_KEY = {
     "body temperature": "temp_f", "temperature": "temp_f",
     "oxygen_saturation": "spo2", "oxygen saturation": "spo2", "spo2": "spo2",
     "systolic blood pressure": "bp_systolic", "diastolic blood pressure": "bp_diastolic",
+    # Short forms — match `_BP_LABEL` ("Systolic BP"/"Diastolic BP") that
+    # `_decorate_card_vitals` emits when backfilling composite-BP rows from
+    # the trends store. Without these the dedup check fails and BP renders
+    # twice on the card.
+    "systolic": "bp_systolic", "diastolic": "bp_diastolic",
 }
 
 
@@ -482,21 +487,64 @@ def _decorate_card_vitals(card_data: dict, notes: list, trends: dict) -> dict:
                     }
                     break
 
+    # Build a (canonical_key, timestamp) coverage list from FHIR rows. We
+    # match note-vitals against this with ±5 min tolerance — same window as
+    # the from_note pairing above — so a cross-minute clock skew between the
+    # note's `finalized_at` and OpenEMR's stored `effectiveDateTime` doesn't
+    # cause the same reading to render twice.
+    fhir_covered: list[tuple[str, datetime]] = []
+    for r in fhir_rows:
+        nm = (r.get("name") or "").lower()
+        val = r.get("value")
+        t = r.get("time")
+        if val in (None, "") or not t:
+            continue
+        try:
+            ts = datetime.fromisoformat(t.replace("Z", "+00:00") if "Z" in t else t)
+        except (ValueError, TypeError):
+            continue
+        for fragment, key in _VITAL_NAME_TO_KEY.items():
+            if fragment in nm:
+                fhir_covered.append((key, ts))
+                break
+
+    def _already_in_fhir(canonical: str, when_iso: str | None) -> bool:
+        if not when_iso:
+            return False
+        try:
+            note_ts = datetime.fromisoformat(when_iso.replace("Z", "+00:00") if "Z" in when_iso else when_iso)
+        except (ValueError, TypeError):
+            return False
+        return any(
+            k == canonical and abs((ts - note_ts).total_seconds()) <= 300
+            for k, ts in fhir_covered
+        )
+
+    # Surface ALL finalized-note vitals (synced + unsynced) that aren't
+    # already represented in FHIR rows. Critical for composite-BP readings:
+    # OpenEMR returns BP as one Observation with two `component` entries, and
+    # the FHIR adapter's flat formatter emits it with `value=None`, so the
+    # client filters it out. The note's vitals dict is the doctor's source of
+    # truth either way — surface it regardless of FHIR roundtrip status.
     note_only_vitals: list[dict] = []
-    for n in unsynced_finals:
+    for n in [*unsynced_finals, *synced_notes]:
+        when = n.finalized_at or n.updated_at
         for canonical, value in (n.vitals or {}).items():
             if value in (None, ""):
+                continue
+            if _already_in_fhir(canonical, when):
                 continue
             note_only_vitals.append({
                 "kind": "note-vital",
                 "key": canonical,
                 "value": value,
-                "time": n.finalized_at or n.updated_at,
+                "time": when,
                 "from_note": {
                     "author": n.author,
                     "finalized_at": n.finalized_at,
                     "note_id": n.id,
                 },
+                "synced": bool(n.fhir_synced_at),
             })
 
     return {

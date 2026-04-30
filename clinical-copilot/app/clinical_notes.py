@@ -28,9 +28,10 @@ import logging
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger("clinical_notes")
 
@@ -39,45 +40,65 @@ Status = Literal["draft", "final"]
 
 
 # ─── shift logic ─────────────────────────────────────────────────────────
+#
+# All shift math runs in CLINICAL-LOCAL time (driven by settings.clinical_tz).
+# Storage timestamps stay UTC — only the *clinical interpretation* of "what
+# shift was this?" and the user-facing date label use local TZ. Without this
+# split, a 14:33 MST save lands at 20:33 UTC and the server mislabels it as
+# Night Shift even though the doctor was clearly working the day shift.
 
-def compute_shift(dt: datetime) -> Shift:
-    """Day Shift covers 06:00-17:59; Night Shift covers 18:00-05:59."""
-    return "day" if 6 <= dt.hour < 18 else "night"
+def _clinical_zone() -> ZoneInfo:
+    # Imported lazily so test code can monkey-patch settings before this fires.
+    from app.config import settings
+    return ZoneInfo(settings.clinical_tz)
+
+
+def to_clinical(dt: datetime | str) -> datetime:
+    """Convert a UTC datetime (or ISO string) into the clinical-local TZ."""
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_clinical_zone())
+
+
+def compute_shift(dt: datetime | str) -> Shift:
+    """Day Shift covers 06:00-17:59 local; Night Shift covers 18:00-05:59 local."""
+    local = to_clinical(dt)
+    return "day" if 6 <= local.hour < 18 else "night"
 
 
 def shift_label(shift: Shift) -> str:
     return "Day Shift" if shift == "day" else "Night Shift"
 
 
-def shift_window(dt: datetime) -> tuple[datetime, datetime]:
-    """Return (start, end) for the shift containing `dt`. End is exclusive."""
-    if compute_shift(dt) == "day":
-        start = dt.replace(hour=6, minute=0, second=0, microsecond=0)
-        end = dt.replace(hour=18, minute=0, second=0, microsecond=0)
+def shift_window(dt: datetime | str) -> tuple[datetime, datetime]:
+    """Return (start, end) for the shift containing `dt`, in clinical-local TZ.
+
+    End is exclusive. Both bounds are tz-aware so callers can compare against
+    either local- or UTC-rooted datetimes safely.
+    """
+    local = to_clinical(dt)
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    if compute_shift(local) == "day":
+        start = midnight.replace(hour=6)
+        end = midnight.replace(hour=18)
     else:
-        if dt.hour < 6:
-            # Night shift that started yesterday at 18:00
-            yesterday = dt.replace(hour=18, minute=0, second=0, microsecond=0)
-            yesterday = yesterday.replace(day=yesterday.day - 1) if yesterday.day > 1 else yesterday
-            start = yesterday
-            end = dt.replace(hour=6, minute=0, second=0, microsecond=0)
+        if local.hour < 6:
+            start = midnight - timedelta(hours=6)  # yesterday 18:00 local
+            end = midnight.replace(hour=6)
         else:
-            start = dt.replace(hour=18, minute=0, second=0, microsecond=0)
-            tomorrow = dt.replace(hour=6, minute=0, second=0, microsecond=0)
-            try:
-                tomorrow = tomorrow.replace(day=tomorrow.day + 1)
-            except ValueError:
-                # End-of-month rollover — re-construct via fromtimestamp
-                tomorrow = datetime.fromtimestamp(tomorrow.timestamp() + 86400, tz=tomorrow.tzinfo)
-            end = tomorrow
+            start = midnight.replace(hour=18)
+            end = midnight + timedelta(days=1, hours=6)  # tomorrow 06:00 local
     return start, end
 
 
-def format_mmddyyyy(dt: datetime) -> str:
-    return dt.strftime("%m%d%Y")
+def format_mmddyyyy(dt: datetime | str) -> str:
+    """Date-only label using clinical-local TZ — keeps day rollover intuitive."""
+    return to_clinical(dt).strftime("%m%d%Y")
 
 
-def label_for(written_at: datetime, status: Status) -> str:
+def label_for(written_at: datetime | str, status: Status) -> str:
     """Build the Supporting-Documents-tab title for a clinical note."""
     base = f"Clinical Notes - {format_mmddyyyy(written_at)} - {shift_label(compute_shift(written_at))}"
     return f"DRAFT - {base}" if status == "draft" else base
@@ -129,6 +150,10 @@ class ClinicalNote:
     def to_doc_item(self) -> dict[str, Any]:
         """Render for the Supporting Documents tab."""
         written = datetime.fromisoformat(self.written_at)
+        # Always recompute shift in the current clinical TZ so legacy notes
+        # written before CLINICAL_TZ was correct still display the right shift
+        # label. The stored `self.shift` field is treated as historical only.
+        actual_shift: Shift = compute_shift(written)
         return {
             "kind": "clinical-note",
             "id": self.id,
@@ -136,7 +161,7 @@ class ClinicalNote:
             "title": label_for(written, self.status),
             "date": self.written_at,
             "status": self.status,
-            "shift": self.shift,
+            "shift": actual_shift,
             "author": self.author,
             "is_draft": self.status == "draft",
             "patient_id": self.patient_id,

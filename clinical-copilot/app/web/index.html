@@ -999,9 +999,11 @@
         });
       });
 
-      // Notes whose FHIR push failed (or hasn't happened yet) — surface
-      // them as their own rows so the doctor never thinks the data
-      // disappeared when the EHR was unreachable.
+      // Vitals from finalized clinical notes that aren't already covered by
+      // a FHIR row (server-side dedup). This includes synced notes whose
+      // FHIR-search representation is unreadable (composite BP comes back
+      // with a null top-level value) — surfacing them here is what makes
+      // sure the doctor's own entry actually appears on the card.
       (noteOnly || []).forEach(n => {
         items.push({
           name: VITAL_LABELS[n.key] || n.key,
@@ -1010,7 +1012,7 @@
           time: n.time,
           ref: 'ClinicalNote/' + (n.from_note && n.from_note.note_id || ''),
           fromNote: n.from_note || null,
-          unsynced: true,
+          unsynced: !n.synced,
         });
       });
 
