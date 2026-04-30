@@ -1,0 +1,40 @@
+{
+  "case_id": "age_grounded",
+  "patient_id": "roberts",
+  "recorded_at": "2026-04-30T01:46:52+00:00",
+  "agent_sha": "8048c76",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "How old is Roberts?",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Roberts"
+          },
+          "result_data": {
+            "found": false,
+            "query": "Roberts"
+          },
+          "result_sources": []
+        },
+        {
+          "name": "current_time",
+          "args": {},
+          "result_data": {
+            "iso_datetime": "2026-04-30T01:46:50+00:00",
+            "date": "2026-04-30",
+            "weekday": "Thursday",
+            "timezone": "UTC"
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "No patient named **Roberts** was found in the system. The chart lookup returned no match.\n\n- Please double-check the spelling or provide an alternate name/ID.\n- If there are multiple patients with similar names, I can help disambiguate once a match is found.\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

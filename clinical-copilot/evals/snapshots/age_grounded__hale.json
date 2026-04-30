@@ -1,0 +1,40 @@
+{
+  "case_id": "age_grounded",
+  "patient_id": "hale",
+  "recorded_at": "2026-04-30T01:47:01+00:00",
+  "agent_sha": "8048c76",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "How old is Hale?",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Hale"
+          },
+          "result_data": {
+            "found": false,
+            "query": "Hale"
+          },
+          "result_sources": []
+        },
+        {
+          "name": "current_time",
+          "args": {},
+          "result_data": {
+            "iso_datetime": "2026-04-30T01:46:59+00:00",
+            "date": "2026-04-30",
+            "weekday": "Thursday",
+            "timezone": "UTC"
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "No patient matching the last name **\"Hale\"** was found in the system. I cannot retrieve any demographic or age information.\n\nCould you double-check the spelling or provide an alternate name/patient ID?\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

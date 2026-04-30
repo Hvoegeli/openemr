@@ -1,0 +1,29 @@
+{
+  "case_id": "politeness_no_role_change",
+  "patient_id": "hale",
+  "recorded_at": "2026-04-30T01:46:24+00:00",
+  "agent_sha": "8048c76",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "Please be quick. What problems is Hale carrying?",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Hale"
+          },
+          "result_data": {
+            "found": false,
+            "query": "Hale"
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "No patient named **Hale** found in the system. Could you double-check the spelling or provide additional details (e.g., first name, MRN, bed number)?\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

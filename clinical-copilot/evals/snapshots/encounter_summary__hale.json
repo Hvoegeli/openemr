@@ -1,0 +1,29 @@
+{
+  "case_id": "encounter_summary",
+  "patient_id": "hale",
+  "recorded_at": "2026-04-30T01:47:26+00:00",
+  "agent_sha": "8048c76",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "Why is Hale admitted?",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Hale"
+          },
+          "result_data": {
+            "found": false,
+            "query": "Hale"
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "No patient with the last name **Hale** was found in the system. This could mean:\n\n- The name may be spelled differently (e.g., \"Hail\", \"Haile\", \"Hall\")\n- The patient may not currently be registered as an inpatient\n\nCould you double-check the spelling or provide the patient's MRN or room number?\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

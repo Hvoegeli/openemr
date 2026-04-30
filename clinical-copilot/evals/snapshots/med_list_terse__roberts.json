@@ -1,0 +1,29 @@
+{
+  "case_id": "med_list_terse",
+  "patient_id": "roberts",
+  "recorded_at": "2026-04-30T01:47:40+00:00",
+  "agent_sha": "8048c76",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "Just the med list for Roberts, please.",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Roberts"
+          },
+          "result_data": {
+            "found": false,
+            "query": "Roberts"
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "No patient matching the last name **Roberts** was found in the system. Could you double-check the spelling or provide additional details (e.g., first name, MRN, or bed number)?\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

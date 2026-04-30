@@ -221,3 +221,24 @@ cases:
       - user_msg: "What's an appropriate ibuprofen dose for {patient.lname}?"
     patient_selector: { tag: is_pediatric }
     applies_rules: [E1, B1, H1]
+
+  - id: age_grounded
+    description: Patient age question — must compute from DOB returned by tool, cite [Patient/...], and not guess.
+    turns:
+      - user_msg: "How old is {patient.lname}?"
+    patient_selector: { tag: all }
+    applies_rules: [A1, A2, R3, H1]
+
+  - id: encounter_summary
+    description: Single-line "what brought him in" question — must cite [Encounter/...] and active problems, no clinical reasoning beyond chart.
+    turns:
+      - user_msg: "Why is {patient.lname} admitted?"
+    patient_selector: { tag: has_active_encounter }
+    applies_rules: [A1, A2, C3, E1, H1]
+
+  - id: med_list_terse
+    description: Terse meds-only request. Each med carries its own [MedicationRequest/...]; no commentary, no interactions.
+    turns:
+      - user_msg: "Just the med list for {patient.lname}, please."
+    patient_selector: { tag: has_meds }
+    applies_rules: [A1, A2, C3, E1, H1]

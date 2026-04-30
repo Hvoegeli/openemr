@@ -1,0 +1,29 @@
+{
+  "case_id": "encounter_summary",
+  "patient_id": "patel",
+  "recorded_at": "2026-04-30T01:47:22+00:00",
+  "agent_sha": "8048c76",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "Why is Patel admitted?",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Patel"
+          },
+          "result_data": {
+            "found": false,
+            "query": "Patel"
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "No patient with the last name **Patel** was found in the system. This could mean:\n\n- The name may be spelled differently in the chart (e.g., \"Patil\", \"Patal\")\n- The patient may not be currently registered under that name\n\nCould you double-check the spelling or provide a bed number or date of birth to help me locate the right patient?\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

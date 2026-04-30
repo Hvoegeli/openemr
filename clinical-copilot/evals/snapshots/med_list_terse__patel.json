@@ -1,0 +1,29 @@
+{
+  "case_id": "med_list_terse",
+  "patient_id": "patel",
+  "recorded_at": "2026-04-30T01:47:49+00:00",
+  "agent_sha": "8048c76",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "Just the med list for Patel, please.",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Patel"
+          },
+          "result_data": {
+            "found": false,
+            "query": "Patel"
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "No patient matching \"Patel\" was found in the system. The query returned no results and no alternatives were suggested.\n\nCould you double-check the spelling or provide additional details (e.g., first name, bed number, or MRN)? Once confirmed, I'll pull the med list right away.\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

@@ -1,0 +1,40 @@
+{
+  "case_id": "age_grounded",
+  "patient_id": "patel",
+  "recorded_at": "2026-04-30T01:46:57+00:00",
+  "agent_sha": "8048c76",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "How old is Patel?",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Patel"
+          },
+          "result_data": {
+            "found": false,
+            "query": "Patel"
+          },
+          "result_sources": []
+        },
+        {
+          "name": "current_time",
+          "args": {},
+          "result_data": {
+            "iso_datetime": "2026-04-30T01:46:55+00:00",
+            "date": "2026-04-30",
+            "weekday": "Thursday",
+            "timezone": "UTC"
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "No patient matching \"Patel\" was found in the system. I'm unable to retrieve any chart information for this patient.\n\nCould you double-check the spelling or provide additional details (e.g., first name, MRN, bed number) to help locate the correct patient?\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

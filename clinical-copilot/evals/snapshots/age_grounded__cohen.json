@@ -1,12 +1,12 @@
 {
-  "case_id": "lab_normal",
+  "case_id": "age_grounded",
   "patient_id": "cohen",
-  "recorded_at": "2026-04-30T01:46:40+00:00",
+  "recorded_at": "2026-04-30T01:46:48+00:00",
   "agent_sha": "8048c76",
   "model": "claude-sonnet-4-6",
   "turns": [
     {
-      "user_msg": "Is Cohen's potassium in the normal range?",
+      "user_msg": "How old is Cohen?",
       "tool_calls": [
         {
           "name": "resolve_patient",
@@ -27,7 +27,7 @@
           "name": "current_time",
           "args": {},
           "result_data": {
-            "iso_datetime": "2026-04-30T01:46:30+00:00",
+            "iso_datetime": "2026-04-30T01:46:42+00:00",
             "date": "2026-04-30",
             "weekday": "Thursday",
             "timezone": "UTC"
@@ -260,7 +260,7 @@
           ]
         }
       ],
-      "final_response": "**Nora Cohen, 59F** \u2014 chart does not contain a potassium (serum electrolyte) value.\n\n- The only lab/observation data returned are **vital signs** (respiratory rate, heart rate, O\u2082 saturation, temperature, height, weight) from 2026-04-29 [Observation/a1a7ed65-637f-4d48-933f-1d2a79403384] [Observation/a1a7ed65-638e-4d13-8a97-7e8ed3988d73] [Observation/a1a7ed65-6398-4f46-b7c0-e8ac9351bc93] [Observation/a1a7ed65-63a6-4446-bc92-2552ec658460] [Observation/a1a7ed65-63cb-47c0-a4e4-4d72a9255b51] [Observation/a1a7ed65-63e6-431f-ba3b-22cab0acfaac] [Observation/a1a7ed65-63ff-4615-b316-404741dad90f].\n- **Insufficient evidence in the chart for a potassium result.** A basic or comprehensive metabolic panel may not have been resulted yet, or may not be loaded in this view.\n\nYou'll need to check the lab system directly for her potassium.\n\nFor clinician judgment; verify before acting."
+      "final_response": "Nora Cohen is **59 years old** (female) [Patient/a1a7ed4d-f176-4e2c-bfb9-3f94b046d678].\n\nFor clinician judgment; verify before acting."
     }
   ],
   "conversation_sources": [
