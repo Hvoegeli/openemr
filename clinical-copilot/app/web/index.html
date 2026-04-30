@@ -227,6 +227,31 @@
     .vc-svg .axis-label {
       font-size: 8px; fill: #64748b; font-family: inherit;
     }
+    .vc-list {
+      list-style: none; padding: 0; margin: 0.4rem 0 0;
+      max-height: 7rem; overflow-y: auto;
+      border-top: 1px solid #f1f3f6;
+    }
+    .vc-list li {
+      display: grid; grid-template-columns: auto 1fr auto;
+      gap: 0.4rem; align-items: baseline;
+      padding: 0.25rem 0.05rem;
+      font-size: 0.78rem;
+      border-bottom: 1px dashed #f1f3f6;
+      cursor: pointer;
+    }
+    .vc-list li:last-child { border-bottom: 0; }
+    .vc-list li:hover { background: #f9fafb; }
+    .vc-list li.selected { background: #eff6ff; }
+    .vc-list .v { font-variant-numeric: tabular-nums; font-weight: 500; color: var(--text); }
+    .vc-list .when { color: var(--muted); font-size: 0.74rem; }
+    .vc-list .src {
+      font-size: 0.7rem; padding: 0.05rem 0.4rem;
+      border-radius: 999px; border: 1px solid var(--border);
+      color: var(--muted); white-space: nowrap;
+    }
+    .vc-list .src.note { color: #166534; border-color: #bbf7d0; background: #f0fdf4; }
+    .vc-list .src.obs  { color: #1e40af; border-color: #bfdbfe; background: #eff6ff; }
     .vc-empty {
       border: 1px dashed var(--border); border-radius: 8px;
       padding: 0.8rem; font-size: 0.82rem; color: var(--muted);
@@ -1033,6 +1058,26 @@
           ? '<text class="axis-label" x="' + (W - PX) + '" y="' + labelY + '" text-anchor="end">' + escapeHtml(fmtAxisDate(xmax)) + '</text>'
           : '');
 
+      // Reverse-chronological readings list — newest first, easiest to scan.
+      const list = points
+        .map((p, i) => ({p, i}))
+        .reverse()
+        .map(({p, i}) => {
+          const fromNote = typeof p.source === 'string' && p.source.startsWith('ClinicalNote/');
+          const ref = p.source || '';
+          const refLabel = fromNote
+            ? 'note'
+            : (ref.startsWith('Observation/') ? 'FHIR' : 'src');
+          return '<li data-vital-key="' + escapeHtml(key) +
+                 '" data-point-idx="' + i + '" data-fhir-ref="' + escapeHtml(ref) + '">' +
+                   '<span class="v">' + escapeHtml(String(p.value)) + ' ' +
+                     escapeHtml(p.unit || unit) + '</span>' +
+                   '<span class="when">' + escapeHtml(new Date(p.date).toLocaleString()) + '</span>' +
+                   '<span class="src ' + (fromNote ? 'note' : 'obs') + '">' +
+                     escapeHtml(refLabel) + '</span>' +
+                 '</li>';
+        }).join('');
+
       return '<div class="vc" data-vital-key="' + escapeHtml(key) + '">' +
         '<div class="vc-head">' +
           escapeHtml(label) +
@@ -1045,6 +1090,7 @@
           xAxisLabels +
           dots +
         '</svg>' +
+        '<ul class="vc-list">' + list + '</ul>' +
       '</div>';
     }
 
@@ -1072,12 +1118,21 @@
         ' · <span class="source-ref" data-fhir-ref="' + escapeHtml(pt.source || '') + '">' +
           escapeHtml(sourceText) + '</span>';
 
-      // Visually mark the selected dot in the relevant chart.
+      // Visually mark the selected dot in the relevant chart and the
+      // matching list row underneath, so the connection is obvious.
       tabCard.querySelectorAll('.vc-svg circle.selected').forEach(c => c.classList.remove('selected'));
+      tabCard.querySelectorAll('.vc-list li.selected').forEach(li => li.classList.remove('selected'));
       const dot = tabCard.querySelector(
         'circle[data-vital-key="' + cssEscape(key) + '"][data-point-idx="' + idx + '"]'
       );
       if (dot) dot.classList.add('selected');
+      const li = tabCard.querySelector(
+        '.vc-list li[data-vital-key="' + cssEscape(key) + '"][data-point-idx="' + idx + '"]'
+      );
+      if (li) {
+        li.classList.add('selected');
+        li.scrollIntoView({block: 'nearest'});
+      }
     }
 
     // Delegated click handler for the patient-card panel — handles the
@@ -1087,6 +1142,7 @@
       const openBtn  = e.target.closest('#open-trends');
       const closeBtn = e.target.closest('#close-trends');
       const dot      = e.target.closest('circle[data-vital-key]');
+      const row      = e.target.closest('.vc-list li[data-vital-key]');
       if (!activePatientId) return;
       if (openBtn)  { showVitalTrends(activePatientId); return; }
       if (closeBtn) {
@@ -1096,9 +1152,10 @@
         else refreshCard(activePatientId);
         return;
       }
-      if (dot) {
-        const key = dot.getAttribute('data-vital-key');
-        const idx = Number(dot.getAttribute('data-point-idx'));
+      const target = dot || row;
+      if (target) {
+        const key = target.getAttribute('data-vital-key');
+        const idx = Number(target.getAttribute('data-point-idx'));
         showTrendDetail(activePatientId, key, idx);
       }
     });
