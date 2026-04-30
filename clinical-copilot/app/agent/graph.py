@@ -15,6 +15,7 @@ validator rejects the final response if it cites anything outside that set.
 
 import json
 import logging
+import time
 from typing import Any, Literal
 
 from langchain_anthropic import ChatAnthropic
@@ -26,6 +27,7 @@ from app.agent.system_prompt import SYSTEM_PROMPT
 from app.agent.tools import TOOLS, dispatch
 from app.agent.validator import find_invalid_citations
 from app.fhir.client import FhirClient
+from app.observability import record_tool_event
 
 log = logging.getLogger("agent")
 
@@ -87,8 +89,13 @@ def build_graph(client: FhirClient, model_name: str = "claude-sonnet-4-6"):
         new_patient_id = state.get("patient_id")
 
         for call in last.tool_calls:
+            t0 = time.time()
+            sources_added = 0
+            tool_ok = True
+            tool_err: str | None = None
             try:
                 result = await dispatch(call["name"], call["args"], client)
+                sources_added = len(result["sources"])
                 new_sources.extend(result["sources"])
                 if call["name"] == "resolve_patient" and isinstance(result["data"], dict) \
                         and result["data"].get("found"):
@@ -96,12 +103,22 @@ def build_graph(client: FhirClient, model_name: str = "claude-sonnet-4-6"):
                 content = json.dumps(result, default=str)
                 log.info(
                     "tool=%s args=%s sources=%d",
-                    call["name"], call["args"], len(result["sources"]),
+                    call["name"], call["args"], sources_added,
                 )
             except Exception as e:  # noqa: BLE001 — surface tool errors to the LLM
                 content = json.dumps({"error": str(e), "tool": call["name"]})
+                tool_ok = False
+                tool_err = f"{type(e).__name__}: {e}"
                 log.exception("tool=%s args=%s failed", call["name"], call["args"])
             new_messages.append(ToolMessage(content=content, tool_call_id=call["id"]))
+            record_tool_event(
+                name=call["name"],
+                args=call["args"],
+                started_at=t0,
+                ok=tool_ok,
+                sources_added=sources_added,
+                error=tool_err,
+            )
 
         return {
             "messages": new_messages,

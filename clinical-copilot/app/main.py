@@ -50,6 +50,14 @@ from app.config import settings  # noqa: E402
 from app.fhir import adapter  # noqa: E402
 from app.fhir.client import FhirClient  # noqa: E402
 from app.fhir.extras import get_calendar_today, get_supporting_documents  # noqa: E402
+from app.observability import (  # noqa: E402
+    TokenUsageCallback,
+    TraceStore,
+    init_langsmith,
+    new_request_trace,
+    reset_current_trace,
+    set_current_trace,
+)
 
 log = logging.getLogger("agent.main")
 
@@ -125,11 +133,16 @@ async def _prewarm_dashboard(app: FastAPI) -> None:
         log.warning("prewarm failed (non-fatal): %s", e)
 
 
+MODEL_NAME = "claude-sonnet-4-6"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    init_langsmith()  # idempotent; no-op when LANGSMITH_TRACING is unset
     app.state.fhir = FhirClient()
-    app.state.graph = build_graph(app.state.fhir)
+    app.state.graph = build_graph(app.state.fhir, model_name=MODEL_NAME)
     app.state.cache = TTLCache(ttl_seconds=DATA_CACHE_TTL_S)
+    app.state.traces = TraceStore(capacity=200)
 
     # Don't block startup on the prewarm — let it run while uvicorn binds.
     prewarm_task = asyncio.create_task(_prewarm_dashboard(app))
@@ -214,13 +227,30 @@ async def me(username: str = Depends(current_user)) -> dict:
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest, _user: str = Depends(current_user)) -> ChatResponse:
+async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_user)) -> ChatResponse:
     session_id = req.session_id or str(uuid4())
     state = SESSIONS.get(session_id) or _fresh_state()
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
 
-    result = await app.state.graph.ainvoke(state)
+    trace = new_request_trace(
+        session_id=session_id,
+        username=request.session.get("username", ""),
+        user_msg=req.message,
+        model=MODEL_NAME,
+    )
+    token = set_current_trace(trace)
+    try:
+        result = await app.state.graph.ainvoke(
+            state,
+            config={"callbacks": [TokenUsageCallback()]},
+        )
+    except Exception as e:  # noqa: BLE001
+        trace.error = f"{type(e).__name__}: {e}"
+        trace.finalize()
+        app.state.traces.add(trace)
+        reset_current_trace(token)
+        raise
 
     new_state: AgentState = {
         "messages": result["messages"],
@@ -233,6 +263,12 @@ async def chat(req: ChatRequest, _user: str = Depends(current_user)) -> ChatResp
     last = new_state["messages"][-1]
     text = message_text(last) if isinstance(last, AIMessage) else ""
 
+    trace.validator_attempts = new_state["validation_attempts"]
+    trace.validator_failed = new_state["validation_attempts"] >= MAX_VALIDATION_ATTEMPTS
+    trace.finalize()
+    app.state.traces.add(trace)
+    reset_current_trace(token)
+
     return ChatResponse(
         session_id=session_id,
         response=text,
@@ -243,7 +279,11 @@ async def chat(req: ChatRequest, _user: str = Depends(current_user)) -> ChatResp
 
 
 @app.post("/chat/stream")
-async def chat_stream(req: ChatRequest, _user: str = Depends(current_user)) -> StreamingResponse:
+async def chat_stream(
+    req: ChatRequest,
+    request: Request,
+    _user: str = Depends(current_user),
+) -> StreamingResponse:
     """SSE-streaming version of /chat.
 
     Emits four event kinds, all as `data: {json}\\n\\n` lines:
@@ -257,48 +297,69 @@ async def chat_stream(req: ChatRequest, _user: str = Depends(current_user)) -> S
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
 
+    trace = new_request_trace(
+        session_id=session_id,
+        username=request.session.get("username", ""),
+        user_msg=req.message,
+        model=MODEL_NAME,
+    )
+
     async def event_stream():
-        yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
+        token = set_current_trace(trace)
+        try:
+            yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'request_id': trace.request_id})}\n\n"
 
-        async for event in app.state.graph.astream_events(state, version="v2"):
-            ev = event.get("event")
-            data = event.get("data") or {}
+            async for event in app.state.graph.astream_events(
+                state,
+                version="v2",
+                config={"callbacks": [TokenUsageCallback()]},
+            ):
+                ev = event.get("event")
+                data = event.get("data") or {}
 
-            if ev == "on_tool_start":
-                yield f"data: {json.dumps({'type': 'tool', 'name': event.get('name'), 'phase': 'start'})}\n\n"
-            elif ev == "on_chat_model_stream":
-                chunk = data.get("chunk")
-                if chunk is not None and isinstance(chunk.content, str) and chunk.content:
-                    yield f"data: {json.dumps({'type': 'token', 'text': chunk.content})}\n\n"
-                elif chunk is not None and isinstance(chunk.content, list):
-                    for blk in chunk.content:
-                        if isinstance(blk, dict) and blk.get("type") == "text":
-                            txt = blk.get("text", "")
-                            if txt:
-                                yield f"data: {json.dumps({'type': 'token', 'text': txt})}\n\n"
-            elif ev == "on_chain_end" and event.get("name") == "LangGraph":
-                output = data.get("output") or {}
-                if isinstance(output, dict) and "messages" in output:
-                    msgs = output["messages"]
-                    if msgs:
-                        new_state: AgentState = {
-                            "messages": msgs,
-                            "conversation_sources": output.get("conversation_sources", []),
-                            "patient_id": output.get("patient_id"),
-                            "validation_attempts": output.get("validation_attempts", 0),
-                        }
-                        SESSIONS[session_id] = new_state
+                if ev == "on_tool_start":
+                    yield f"data: {json.dumps({'type': 'tool', 'name': event.get('name'), 'phase': 'start'})}\n\n"
+                elif ev == "on_chat_model_stream":
+                    chunk = data.get("chunk")
+                    if chunk is not None and isinstance(chunk.content, str) and chunk.content:
+                        yield f"data: {json.dumps({'type': 'token', 'text': chunk.content})}\n\n"
+                    elif chunk is not None and isinstance(chunk.content, list):
+                        for blk in chunk.content:
+                            if isinstance(blk, dict) and blk.get("type") == "text":
+                                txt = blk.get("text", "")
+                                if txt:
+                                    yield f"data: {json.dumps({'type': 'token', 'text': txt})}\n\n"
+                elif ev == "on_chain_end" and event.get("name") == "LangGraph":
+                    output = data.get("output") or {}
+                    if isinstance(output, dict) and "messages" in output:
+                        msgs = output["messages"]
+                        if msgs:
+                            new_state: AgentState = {
+                                "messages": msgs,
+                                "conversation_sources": output.get("conversation_sources", []),
+                                "patient_id": output.get("patient_id"),
+                                "validation_attempts": output.get("validation_attempts", 0),
+                            }
+                            SESSIONS[session_id] = new_state
 
-        done_payload = {
-            "type": "done",
-            "patient_id": SESSIONS.get(session_id, {}).get("patient_id"),
-            "sources": SESSIONS.get(session_id, {}).get("conversation_sources", []),
-            "validation_warning": (
-                SESSIONS.get(session_id, {}).get("validation_attempts", 0)
-                >= MAX_VALIDATION_ATTEMPTS
-            ),
-        }
-        yield f"data: {json.dumps(done_payload)}\n\n"
+            sess = SESSIONS.get(session_id, {})
+            trace.validator_attempts = sess.get("validation_attempts", 0)
+            trace.validator_failed = trace.validator_attempts >= MAX_VALIDATION_ATTEMPTS
+            done_payload = {
+                "type": "done",
+                "patient_id": sess.get("patient_id"),
+                "sources": sess.get("conversation_sources", []),
+                "validation_warning": trace.validator_failed,
+                "request_id": trace.request_id,
+            }
+            yield f"data: {json.dumps(done_payload)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            trace.error = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            trace.finalize()
+            app.state.traces.add(trace)
+            reset_current_trace(token)
 
     return StreamingResponse(
         event_stream(),
@@ -350,3 +411,36 @@ async def calendar_today(_user: str = Depends(current_user)) -> dict:
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# ─── observability endpoints ─────────────────────────────────────────────
+
+
+@app.get("/api/traces")
+async def list_traces(
+    limit: int = 50,
+    _user: str = Depends(current_user),
+) -> dict:
+    """Newest-first list of recent request traces.
+
+    Each entry includes latency, token totals, $ cost, validator outcome,
+    tool-call count, and per-tool detail. Bounded ring buffer (200) — no
+    pagination beyond `limit`.
+    """
+    items = [t.to_dict() for t in app.state.traces.list_recent(limit=limit)]
+    return {"count": len(items), "items": items}
+
+
+@app.get("/api/traces/{request_id}")
+async def get_trace(request_id: str, _user: str = Depends(current_user)) -> dict:
+    trace = app.state.traces.get(request_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="trace not found")
+    return trace.to_dict()
+
+
+@app.get("/observability", response_model=None)
+async def observability_page(request: Request) -> FileResponse | RedirectResponse:
+    if not request.session.get("username"):
+        return RedirectResponse(url="/login", status_code=302)
+    return FileResponse(WEB_DIR / "observability.html")
