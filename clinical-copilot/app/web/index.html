@@ -720,9 +720,18 @@
       tabCal.classList.toggle('hidden',   name !== 'cal');
       tabNotes.classList.toggle('hidden', name !== 'notes');
       // Reload the active tab's data lazily — clinical notes are user-mutable
-      // so we want fresh state every visit.
+      // so we want fresh state every visit. For Supporting Documents we
+      // re-render from buffer on every tab switch so a save that happened
+      // while the tab was hidden becomes visible the moment the user opens it.
       if (name === 'notes' && activePatientId) {
         loadClinicalNotesTab(activePatientId);
+      }
+      if (name === 'docs' && activePatientId) {
+        const e = buffer.get(activePatientId) || {};
+        if (e.docs) {
+          tabDocs.innerHTML = renderDocs(e.docs);
+          docsCount.textContent = (e.docs.items || []).length || '·';
+        }
       }
     }
 
@@ -820,6 +829,9 @@
     // Re-fetch a patient's documents and refresh the in-page buffer.
     // Called after a clinical-note draft save or finalize so the
     // Supporting Documents tab doesn't keep showing the pre-save snapshot.
+    // We update the DOM regardless of whether the tab is currently visible —
+    // otherwise the user has to click another patient and come back to see
+    // the new note appear.
     async function refreshDocs(pid) {
       if (!pid) return;
       try {
@@ -829,10 +841,8 @@
         const e = buffer.get(pid) || {};
         e.docs = docs;
         buffer.set(pid, e);
-        if (activePatientId === pid && !tabDocs.classList.contains('hidden')) {
+        if (activePatientId === pid) {
           tabDocs.innerHTML = renderDocs(docs);
-          docsCount.textContent = (docs.items || []).length || '·';
-        } else if (activePatientId === pid) {
           docsCount.textContent = (docs.items || []).length || '·';
         }
       } catch {}
@@ -1262,7 +1272,12 @@
         const e = buffer.get(pid) || {};
         e.card = card;
         buffer.set(pid, e);
-        if (activePatientId === pid && cardView.get(pid) !== 'trends' && !tabCard.classList.contains('hidden')) {
+        // Update the DOM whether or not the card tab is currently visible —
+        // when the user later opens it, they should see the freshly entered
+        // vitals without having to navigate away and back. The trends view
+        // is the one exception: if it's currently up, leave the trends DOM
+        // alone (it has its own dedicated re-render path).
+        if (activePatientId === pid && cardView.get(pid) !== 'trends') {
           tabCard.innerHTML = renderCard(card);
           updateCtxPatient(card.name, pid);
         }
