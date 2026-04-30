@@ -45,3 +45,6 @@ docker/development-easy-redis/docker-compose.override.yml
 # Rendered architecture diagrams (the final PDF is checked in)
 /build/
 /ARCHITECTURE-diagram.html
+
+# Local-only triage list, never pushed
+clinical-copilot/LONG_TERM_FIXES.md
