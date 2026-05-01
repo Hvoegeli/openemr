@@ -7,7 +7,7 @@ tool call in the same conversation.
 """
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 
@@ -283,3 +283,202 @@ def _format_vital(v: dict) -> list[dict]:
         "unit": v.get("valueQuantity", {}).get("unit"),
         "time": eff_time,
     }]
+
+
+# ─── time-windowed Use Case A primitives ─────────────────────────────────
+
+
+def _category_code(o: dict) -> str | None:
+    """First non-empty `category.coding.code` on a resource. Used to label
+    Observations as `vital-signs` vs `laboratory` vs other. Returns None if
+    no code is present (some OpenEMR responses omit category entirely)."""
+    for cat in o.get("category") or []:
+        for coding in cat.get("coding") or []:
+            code = coding.get("code")
+            if isinstance(code, str) and code.strip():
+                return code.strip()
+    return None
+
+
+def _utc_cutoff_iso(hours: int) -> str:
+    """ISO-8601 UTC cutoff `now - hours`, suitable for FHIR `date=ge…`.
+
+    FHIR accepts both `Z` and `+00:00` suffixes; we use `Z` for brevity and
+    so OpenEMR's PHP date parser doesn't have to handle the timezone offset.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    return cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def get_observations_24h(
+    client: FhirClient, *, patient_id: str, hours: int = 24,
+) -> SourcedResult:
+    """Observations (labs + vitals) recorded for the patient in the last `hours`.
+
+    Uses FHIR `date=ge<cutoff>` for server-side filtering — narrower than
+    `get_patient_card.recent_vitals` and gives the agent a real "what's new"
+    answer instead of "here's the last 50, you figure out which are recent".
+
+    Composite BP Observations (single resource, systolic+diastolic in
+    `component`) are split via `_format_vital` so values aren't lost. Times
+    are re-stamped to clinical-local TZ via `_clinical_iso`. We also apply
+    a client-side filter on `effectiveDateTime` as defense-in-depth: if
+    the FHIR layer ever silently drops the `date` filter, the agent still
+    sees only in-window rows instead of every Observation up to _count.
+    """
+    cutoff_iso = _utc_cutoff_iso(hours)
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
+    obs = await client.search(
+        "Observation",
+        {"patient": patient_id, "date": f"ge{cutoff_iso}", "_count": 100},
+    )
+    rows: list[dict] = []
+    sources: list[str] = []
+    for o in obs:
+        if not _is_recent(o.get("effectiveDateTime"), cutoff_dt):
+            continue
+        sources.append(_ref(o))
+        cat = _category_code(o)
+        for row in _format_vital(o):
+            row["category"] = cat
+            rows.append(row)
+    rows.sort(key=lambda r: r.get("time") or "", reverse=True)
+    return {
+        "data": {
+            "window_hours": hours,
+            "cutoff_iso": cutoff_iso,
+            "count": len(rows),
+            "observations": rows,
+        },
+        "sources": sources,
+    }
+
+
+async def get_notes_24h(
+    client: FhirClient, *, patient_id: str, hours: int = 24,
+) -> SourcedResult:
+    """`DocumentReference`s (clinical notes, progress notes, summaries)
+    created for the patient in the last `hours`. Metadata only — title,
+    type, date, status, attachment titles. Full-text fetch is a separate
+    (planned) tool; metadata alone already answers "did the night team
+    document anything I should know about?"."""
+    cutoff_iso = _utc_cutoff_iso(hours)
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
+    docs = await client.search(
+        "DocumentReference",
+        {"patient": patient_id, "date": f"ge{cutoff_iso}", "_count": 30},
+    )
+    items: list[dict] = []
+    sources: list[str] = []
+    for d in docs:
+        if not _is_recent(d.get("date"), cutoff_dt):
+            continue
+        sources.append(_ref(d))
+        attachments: list[dict] = []
+        for content in d.get("content") or []:
+            att = content.get("attachment") or {}
+            attachments.append({
+                "title": att.get("title"),
+                "content_type": att.get("contentType"),
+            })
+        items.append({
+            "id": d["id"],
+            "title": _coded_display(d.get("type") or {}) or "Document",
+            "date": _clinical_iso(d.get("date")),
+            "status": d.get("status"),
+            "category": _coded_display((d.get("category") or [{}])[0]),
+            "attachments": attachments,
+        })
+    items.sort(key=lambda x: x.get("date") or "", reverse=True)
+    return {
+        "data": {
+            "window_hours": hours,
+            "cutoff_iso": cutoff_iso,
+            "count": len(items),
+            "documents": items,
+        },
+        "sources": sources,
+    }
+
+
+async def get_med_changes_24h(
+    client: FhirClient, *, patient_id: str, hours: int = 24,
+) -> SourcedResult:
+    """`MedicationRequest`s authored or modified for the patient in the
+    last `hours` — new orders, dose changes, holds.
+
+    OpenEMR's FHIR layer does NOT expose `authoredon` as a search param
+    (only `patient` / `intent` / `status` / `_id` / `_lastUpdated` per
+    FhirMedicationRequestService::loadSearchParameters); using
+    `authoredon=ge…` would be silently ignored and the search would
+    return every MedicationRequest. We use `_lastUpdated=ge…` instead —
+    it's supported and semantically broader (captures modifications to
+    existing orders too, which the doctor wants to see). A client-side
+    filter on either `authoredOn` or `meta.lastUpdated` keeps results
+    inside the window if the server's filter ever silently regresses.
+    """
+    cutoff_iso = _utc_cutoff_iso(hours)
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
+    meds = await client.search(
+        "MedicationRequest",
+        {"patient": patient_id, "_lastUpdated": f"ge{cutoff_iso}", "_count": 30},
+    )
+    items: list[dict] = []
+    sources: list[str] = []
+    for m in meds:
+        # Defense-in-depth: skip rows that fall outside the window even if
+        # the FHIR layer ignored our filter. Compare on the freshest of
+        # `meta.lastUpdated` and `authoredOn`. `(m.get("meta") or {})`
+        # protects against an explicit `"meta": null` which would otherwise
+        # AttributeError on `.get(...)`.
+        meta = m.get("meta") or {}
+        if not _is_recent(_pick_latest(meta.get("lastUpdated"),
+                                       m.get("authoredOn")),
+                          cutoff_dt):
+            continue
+        sources.append(_ref(m))
+        dosage = (m.get("dosageInstruction") or [{}])[0]
+        items.append({
+            "id": m["id"],
+            "drug": _coded_display(m.get("medicationCodeableConcept", {}))
+                or _narrative_text(m),
+            "dose_text": dosage.get("text"),
+            "status": m.get("status"),
+            "intent": m.get("intent"),
+            "authored_on": _clinical_iso(m.get("authoredOn")),
+            "last_updated": _clinical_iso(meta.get("lastUpdated")),
+        })
+    items.sort(key=lambda x: x.get("last_updated") or x.get("authored_on") or "",
+               reverse=True)
+    return {
+        "data": {
+            "window_hours": hours,
+            "cutoff_iso": cutoff_iso,
+            "count": len(items),
+            "medications": items,
+        },
+        "sources": sources,
+    }
+
+
+def _pick_latest(*iso_strs: str | None) -> str | None:
+    """Return the lexicographically-greatest non-None ISO string, which is
+    also the most recent timestamp (ISO-8601 sorts naturally)."""
+    candidates = [s for s in iso_strs if isinstance(s, str) and s]
+    return max(candidates) if candidates else None
+
+
+def _is_recent(iso_str: str | None, cutoff_dt: datetime) -> bool:
+    """True if `iso_str` parses as a datetime at or after `cutoff_dt`.
+    Returns True for unparsable input (fail-open) so a malformed timestamp
+    doesn't silently drop a real record — better to surface than hide.
+    `cutoff_dt` must be tz-aware UTC; we coerce naive inputs to UTC."""
+    if not iso_str:
+        return True  # fail-open
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    except ValueError:
+        return True  # fail-open on unparsable
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt >= cutoff_dt

@@ -88,7 +88,79 @@ async def get_vital_trends(patient_id: str) -> str:
     raise NotImplementedError("Dispatched in agent.graph.execute_tools_node")
 
 
-TOOLS = [current_time, resolve_patient, get_patient_card, get_vital_trends]
+@tool
+async def get_observations_24h(patient_id: str, hours: int = 24) -> str:
+    """Fetch Observations (labs + vitals) recorded in the last `hours`.
+
+    Use for "what changed overnight?", "any new labs since yesterday?",
+    "did her potassium come back?". Time-bound and narrower than
+    `get_patient_card`'s `recent_vitals`, which spans all observations
+    regardless of when they were taken.
+
+    Returns JSON with `data.observations` (each row has id, name, value,
+    unit, time, category — `vital-signs` / `laboratory` / etc.),
+    `data.window_hours`, `data.cutoff_iso`, plus `sources` listing every
+    Observation resource ID. Composite BP is split into separate Systolic
+    and Diastolic rows. Default window is 24 hours; pass `hours=48` to
+    widen, `hours=12` to narrow.
+
+    Args:
+        patient_id: The FHIR Patient resource ID.
+        hours: Lookback window in hours. Defaults to 24.
+    """
+    raise NotImplementedError("Dispatched in agent.graph.execute_tools_node")
+
+
+@tool
+async def get_notes_24h(patient_id: str, hours: int = 24) -> str:
+    """Fetch DocumentReferences (clinical notes, progress notes, discharge
+    summaries) created in the last `hours`.
+
+    Use for "what did the night team document?", "any new notes since
+    rounds?". Returns metadata only — title, type, date, status, attachment
+    titles. Content-body fetch is not supported by this tool yet; describe
+    that a note exists and let the doctor open it.
+
+    Returns JSON with `data.documents`, `data.window_hours`,
+    `data.cutoff_iso`, plus `sources` listing every DocumentReference ID.
+
+    Args:
+        patient_id: The FHIR Patient resource ID.
+        hours: Lookback window in hours. Defaults to 24.
+    """
+    raise NotImplementedError("Dispatched in agent.graph.execute_tools_node")
+
+
+@tool
+async def get_med_changes_24h(patient_id: str, hours: int = 24) -> str:
+    """Fetch MedicationRequests authored in the last `hours` — new orders,
+    dose changes, holds.
+
+    Use for "what meds changed overnight?", "did the covering doctor start
+    anything new?". Status transitions that didn't go through a new
+    MedicationRequest (pure backend status flips) won't appear here — that's
+    an OpenEMR limitation, not a tool gap.
+
+    Returns JSON with `data.medications` (each with id, drug, dose_text,
+    status, intent, authored_on), `data.window_hours`, `data.cutoff_iso`,
+    plus `sources` listing every MedicationRequest ID.
+
+    Args:
+        patient_id: The FHIR Patient resource ID.
+        hours: Lookback window in hours. Defaults to 24.
+    """
+    raise NotImplementedError("Dispatched in agent.graph.execute_tools_node")
+
+
+TOOLS = [
+    current_time,
+    resolve_patient,
+    get_patient_card,
+    get_vital_trends,
+    get_observations_24h,
+    get_notes_24h,
+    get_med_changes_24h,
+]
 
 
 async def _current_time_impl() -> SourcedResult:
@@ -163,5 +235,23 @@ async def dispatch(
     if name == "get_vital_trends":
         return await _get_vital_trends_impl(
             client, notes_store, patient_id=args["patient_id"],
+        )
+    if name == "get_observations_24h":
+        return await adapter.get_observations_24h(
+            client,
+            patient_id=args["patient_id"],
+            hours=int(args.get("hours", 24)),
+        )
+    if name == "get_notes_24h":
+        return await adapter.get_notes_24h(
+            client,
+            patient_id=args["patient_id"],
+            hours=int(args.get("hours", 24)),
+        )
+    if name == "get_med_changes_24h":
+        return await adapter.get_med_changes_24h(
+            client,
+            patient_id=args["patient_id"],
+            hours=int(args.get("hours", 24)),
         )
     raise ValueError(f"Unknown tool: {name}")
