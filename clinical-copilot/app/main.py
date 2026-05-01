@@ -45,6 +45,7 @@ logging.getLogger("agent").setLevel(logging.INFO)
 
 from app.agent.graph import MAX_VALIDATION_ATTEMPTS, active_model_label, build_graph, message_text  # noqa: E402
 from app.agent.input_guard import JAILBREAK_REFUSAL, detect_jailbreak  # noqa: E402
+from app.agent.intent_router import route_intent  # noqa: E402
 from app.agent.state import AgentState  # noqa: E402
 from app.auth import current_user, verify_openemr_credentials  # noqa: E402
 from app.cache import TTLCache  # noqa: E402
@@ -298,6 +299,30 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
             validation_warning=False,
         )
 
+    # Deterministic intent router — handles trivial messages (greetings,
+    # thanks, help) without an LLM call. Strict full-message anchoring
+    # means anything more complex falls through to the agent graph below.
+    routed = route_intent(req.message)
+    if routed is not None:
+        router_trace = new_request_trace(
+            session_id=session_id,
+            username=request.session.get("username", ""),
+            user_msg=req.message,
+            model="intent_router",
+        )
+        router_trace.error = f"routed:{routed.intent}"
+        router_trace.finalize()
+        app.state.traces.add(router_trace)
+        log.info("intent routed: pattern=%s session=%s", routed.intent, session_id)
+        sess = SESSIONS.get(session_id, {})
+        return ChatResponse(
+            session_id=session_id,
+            response=routed.response,
+            patient_id=sess.get("patient_id"),
+            sources=sess.get("conversation_sources", []),
+            validation_warning=False,
+        )
+
     state = SESSIONS.get(session_id) or _fresh_state()
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
@@ -395,6 +420,46 @@ async def chat_stream(
 
         return StreamingResponse(
             guard_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # Deterministic intent router — same logic as /chat above, but emits
+    # the canned response over SSE so the UI handles it identically to
+    # any streamed answer.
+    routed = route_intent(req.message)
+    if routed is not None:
+        router_trace = new_request_trace(
+            session_id=session_id,
+            username=request.session.get("username", ""),
+            user_msg=req.message,
+            model="intent_router",
+        )
+        router_trace.error = f"routed:{routed.intent}"
+        router_trace.finalize()
+        app.state.traces.add(router_trace)
+        log.info("intent routed (stream): pattern=%s session=%s", routed.intent, session_id)
+        sess = SESSIONS.get(session_id, {})
+
+        async def routed_stream():
+            yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'request_id': router_trace.request_id})}\n\n"
+            yield f"data: {json.dumps({'type': 'token', 'text': routed.response})}\n\n"
+            done_payload = {
+                "type": "done",
+                "patient_id": sess.get("patient_id"),
+                "sources": sess.get("conversation_sources", []),
+                "validation_warning": False,
+                "request_id": router_trace.request_id,
+                "routed_intent": routed.intent,
+            }
+            yield f"data: {json.dumps(done_payload)}\n\n"
+
+        return StreamingResponse(
+            routed_stream(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
