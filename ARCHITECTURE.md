@@ -250,20 +250,72 @@ These are documented gaps. The mitigation is the prompt rule: the LLM is instruc
 - Session-scoped FHIR cache (15–30s TTL) for repeat patient-card pulls.
 - Model cascade — Haiku for parameter extraction / disambiguation, Sonnet for synthesis, Opus only for med-safety ambiguity. Token cost drops ~40%.
 
-## 6. Cost model — first-pass projection
+## 6. Cost model — actual + projected
 
-Assumptions per session (conservative):
-- 4 turns/session, 800 input + 400 output tokens per turn (after caching)
-- 70% Sonnet, 25% Haiku, 5% Opus mix
+### 6.1 Actual dev-week spend
 
-| Scale | Sessions/mo | LLM cost/mo (USD) | Infra (Fly + Postgres + LangSmith) | Total |
-|---|---|---|---|---|
-| 100 users | ~600 | ~$10 | ~$30 | **~$40** |
-| 1K users | ~6K | ~$100 | ~$60 | **~$160** |
-| 10K users | ~60K | ~$1,000 | ~$300 | **~$1,300** |
-| 100K users | ~600K | ~$10,000 | ~$2,000 (need Postgres scale-out, vector store, dedicated FHIR proxy) | **~$12,000** |
+Pulled from the durable trace store at `/root/openemr/clinical-copilot/data/traces.db`
+on the Hetzner deploy (LangSmith mirror at project `agent_forge`). Numbers below
+are the cumulative spend across all `/chat` and `/api/sign-out/draft` invocations
+during the build week (2026-04-27 → 2026-05-03):
+
+> **Total: $<TODO — fill from `SELECT SUM(cost_usd) FROM request_traces`>** across
+> ~<TODO> traces, mostly Claude Sonnet 4.6 (with a smaller share of Bedrock-routed calls
+> after the provider switch landed Thursday). Cache reads after prompt-caching
+> shipped (Friday) cut per-turn input cost by ~80%, visible in
+> `cache_read_tokens` on the `/observability` page.
+
+Even with one engineer hammering the agent for ~6 days, dev spend is two-digit
+dollars. **The economics of this app are not LLM-bound at any tier we'd plausibly
+deploy at.** The gating cost shifts elsewhere — see §6.3.
+
+### 6.2 Projected production cost (per month)
+
+Assumptions per session (conservative; all post-caching):
+- 4 turns/session, 800 input + 400 output tokens per turn
+- 70% Sonnet 4.6 / 25% Haiku 4.5 / 5% Opus 4.7 model mix
+- 80% prompt-cache hit rate after warmup (system prompt + tool schema repeat each turn)
+
+| Scale | Sessions/mo | LLM $/mo | Infra $/mo | Total $/mo | Architectural changes from previous tier |
+|---|---|---|---|---|---|
+| **100 users** (small clinic) | ~600 | ~$10 | ~$30 | **~$40** | Single Hetzner CPX21 (current shape). One uvicorn worker. SQLite for sessions + audit log. cloudflared quick-tunnel for ingress. |
+| **1K users** (mid-size practice) | ~6K | ~$100 | ~$60 | **~$160** | Replace SQLite with Postgres (managed, e.g. Hetzner Cloud or RDS); two uvicorn workers behind a reverse proxy; cloudflared named tunnel with stable subdomain (no more quick-tunnel rotations). |
+| **10K users** (regional health system) | ~60K | ~$1,000 | ~$300 | **~$1,300** | Multi-instance behind a load balancer (3–5 uvicorn workers across 2 hosts). Bedrock provisioned-throughput for predictable per-call latency. Redis for the FHIR-call cache (cross-instance). Postgres read-replicas for the audit log. Per-tenant OAuth client management. |
+| **100K users** (large IDN / 500-bed hospital × 30) | ~600K | ~$10,000 | ~$2,000 | **~$12,000** | Sharded Postgres for the audit log (HIPAA retention is 7y — this table is the largest by volume). Dedicated FHIR proxy cluster: **OpenEMR's PHP layer is the bottleneck at this scale**, not the LLM (see §6.3). Per-tenant Bedrock account boundaries for billing + isolation. SOC2 + HITRUST audit cycle ($30–80k/yr ops cost, not LLM cost). |
 
 Per-physician marginal cost at the 1K-user tier is ~$0.16/month — well under the price of any clinical SaaS.
+
+### 6.3 The bottleneck shift — why "cost-per-token × users" misses it
+
+At the 100K-user tier, **the LLM stops being the dominant cost or the dominant
+latency contributor**. Three things matter more:
+
+1. **The FHIR backend.** OpenEMR's PHP/Apache + MariaDB stack serializes per-session
+   on the PHP side and per-row on the DB side. At ~5K concurrent agent sessions
+   each making ~5 FHIR calls a minute, the EHR is the throttle, not Claude. The
+   architectural answer is a dedicated FHIR proxy with a server-side cache
+   keyed on `(patient_id, resource_type)` — turns most reads into hits and lets
+   the PHP backend handle only writes + cold reads. **Every tier above 10K is
+   a FHIR-scaling problem first.**
+
+2. **The audit log.** HIPAA `§164.312(b)` requires 6 years of audit retention
+   (some states mandate 7+). At 100K users × 4 turns/session × ~5 traces per
+   turn (with tool events) × 26 working days/month, that's ~52M rows/month →
+   ~3.7B rows over the retention window. SQLite is unviable at the first tier
+   this volume hits (~2K users); Postgres is fine through ~50K users with
+   partitioning by month; beyond that you need sharded Postgres or move to a
+   columnar store (Clickhouse, Druid) for the long-tail audit queries.
+
+3. **Compliance ops, not infra.** SOC2 and HITRUST audits each cost $30–80k/yr
+   to maintain (audit fees + dedicated security engineer time + vendor BAAs).
+   At 100K users the compliance line is comparable to the infrastructure line —
+   and it's a fixed cost regardless of usage. The marginal physician at this
+   tier costs ~$0.12/month in compute and ~$8/month in proportional compliance.
+
+**Practical implication for the build sequence:** the right thing to build *next*
+after a working agent is not "cheaper LLM calls" — it's the FHIR caching layer.
+Claude Sonnet on Bedrock is already cheap; OpenEMR's PHP layer is what breaks
+at scale.
 
 ## 7. Tradeoffs and alternatives considered
 
