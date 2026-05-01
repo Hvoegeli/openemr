@@ -47,7 +47,7 @@ from app.agent.graph import MAX_VALIDATION_ATTEMPTS, active_model_label, build_g
 from app.agent.input_guard import JAILBREAK_REFUSAL, detect_jailbreak  # noqa: E402
 from app.agent.intent_router import route_intent  # noqa: E402
 from app.agent.state import AgentState  # noqa: E402
-from app.auth import current_user, verify_openemr_credentials  # noqa: E402
+from app.auth import current_user, is_admin, require_admin, verify_openemr_credentials  # noqa: E402
 from app.cache import TTLCache  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.fhir import adapter  # noqa: E402
@@ -265,7 +265,7 @@ async def logout(request: Request) -> dict:
 
 @app.get("/api/me")
 async def me(username: str = Depends(current_user)) -> dict:
-    return {"username": username}
+    return {"username": username, "is_admin": is_admin(username)}
 
 
 # ─── chat ────────────────────────────────────────────────────────────────
@@ -1043,3 +1043,101 @@ async def observability_page(request: Request) -> FileResponse | RedirectRespons
     if not request.session.get("username"):
         return RedirectResponse(url="/login", status_code=302)
     return FileResponse(WEB_DIR / "observability.html")
+
+
+# ─── admin endpoints (admin-only oversight) ──────────────────────────────
+
+
+@app.get("/admin", response_model=None)
+async def admin_page(request: Request) -> FileResponse | RedirectResponse:
+    """Admin oversight page. Login-gated; non-admins get redirected to /
+    rather than getting a 403 — the page wouldn't be useful to them anyway,
+    and a redirect is friendlier than an error for a misclick."""
+    username = request.session.get("username")
+    if not username:
+        return RedirectResponse(url="/login", status_code=302)
+    if not is_admin(username):
+        return RedirectResponse(url="/", status_code=302)
+    return FileResponse(WEB_DIR / "admin.html")
+
+
+@app.get("/api/admin/recent-activity")
+async def admin_recent_activity(
+    limit: int = 200,
+    _admin: str = Depends(require_admin),
+) -> dict:
+    """Aggregate recent /chat traces by username so admins can see who's
+    been using the app. Pulls from the durable SQLite trace store, so
+    activity persists across restarts. Limit defaults to 200 traces (the
+    most recent), aggregated client-side into a per-username summary."""
+    traces = app.state.traces.list_recent(limit=limit)
+    by_user: dict[str, dict] = {}
+    for t in traces:
+        u = t.username or "(anonymous)"
+        slot = by_user.setdefault(u, {
+            "username": u,
+            "request_count": 0,
+            "tool_call_count": 0,
+            "first_seen": None,
+            "last_seen": None,
+            "total_cost_usd": 0.0,
+            "blocked_count": 0,
+            "validator_failed_count": 0,
+        })
+        slot["request_count"] += 1
+        slot["tool_call_count"] += len(t.tool_events)
+        slot["total_cost_usd"] = round(slot["total_cost_usd"] + (t.cost_usd or 0.0), 5)
+        if t.error and t.error.startswith("jailbreak_blocked:"):
+            slot["blocked_count"] += 1
+        if t.validator_failed:
+            slot["validator_failed_count"] += 1
+        # Emit ISO with explicit UTC offset so the browser's `new Date(iso)`
+        # parses an unambiguous instant. `fromtimestamp(ts)` without a tz
+        # arg returns a naive local-time datetime — that ends up rendering
+        # in the wrong zone whenever the server and browser disagree
+        # (Hetzner runs UTC; admins likely view from MDT). The UTC-suffixed
+        # ISO sorts correctly as a string and round-trips through JS Date.
+        from datetime import datetime, timezone  # noqa: PLC0415
+        ts_iso = (
+            datetime.fromtimestamp(t.started_at, tz=timezone.utc)
+            .isoformat(timespec="seconds")
+        )
+        if slot["first_seen"] is None or ts_iso < slot["first_seen"]:
+            slot["first_seen"] = ts_iso
+        if slot["last_seen"] is None or ts_iso > slot["last_seen"]:
+            slot["last_seen"] = ts_iso
+    items = sorted(by_user.values(), key=lambda x: x["last_seen"] or "", reverse=True)
+    return {"count": len(items), "items": items, "trace_window": limit}
+
+
+@app.get("/api/admin/practitioners")
+async def admin_practitioners(_admin: str = Depends(require_admin)) -> dict:
+    """Read-only list of OpenEMR users via FHIR Practitioner search.
+
+    The Practitioner resource is read-only on the agent's OAuth client
+    (system/Practitioner.read). Anyone listed here is a potential login
+    user — we don't currently surface which OpenEMR `users_secure` row
+    each Practitioner maps to (that's a separate non-FHIR API call), so
+    "user X is in this list" is necessary but not sufficient for them
+    to actually log in. Sufficient for an admin oversight view; full
+    user-creation flow is a follow-up task."""
+    try:
+        rows = await app.state.fhir.search("Practitioner", {"_count": 50})
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    items: list[dict] = []
+    for p in rows:
+        name = (p.get("name") or [{}])[0]
+        given = " ".join(name.get("given") or [])
+        family = name.get("family") or ""
+        full = (given + " " + family).strip() or "(unknown)"
+        items.append({
+            "id": p.get("id"),
+            "name": full,
+            "active": p.get("active"),
+            "telecom": [
+                {"system": t.get("system"), "value": t.get("value")}
+                for t in (p.get("telecom") or [])
+            ],
+        })
+    return {"count": len(items), "items": items}

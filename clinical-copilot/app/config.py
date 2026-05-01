@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     # Co-pilot cookie sessions. Random fallback OK for dev; set explicitly in prod.
     copilot_session_secret: str = "dev-secret-change-me-please-32bytes"
 
+    # Admin users — comma-separated list of OpenEMR usernames who get
+    # access to the /admin oversight page. Default is "admin" so the
+    # OpenEMR seed admin user has admin privileges out of the box.
+    # Production deploys override via ADMIN_USERNAMES env var.
+    admin_usernames: str = "admin"
+
     # App database
     database_url: str = "postgresql://agent_forge:dev@localhost:5432/agent_forge"
 

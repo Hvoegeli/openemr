@@ -625,6 +625,7 @@
     <div class="brand">Clinical <span class="accent">Co-pilot</span></div>
     <div class="right">
       <span id="who"></span>
+      <a id="admin-link" href="/admin" style="color: var(--muted); text-decoration: none; font-size: 0.82rem; padding: 0.3rem 0.7rem; border: 1px solid var(--border); border-radius: 6px; display: none;">Admin</a>
       <a href="/observability" style="color: var(--muted); text-decoration: none; font-size: 0.82rem; padding: 0.3rem 0.7rem; border: 1px solid var(--border); border-radius: 6px;">Traces</a>
       <button id="logout" type="button">Sign out</button>
     </div>
@@ -748,8 +749,14 @@
     (() => {
       const calPromise = loadCalendar();
       fetch('/api/me').then(async (r) => {
-        if (r.ok) { who.textContent = (await r.json()).username; }
-        else if (r.status === 401) { window.location.href = '/login'; }
+        if (r.ok) {
+          const me = await r.json();
+          who.textContent = me.username;
+          if (me.is_admin) {
+            const adminLink = document.getElementById('admin-link');
+            if (adminLink) adminLink.style.display = '';
+          }
+        } else if (r.status === 401) { window.location.href = '/login'; }
       }).catch(() => { /* ignore */ });
       return calPromise;
     })();

@@ -57,3 +57,31 @@ def current_user(request: Request) -> str:
     if not username:
         raise HTTPException(status_code=401, detail="Not logged in")
     return username
+
+
+def _admin_set() -> set[str]:
+    """Parse `settings.admin_usernames` into a set of lowercased usernames.
+
+    Comma-separated list, whitespace-tolerant. Empty entries dropped.
+    Lowercased for case-insensitive matching against
+    `request.session["username"]` (OpenEMR is case-insensitive on
+    username via its login flow)."""
+    raw = settings.admin_usernames or ""
+    return {u.strip().lower() for u in raw.split(",") if u.strip()}
+
+
+def is_admin(username: str | None) -> bool:
+    """True if `username` is in the configured admin allow-list."""
+    if not username:
+        return False
+    return username.strip().lower() in _admin_set()
+
+
+def require_admin(request: Request) -> str:
+    """Dependency: return the admin's username, or 403 if not an admin.
+    Use as `Depends(require_admin)` on admin-only endpoints. 401 still
+    fires first if the user isn't logged in at all."""
+    username = current_user(request)
+    if not is_admin(username):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return username

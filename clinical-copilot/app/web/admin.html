@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Clinical Co-pilot · Admin</title>
+  <style>
+    :root {
+      --bg: #f7f7f8;
+      --panel: #ffffff;
+      --border: #e5e7eb;
+      --text: #111827;
+      --muted: #6b7280;
+      --accent: #2563eb;
+      --good: #15803d;
+      --warn-bg: #fef3c7;
+      --warn-text: #78350f;
+      --error: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      display: grid;
+      grid-template-rows: 44px minmax(0, 1fr);
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      padding: 0 1rem;
+      font-size: 0.9rem;
+    }
+    header .brand { font-weight: 600; }
+    header .brand .accent { color: var(--accent); }
+    header .right { color: var(--muted); font-size: 0.85rem; display: flex; gap: 0.75rem; align-items: center; }
+    header a, header button {
+      color: var(--muted); text-decoration: none;
+      padding: 0.3rem 0.7rem; border: 1px solid var(--border); border-radius: 6px;
+      font-size: 0.82rem; background: var(--panel); cursor: pointer;
+      font-family: inherit;
+    }
+    header a:hover, header button:hover { color: var(--text); }
+    main { padding: 1rem; overflow: auto; }
+
+    h2 {
+      margin: 0 0 0.5rem 0; font-size: 1rem; font-weight: 600;
+    }
+    .section {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+      padding: 1rem; margin-bottom: 1rem;
+    }
+    .section .subtitle {
+      color: var(--muted); font-size: 0.82rem; margin-bottom: 0.75rem;
+    }
+    .empty {
+      color: var(--muted); font-size: 0.88rem; padding: 0.5rem 0;
+    }
+    table {
+      width: 100%; border-collapse: collapse; font-size: 0.85rem;
+    }
+    th, td {
+      padding: 0.5rem 0.6rem; text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    th { color: var(--muted); font-weight: 500; font-size: 0.78rem; text-transform: uppercase; }
+    td.num { font-variant-numeric: tabular-nums; }
+    td.muted { color: var(--muted); font-size: 0.82rem; }
+    .badge {
+      display: inline-block; padding: 0.1rem 0.5rem; border-radius: 4px;
+      font-size: 0.72rem; font-weight: 500;
+    }
+    .badge.warn { background: var(--warn-bg); color: var(--warn-text); }
+    .badge.good { background: #dcfce7; color: var(--good); }
+    .badge.error { background: #fee2e2; color: var(--error); }
+    .badge.muted { background: #f3f4f6; color: var(--muted); }
+
+    .stub {
+      background: #fef3c7; border: 1px solid #fde68a; color: #78350f;
+      border-radius: 6px; padding: 0.75rem 1rem; font-size: 0.85rem;
+      line-height: 1.5;
+    }
+    .stub strong { color: #57340e; }
+    .stub a {
+      color: var(--accent); text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="brand">Clinical Co-pilot · <span class="accent">Admin</span></span>
+    <span class="right">
+      <span id="who"></span>
+      <a href="/">Back to chat</a>
+      <a href="/observability">Traces</a>
+      <button id="logout" type="button">Sign out</button>
+    </span>
+  </header>
+
+  <main>
+    <div class="section">
+      <h2>Active users (last 200 chat traces)</h2>
+      <div class="subtitle">
+        Aggregated from the durable SQLite trace store. Each row is one
+        OpenEMR username with their request count, tool-call count, total
+        $ cost, and any blocked / validator-flagged events.
+      </div>
+      <div id="activity-body"><div class="empty">Loading activity…</div></div>
+    </div>
+
+    <div class="section">
+      <h2>OpenEMR practitioners</h2>
+      <div class="subtitle">
+        Read-only view of <code>FHIR Practitioner</code>. These are the
+        identities currently visible to the chart-read OAuth client.
+        Logging in still requires a matching <code>users_secure</code>
+        row in OpenEMR — which is provisioned via OpenEMR's admin UI,
+        not here (see below).
+      </div>
+      <div id="practitioners-body"><div class="empty">Loading practitioners…</div></div>
+    </div>
+
+    <div class="section">
+      <h2>Create user</h2>
+      <div class="stub">
+        <strong>Provisioning new accounts is done in OpenEMR's admin
+        UI</strong>, not in this app. OpenEMR is the source of truth for
+        users, role assignments, and password hashes; the co-pilot
+        validates credentials against OpenEMR's password-grant OAuth and
+        does not maintain a parallel user store. To add a clinician,
+        sign in to OpenEMR's admin panel and use the user-management
+        page there. The co-pilot's role-based view (this page) auto-picks-up
+        the new user once they log in for the first time.
+        <br><br>
+        Configuring who is an admin in <em>this</em> app is a separate
+        concern controlled by the <code>ADMIN_USERNAMES</code> env var
+        on the deploy host.
+      </div>
+    </div>
+  </main>
+
+  <script>
+    function escHtml(s) {
+      return String(s ?? '').replace(/[<&>"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    }
+    function fmtCost(usd) {
+      if (typeof usd !== 'number' || usd === 0) return '$0.00';
+      if (usd < 0.01) return '$' + usd.toFixed(4);
+      return '$' + usd.toFixed(2);
+    }
+    function fmtTs(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return d.toLocaleString();
+    }
+
+    document.getElementById('logout').addEventListener('click', async () => {
+      await fetch('/api/logout', { method: 'POST' });
+      window.location.href = '/login';
+    });
+
+    fetch('/api/me').then(async r => {
+      if (!r.ok) {
+        window.location.href = '/login';
+        return;
+      }
+      const me = await r.json();
+      document.getElementById('who').textContent = me.username + (me.is_admin ? ' (admin)' : '');
+    });
+
+    async function loadActivity() {
+      const body = document.getElementById('activity-body');
+      try {
+        const r = await fetch('/api/admin/recent-activity?limit=200', { credentials: 'same-origin' });
+        if (!r.ok) {
+          body.innerHTML = '<div class="empty">Failed to load activity (' + r.status + ').</div>';
+          return;
+        }
+        const data = await r.json();
+        if (!data.items || !data.items.length) {
+          body.innerHTML = '<div class="empty">No chat activity recorded yet.</div>';
+          return;
+        }
+        const rows = data.items.map(u => {
+          const blockedBadge = u.blocked_count > 0
+            ? '<span class="badge error">' + u.blocked_count + ' blocked</span>'
+            : '';
+          const validatorBadge = u.validator_failed_count > 0
+            ? '<span class="badge warn">' + u.validator_failed_count + ' validator-fail</span>'
+            : '';
+          return ''
+            + '<tr>'
+            + '<td>' + escHtml(u.username) + '</td>'
+            + '<td class="num">' + u.request_count + '</td>'
+            + '<td class="num">' + u.tool_call_count + '</td>'
+            + '<td class="num">' + fmtCost(u.total_cost_usd) + '</td>'
+            + '<td>' + (blockedBadge || '<span class="badge good">clean</span>') + ' ' + validatorBadge + '</td>'
+            + '<td class="muted">' + escHtml(fmtTs(u.last_seen)) + '</td>'
+            + '</tr>';
+        }).join('');
+        body.innerHTML = ''
+          + '<table>'
+          + '<thead><tr>'
+          + '<th>Username</th><th>Requests</th><th>Tool calls</th>'
+          + '<th>Total cost</th><th>Status</th><th>Last seen</th>'
+          + '</tr></thead>'
+          + '<tbody>' + rows + '</tbody>'
+          + '</table>';
+      } catch (e) {
+        body.innerHTML = '<div class="empty">Error: ' + escHtml(e && e.message ? e.message : e) + '</div>';
+      }
+    }
+
+    async function loadPractitioners() {
+      const body = document.getElementById('practitioners-body');
+      try {
+        const r = await fetch('/api/admin/practitioners', { credentials: 'same-origin' });
+        if (!r.ok) {
+          body.innerHTML = '<div class="empty">Failed to load practitioners (' + r.status + ').</div>';
+          return;
+        }
+        const data = await r.json();
+        if (!data.items || !data.items.length) {
+          body.innerHTML = '<div class="empty">No practitioners returned by OpenEMR.</div>';
+          return;
+        }
+        const rows = data.items.map(p => {
+          const status = p.active === false
+            ? '<span class="badge muted">inactive</span>'
+            : '<span class="badge good">active</span>';
+          const tel = (p.telecom || []).map(t => escHtml((t.system || '') + ': ' + (t.value || ''))).join(', ') || '—';
+          return ''
+            + '<tr>'
+            + '<td>' + escHtml(p.name) + '</td>'
+            + '<td>' + status + '</td>'
+            + '<td class="muted">' + tel + '</td>'
+            + '<td class="muted">' + escHtml(p.id || '') + '</td>'
+            + '</tr>';
+        }).join('');
+        body.innerHTML = ''
+          + '<table>'
+          + '<thead><tr>'
+          + '<th>Name</th><th>Status</th><th>Contact</th><th>FHIR ID</th>'
+          + '</tr></thead>'
+          + '<tbody>' + rows + '</tbody>'
+          + '</table>';
+      } catch (e) {
+        body.innerHTML = '<div class="empty">Error: ' + escHtml(e && e.message ? e.message : e) + '</div>';
+      }
+    }
+
+    loadActivity();
+    loadPractitioners();
+  </script>
+</body>
+</html>
