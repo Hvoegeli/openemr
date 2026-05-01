@@ -44,6 +44,7 @@ logging.basicConfig(
 logging.getLogger("agent").setLevel(logging.INFO)
 
 from app.agent.graph import MAX_VALIDATION_ATTEMPTS, build_graph, message_text  # noqa: E402
+from app.agent.input_guard import JAILBREAK_REFUSAL, detect_jailbreak  # noqa: E402
 from app.agent.state import AgentState  # noqa: E402
 from app.auth import current_user, verify_openemr_credentials  # noqa: E402
 from app.cache import TTLCache  # noqa: E402
@@ -272,6 +273,31 @@ async def me(username: str = Depends(current_user)) -> dict:
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_user)) -> ChatResponse:
     session_id = req.session_id or str(uuid4())
+
+    # Layer 2 (defense-in-depth) — pre-LLM jailbreak scrubber. R5 in the
+    # system prompt is the prompt-level defense; this short-circuits the
+    # known attack patterns BEFORE the LLM is even called. The attempt is
+    # still recorded in the audit log so the dashboard shows it.
+    jb_label = detect_jailbreak(req.message)
+    if jb_label is not None:
+        guard_trace = new_request_trace(
+            session_id=session_id,
+            username=request.session.get("username", ""),
+            user_msg=req.message,
+            model=MODEL_NAME,
+        )
+        guard_trace.error = f"jailbreak_blocked:{jb_label}"
+        guard_trace.finalize()
+        app.state.traces.add(guard_trace)
+        log.warning("jailbreak blocked at input layer: pattern=%s session=%s", jb_label, session_id)
+        return ChatResponse(
+            session_id=session_id,
+            response=JAILBREAK_REFUSAL,
+            patient_id=SESSIONS.get(session_id, {}).get("patient_id"),
+            sources=SESSIONS.get(session_id, {}).get("conversation_sources", []),
+            validation_warning=False,
+        )
+
     state = SESSIONS.get(session_id) or _fresh_state()
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
@@ -336,6 +362,47 @@ async def chat_stream(
       - {type:'done', patient_id, sources, validation_warning} once at end
     """
     session_id = req.session_id or str(uuid4())
+
+    # Layer 2 (defense-in-depth) — pre-LLM jailbreak scrubber. Mirror of
+    # the check in /chat above, but emits the refusal via SSE so the UI
+    # treats it the same as any other streamed answer.
+    jb_label = detect_jailbreak(req.message)
+    if jb_label is not None:
+        guard_trace = new_request_trace(
+            session_id=session_id,
+            username=request.session.get("username", ""),
+            user_msg=req.message,
+            model=MODEL_NAME,
+        )
+        guard_trace.error = f"jailbreak_blocked:{jb_label}"
+        guard_trace.finalize()
+        app.state.traces.add(guard_trace)
+        log.warning("jailbreak blocked at input layer (stream): pattern=%s session=%s", jb_label, session_id)
+        sess = SESSIONS.get(session_id, {})
+
+        async def guard_stream():
+            yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'request_id': guard_trace.request_id})}\n\n"
+            yield f"data: {json.dumps({'type': 'token', 'text': JAILBREAK_REFUSAL})}\n\n"
+            done_payload = {
+                "type": "done",
+                "patient_id": sess.get("patient_id"),
+                "sources": sess.get("conversation_sources", []),
+                "validation_warning": False,
+                "request_id": guard_trace.request_id,
+                "blocked_by_guard": jb_label,
+            }
+            yield f"data: {json.dumps(done_payload)}\n\n"
+
+        return StreamingResponse(
+            guard_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     state = SESSIONS.get(session_id) or _fresh_state()
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0

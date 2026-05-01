@@ -25,6 +25,7 @@ from langgraph.graph import END, START, StateGraph
 from app.agent.state import AgentState
 from app.agent.system_prompt import SYSTEM_PROMPT
 from app.agent.tools import TOOLS, dispatch
+from app.agent.input_guard import detect_jailbreak, quarantine_marker
 from app.agent.validator import find_invalid_citations, find_uncited_clinical_claims
 from app.fhir.client import FhirClient
 from app.observability import record_tool_event
@@ -128,6 +129,24 @@ def build_graph(
                 tool_ok = False
                 tool_err = f"{type(e).__name__}: {e}"
                 log.exception("tool=%s args=%s failed", call["name"], call["args"])
+
+            # Layer 3 (defense-in-depth) — tool-output sanitizer. If the
+            # serialized tool result contains text resembling a jailbreak
+            # phrasing (e.g. an attacker planted "ignore previous
+            # instructions" in a chart record), prepend a quarantine
+            # header so the LLM sees the suspicious content as data, not
+            # a directive. The data itself flows through unchanged so we
+            # don't accidentally hide a legitimate clinical detail.
+            jb_label = detect_jailbreak(content)
+            if jb_label is not None:
+                content = quarantine_marker(jb_label) + content
+                log.warning(
+                    "tool-output quarantine: tool=%s pattern=%s",
+                    call["name"], jb_label,
+                )
+                if tool_err is None:
+                    tool_err = f"quarantined:{jb_label}"
+
             new_messages.append(ToolMessage(content=content, tool_call_id=call["id"]))
             record_tool_event(
                 name=call["name"],
