@@ -1,0 +1,45 @@
+name: Deploy to Hetzner (clinical co-pilot)
+
+on:
+  push:
+    branches: [master]
+    paths:
+      # Only redeploy when something the agent / web UI / config touches changes.
+      # Skip pure-doc and the inherited OpenEMR PHP code that doesn't run here.
+    - 'clinical-copilot/**'
+    - '.github/workflows/deploy-hetzner.yml'
+  workflow_dispatch:  # allow manual re-run from the Actions tab
+
+# Only one deploy at a time — if a second push lands while we're mid-restart,
+# queue it (GitHub will cancel the older in-flight run automatically when set
+# to true; we want it to wait so we don't half-apply changes).
+concurrency:
+  group: hetzner-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - name: SSH in, fast-forward, restart
+      uses: appleboy/ssh-action@v1.2.0
+      with:
+        host: 178.156.242.153
+        username: root
+        key: ${{ secrets.HETZNER_SSH_KEY }}
+        port: 22
+        command_timeout: 4m
+        script: |
+          set -euo pipefail
+          cd /root/openemr
+          git fetch origin --prune
+          git checkout master
+          git reset --hard origin/master
+          echo "deployed commit:"
+          git log -1 --oneline
+          systemctl restart copilot.service
+          # Give uvicorn a moment to bind, then assert it's actually listening.
+          sleep 2
+          systemctl is-active copilot.service
+          curl -sS -o /dev/null -w "health check: %{http_code}\n" http://127.0.0.1:8000/login
