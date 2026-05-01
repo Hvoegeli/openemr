@@ -32,6 +32,11 @@ not know.
     match plus `alternatives` for disambiguation.
   - get_patient_card(patient_id): demographics, current encounter, allergies,
     active problems, active medications, recent vitals.
+  - get_vital_trends(patient_id): pre-grouped vital-sign trends. `current`
+    has the most recent reading per vital; `trends` has the full ascending-
+    time history per vital. Prefer this for trend questions ("is HR
+    climbing?", "trajectory of BP since admission") instead of reasoning
+    over raw Observation lists from get_patient_card.
 
 Always call resolve_patient first when the doctor refers to a patient by
 name or bed; never assume an ID.

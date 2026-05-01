@@ -149,17 +149,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_langsmith()  # idempotent; no-op when LANGSMITH_TRACING is unset
     app.state.fhir = FhirClient()
     app.state.openemr_writer = OpenEMRWriter()
-    app.state.graph = build_graph(app.state.fhir, model_name=MODEL_NAME)
+    # Clinical notes persist to disk so drafts survive `systemctl restart copilot`.
+    # Loaded BEFORE `build_graph` because the agent's `get_vital_trends` tool
+    # reads notes through this store.
+    notes_path = Path(os.environ.get("CLINICAL_NOTES_PATH", "data/clinical_notes.json"))
+    app.state.clinical_notes = ClinicalNoteStore(notes_path)
+    log.info("clinical-notes store loaded from %s (%d notes)", notes_path, len(app.state.clinical_notes._notes))
+    app.state.graph = build_graph(
+        app.state.fhir, app.state.clinical_notes, model_name=MODEL_NAME,
+    )
     app.state.cache = TTLCache(ttl_seconds=DATA_CACHE_TTL_S)
     # Audit trail persists to SQLite so traces survive `systemctl restart`
     # and every deploy. Path is overridable for tests / alternate volumes.
     trace_db_path = Path(os.environ.get("TRACE_DB_PATH", "data/traces.db"))
     app.state.traces = SqliteTraceStore(trace_db_path)
     log.info("trace store: sqlite at %s", trace_db_path)
-    # Clinical notes persist to disk so drafts survive `systemctl restart copilot`.
-    notes_path = Path(os.environ.get("CLINICAL_NOTES_PATH", "data/clinical_notes.json"))
-    app.state.clinical_notes = ClinicalNoteStore(notes_path)
-    log.info("clinical-notes store loaded from %s (%d notes)", notes_path, len(app.state.clinical_notes._notes))
 
     # Don't block startup on the prewarm — let it run while uvicorn binds.
     prewarm_task = asyncio.create_task(_prewarm_dashboard(app))

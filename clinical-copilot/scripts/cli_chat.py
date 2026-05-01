@@ -12,13 +12,16 @@ Type 'exit' (or Ctrl-D) to quit. Type 'reset' to start a fresh conversation.
 """
 
 import asyncio
+import os
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agent.graph import MAX_VALIDATION_ATTEMPTS, build_graph
 from app.agent.state import AgentState
+from app.clinical_notes import ClinicalNoteStore
 from app.fhir.client import FhirClient
 
 load_dotenv()
@@ -35,7 +38,11 @@ def fresh_state() -> AgentState:
 
 async def main() -> None:
     client = FhirClient()
-    graph = build_graph(client)
+    # Same notes path the FastAPI app uses, so CLI sessions see drafts
+    # written via the web UI (and `get_vital_trends` reflects them).
+    notes_path = Path(os.environ.get("CLINICAL_NOTES_PATH", "data/clinical_notes.json"))
+    notes_store = ClinicalNoteStore(notes_path)
+    graph = build_graph(client, notes_store)
     state = fresh_state()
     print("Clinical co-pilot — type 'exit' to quit, 'reset' for new conversation.\n")
 

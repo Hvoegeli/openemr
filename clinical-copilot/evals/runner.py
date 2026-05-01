@@ -183,12 +183,24 @@ async def record_one(case: Case, patient: Patient | None) -> Snapshot:
     # Local imports — keep module load-time light for the gate path.
     from langchain_core.messages import AIMessage, HumanMessage
 
+    import tempfile
+    from pathlib import Path
+
     from app.agent.graph import build_graph, message_text
     from app.agent.state import AgentState
+    from app.clinical_notes import ClinicalNoteStore
     from app.fhir.client import FhirClient
 
     fhir = FhirClient()
-    graph = build_graph(fhir)
+    # Use a temp empty store so eval recordings don't pick up clinical notes
+    # left over on the dev box. `get_vital_trends` will see no note vitals
+    # and fall back to FHIR-only data, which is what the snapshots assume.
+    # Using mkdtemp (no auto-cleanup) instead of TemporaryDirectory because
+    # `notes_store` outlives the with-block via `graph`; the leak is bounded
+    # to /tmp and `record_one` is a rare manual recording path.
+    notes_dir = tempfile.mkdtemp(prefix="eval-notes-")
+    notes_store = ClinicalNoteStore(Path(notes_dir) / "clinical_notes.json")
+    graph = build_graph(fhir, notes_store)
 
     state: AgentState = {
         "messages": [],

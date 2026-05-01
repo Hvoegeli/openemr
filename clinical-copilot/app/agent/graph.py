@@ -65,17 +65,35 @@ def message_text(message: BaseMessage) -> str:
     return ""
 
 
-def build_graph(client: FhirClient, model_name: str = "claude-sonnet-4-6"):
+def build_graph(
+    client: FhirClient,
+    notes_store: Any,
+    model_name: str = "claude-sonnet-4-6",
+):
     """Construct the compiled LangGraph for one or more conversation turns.
 
     The returned graph is reusable across turns — pass cumulative state in,
     get cumulative state back. Reset `validation_attempts` to 0 each new
     user turn (the CLI/driver layer does this).
+
+    `notes_store` is the `ClinicalNoteStore` instance the dispatch needs to
+    serve `get_vital_trends`. Typed loosely as `Any` so this module doesn't
+    depend on the app-level dataclass / circular-import chain.
     """
     model = ChatAnthropic(model_name=model_name, timeout=60, stop=None).bind_tools(TOOLS)
 
+    # Mark the system prompt as cacheable. The prompt is ~1200-1500 tokens
+    # (above Sonnet 4.6's 1024-token minimum) and identical on every turn,
+    # so Anthropic's prompt-cache returns it at ~10% of input cost. Cache
+    # is `ephemeral` (~5-min TTL), which fits a doctor's working session.
+    system_msg = SystemMessage(content=[{
+        "type": "text",
+        "text": SYSTEM_PROMPT,
+        "cache_control": {"type": "ephemeral"},
+    }])
+
     async def call_llm(state: AgentState) -> dict:
-        messages = [SystemMessage(content=SYSTEM_PROMPT), *state["messages"]]
+        messages = [system_msg, *state["messages"]]
         response = await model.ainvoke(messages)
         return {"messages": [response]}
 
@@ -94,7 +112,7 @@ def build_graph(client: FhirClient, model_name: str = "claude-sonnet-4-6"):
             tool_ok = True
             tool_err: str | None = None
             try:
-                result = await dispatch(call["name"], call["args"], client)
+                result = await dispatch(call["name"], call["args"], client, notes_store)
                 sources_added = len(result["sources"])
                 new_sources.extend(result["sources"])
                 if call["name"] == "resolve_patient" and isinstance(result["data"], dict) \

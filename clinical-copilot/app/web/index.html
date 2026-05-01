@@ -657,6 +657,18 @@
     </form>
   </section>
 
+  <!-- ── Save-without-vitals warning modal ─────────────────────────── -->
+  <div class="modal-backdrop" id="cn-modal" role="dialog" aria-modal="true" aria-labelledby="cn-modal-title">
+    <div class="modal-card">
+      <h3 id="cn-modal-title">Save without vitals?</h3>
+      <p>You haven't entered any vitals for this shift. Once saved, the note becomes immutable — you can't add vitals later. Are you sure you want to proceed?</p>
+      <div class="modal-actions">
+        <button class="cn-btn secondary" id="cn-modal-cancel" type="button">Go back</button>
+        <button class="cn-btn" id="cn-modal-confirm" type="button">Save anyway</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     /* ── DOM refs ─────────────────────────────────────────────────── */
     const log = document.getElementById('log');
@@ -1916,44 +1928,32 @@
     }
 
     /* ── Save-without-vitals confirmation modal ─────────────────── */
-    // The modal HTML lives at the bottom of the body, AFTER this script
-    // closes, so document.getElementById would return null at script-load
-    // time. We resolve the refs lazily on first use and wire its click
-    // handlers exactly once — that fixes the silent failure where the
-    // page-load TypeError used to halt every following statement.
+    // Modal HTML is parsed before this script runs (the script tag lives
+    // at the end of <body>, after the modal markup), so DOM refs resolve
+    // at script-load time and we can wire handlers eagerly.
     let cnModalAfter = null;
-    let cnModalWired = false;
-
-    function ensureCnModalWired() {
-      if (cnModalWired) return true;
-      const cnModal        = document.getElementById('cn-modal');
-      const cnModalCancel  = document.getElementById('cn-modal-cancel');
-      const cnModalConfirm = document.getElementById('cn-modal-confirm');
-      if (!cnModal || !cnModalCancel || !cnModalConfirm) return false;
-      cnModalCancel.addEventListener('click', closeSaveModal);
-      cnModal.addEventListener('click', (e) => {
-        if (e.target === cnModal) closeSaveModal();
-      });
-      cnModalConfirm.addEventListener('click', async () => {
-        const fn = cnModalAfter;
-        closeSaveModal();
-        if (fn) await fn();
-      });
-      cnModalWired = true;
-      return true;
-    }
+    const cnModal        = document.getElementById('cn-modal');
+    const cnModalCancel  = document.getElementById('cn-modal-cancel');
+    const cnModalConfirm = document.getElementById('cn-modal-confirm');
+    cnModalCancel.addEventListener('click', closeSaveModal);
+    cnModal.addEventListener('click', (e) => {
+      if (e.target === cnModal) closeSaveModal();
+    });
+    cnModalConfirm.addEventListener('click', async () => {
+      const fn = cnModalAfter;
+      closeSaveModal();
+      if (fn) await fn();
+    });
 
     function openSaveWithoutVitalsModal(pid, beforeFinalize) {
-      if (!ensureCnModalWired()) return;
       cnModalAfter = async () => {
         await beforeFinalize();
         await finalizeNote(pid);
       };
-      document.getElementById('cn-modal').classList.add('open');
+      cnModal.classList.add('open');
     }
     function closeSaveModal() {
-      const m = document.getElementById('cn-modal');
-      if (m) m.classList.remove('open');
+      cnModal.classList.remove('open');
       cnModalAfter = null;
     }
 
@@ -2039,17 +2039,5 @@
       return String(s).replace(/[^a-zA-Z0-9_-]/g, c => '\\' + c);
     }
   </script>
-
-  <!-- ── Save-without-vitals warning modal ─────────────────────────── -->
-  <div class="modal-backdrop" id="cn-modal" role="dialog" aria-modal="true" aria-labelledby="cn-modal-title">
-    <div class="modal-card">
-      <h3 id="cn-modal-title">Save without vitals?</h3>
-      <p>You haven't entered any vitals for this shift. Once saved, the note becomes immutable — you can't add vitals later. Are you sure you want to proceed?</p>
-      <div class="modal-actions">
-        <button class="cn-btn secondary" id="cn-modal-cancel" type="button">Go back</button>
-        <button class="cn-btn" id="cn-modal-confirm" type="button">Save anyway</button>
-      </div>
-    </div>
-  </div>
 </body>
 </html>

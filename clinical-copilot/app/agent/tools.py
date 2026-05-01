@@ -13,6 +13,7 @@ facts that don't appear in some tool's `data`.
 """
 
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from langchain_core.tools import tool
@@ -66,7 +67,28 @@ async def get_patient_card(patient_id: str) -> str:
     raise NotImplementedError("Dispatched in agent.graph.execute_tools_node")
 
 
-TOOLS = [current_time, resolve_patient, get_patient_card]
+@tool
+async def get_vital_trends(patient_id: str) -> str:
+    """Fetch pre-grouped vital-sign trends across FHIR + clinical notes.
+
+    Returns JSON with `data` containing:
+      - `current`: most recent reading per vital (heart_rate, bp_systolic,
+        bp_diastolic, respiratory_rate, temp_f, spo2), each with date,
+        value, unit, and source FHIR ref.
+      - `trends`: ascending-time list per vital, each point with date,
+        value, unit, source.
+    Use this when the doctor asks about trends ("is HR climbing?", "what's
+    the trajectory of BP?") or about a single most-recent vital. Cheaper
+    and more accurate than reasoning over raw Observation lists from
+    `get_patient_card`. Citations come back in `sources`.
+
+    Args:
+        patient_id: The FHIR Patient resource ID.
+    """
+    raise NotImplementedError("Dispatched in agent.graph.execute_tools_node")
+
+
+TOOLS = [current_time, resolve_patient, get_patient_card, get_vital_trends]
 
 
 async def _current_time_impl() -> SourcedResult:
@@ -85,7 +107,52 @@ async def _current_time_impl() -> SourcedResult:
     }
 
 
-async def dispatch(name: str, args: dict, client: FhirClient) -> SourcedResult:
+async def _get_vital_trends_impl(
+    client: FhirClient, notes_store: Any, patient_id: str,
+) -> SourcedResult:
+    """Mirror of `app.main._vital_trends_compute` for the agent path.
+
+    Pulls FHIR vital-signs observations and clinical-note vitals through the
+    same `collect_vital_trends` helper the UI uses, then projects sources
+    so the citation validator accepts every Observation/ClinicalNote ref
+    the agent quotes.
+    """
+    # Imported lazily — `app.vitals` and `app.clinical_notes` would
+    # otherwise pull in app-level state at module import time.
+    from app.clinical_notes import now_utc
+    from app.vitals import collect_vital_trends, latest_per_vital
+
+    observations = await client.search(
+        "Observation",
+        {"patient": patient_id, "category": "vital-signs", "_count": 50},
+    )
+    notes = [
+        n.to_doc_item()
+        for n in notes_store.list_for_patient(patient_id, now=now_utc())
+    ]
+    trends = collect_vital_trends(observations, notes)
+
+    sources: list[str] = []
+    seen: set[str] = set()
+    for points in trends.values():
+        for p in points:
+            ref = p.get("source")
+            if ref and ref not in seen:
+                seen.add(ref)
+                sources.append(ref)
+
+    return {
+        "data": {
+            "current": latest_per_vital(trends),
+            "trends": trends,
+        },
+        "sources": sources,
+    }
+
+
+async def dispatch(
+    name: str, args: dict, client: FhirClient, notes_store: Any,
+) -> SourcedResult:
     """Run the actual adapter call for a tool name + args."""
     if name == "current_time":
         return await _current_time_impl()
@@ -93,4 +160,8 @@ async def dispatch(name: str, args: dict, client: FhirClient) -> SourcedResult:
         return await adapter.resolve_patient(client, query=args["query"])
     if name == "get_patient_card":
         return await adapter.get_patient_card(client, patient_id=args["patient_id"])
+    if name == "get_vital_trends":
+        return await _get_vital_trends_impl(
+            client, notes_store, patient_id=args["patient_id"],
+        )
     raise ValueError(f"Unknown tool: {name}")
