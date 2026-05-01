@@ -243,18 +243,31 @@ class SignOutResponse(BaseModel):
 # ─── auth + shell ────────────────────────────────────────────────────────
 
 
+_NO_CACHE_HEADERS = {
+    # The chat UI ships as a single HTML file with the JS embedded inline.
+    # When browsers cache it, a deploy that ships new client-side code
+    # (new event handlers, new endpoints) is invisible until the user does
+    # a hard refresh — exactly the failure mode we hit during the Sunday
+    # branch preview when sign-out drafting silently didn't wire because
+    # the user was holding stale HTML. We ship behavior changes often
+    # enough that "always revalidate" is the right default. The file is
+    # small (~80 KB) and the 304-no-body round-trip is negligible.
+    "Cache-Control": "no-cache, must-revalidate",
+}
+
+
 @app.get("/", response_model=None)
 async def index(request: Request) -> FileResponse | RedirectResponse:
     if current_session(request) is None:
         return RedirectResponse(url="/login", status_code=302)
-    return FileResponse(WEB_DIR / "index.html")
+    return FileResponse(WEB_DIR / "index.html", headers=_NO_CACHE_HEADERS)
 
 
 @app.get("/login", response_model=None)
 async def login_page(request: Request) -> FileResponse | RedirectResponse:
     if current_session(request) is not None:
         return RedirectResponse(url="/", status_code=302)
-    return FileResponse(WEB_DIR / "login.html")
+    return FileResponse(WEB_DIR / "login.html", headers=_NO_CACHE_HEADERS)
 
 
 def _client_ua_ip(request: Request) -> tuple[str | None, str | None]:
@@ -1087,7 +1100,7 @@ async def get_trace(request_id: str, _user: str = Depends(current_user)) -> dict
 async def observability_page(request: Request) -> FileResponse | RedirectResponse:
     if current_session(request) is None:
         return RedirectResponse(url="/login", status_code=302)
-    return FileResponse(WEB_DIR / "observability.html")
+    return FileResponse(WEB_DIR / "observability.html", headers=_NO_CACHE_HEADERS)
 
 
 # ─── admin endpoints (admin-only oversight) ──────────────────────────────
@@ -1103,7 +1116,7 @@ async def admin_page(request: Request) -> FileResponse | RedirectResponse:
         return RedirectResponse(url="/login", status_code=302)
     if not is_admin(session.username):
         return RedirectResponse(url="/", status_code=302)
-    return FileResponse(WEB_DIR / "admin.html")
+    return FileResponse(WEB_DIR / "admin.html", headers=_NO_CACHE_HEADERS)
 
 
 @app.get("/api/admin/recent-activity")

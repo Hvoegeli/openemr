@@ -743,6 +743,31 @@
     // Buffer: patientId → { card?, docs?, cardLoading?, docsLoading? }
     const buffer = new Map();
 
+    /* ── Chat history persistence ────────────────────────────────────
+       The chat lives on the same page as the patient panel, but the user
+       moves to /observability and /admin frequently — those are full-page
+       navigations, which would normally wipe the chat log on return. We
+       persist sessionId + the rendered messages to localStorage on every
+       update and replay on boot, so the chat survives navigation.
+       Server-side the conversation state is keyed by sessionId, so
+       restoring the same sessionId means the agent picks up where it
+       left off. We cap history at 100 messages to keep storage bounded. */
+    const CHAT_STATE_KEY = 'copilot_chat_state_v1';
+    const CHAT_HISTORY_MAX = 100;
+    const chatHistory = [];
+
+    function saveChatState() {
+      try {
+        const payload = { sessionId, history: chatHistory.slice(-CHAT_HISTORY_MAX) };
+        localStorage.setItem(CHAT_STATE_KEY, JSON.stringify(payload));
+      } catch (_) { /* quota or storage disabled — silent skip */ }
+    }
+    function clearChatState() {
+      try { localStorage.removeItem(CHAT_STATE_KEY); } catch (_) {}
+      chatHistory.length = 0;
+      sessionId = null;
+    }
+
     /* ── Boot ─────────────────────────────────────────────────────── */
     // Fire both requests in parallel — the calendar is the slow one and
     // doesn't depend on /api/me (both share the same session cookie).
@@ -764,6 +789,8 @@
     /* ── Logout ───────────────────────────────────────────────────── */
     document.getElementById('logout').addEventListener('click', async () => {
       await fetch('/api/logout', {method: 'POST'});
+      // Don't leave one user's chat sitting in localStorage for the next.
+      clearChatState();
       window.location.href = '/login';
     });
 
@@ -1681,6 +1708,15 @@
                 lastValidationWarning ? 'Validation warning' : 'Validated',
                 lastValidationWarning ? 'warn' : 'live',
               );
+              // Persist the just-finished assistant turn so it survives a
+              // navigation to /observability or /admin and back.
+              chatHistory.push({
+                role: 'assistant',
+                text: streamedText,
+                sources: lastSources,
+                validationWarning: lastValidationWarning,
+              });
+              saveChatState();
             }
           }
         }
@@ -1711,6 +1747,50 @@
       div.innerHTML = escapeHtml(text);
       log.appendChild(div);
       log.scrollTop = log.scrollHeight;
+      chatHistory.push({ role, text });
+      saveChatState();
+    }
+
+    /* Render a previously-saved message into the chat log without re-fetching.
+       Mirrors the live render paths but skips the streaming intermediate
+       state: assistant messages restore as final-form HTML with citations
+       already decorated. The citation click handler is delegated on `log`
+       (see "Citation click navigation"), so restored citations stay
+       clickable without re-attaching listeners per node. */
+    function restoreChatMessage(m) {
+      if (m.role === 'user' || m.role === 'system') {
+        const div = document.createElement('div');
+        div.className = 'msg ' + m.role;
+        div.innerHTML = escapeHtml(m.text || '');
+        log.appendChild(div);
+      } else if (m.role === 'assistant') {
+        const bubble = document.createElement('div');
+        bubble.className = 'msg assistant';
+        const responseBox = document.createElement('div');
+        responseBox.innerHTML = decorateCitations(
+          m.text || '', new Set(m.sources || []),
+        );
+        bubble.appendChild(responseBox);
+        log.appendChild(bubble);
+      }
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function restoreChatState() {
+      try {
+        const raw = localStorage.getItem(CHAT_STATE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.sessionId === 'string') {
+          sessionId = parsed.sessionId;
+        }
+        if (parsed && Array.isArray(parsed.history)) {
+          for (const m of parsed.history) {
+            chatHistory.push(m);
+            restoreChatMessage(m);
+          }
+        }
+      } catch (_) { /* corrupted state — ignore and start fresh */ }
     }
     /* ── Lightweight markdown renderer ─────────────────────────────
        Handles the subset the agent emits: paragraphs, headings (#/##/###),
@@ -2095,6 +2175,9 @@
     function cssEscape(s) {
       return String(s).replace(/[^a-zA-Z0-9_-]/g, c => '\\' + c);
     }
+
+    /* ── Restore prior chat (after all referenced functions/consts are defined) ── */
+    restoreChatState();
 
     /* ── Sign-out drafting (Use Case C) ───────────────────────────── */
     const signoutBtn = document.getElementById('signout-generate');
