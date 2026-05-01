@@ -1,19 +1,23 @@
 """FastAPI entry point for the clinical co-pilot.
 
 Endpoints:
-  GET  /                        - chat UI (single static page; redirects to /login if anonymous)
-  GET  /login                   - login page (uses OpenEMR creds)
-  POST /api/login               - validate creds via OpenEMR password grant, set session cookie
-  POST /api/logout              - clear session
-  GET  /api/me                  - who am I? (UI uses this to render header)
-  POST /chat                    - send a turn, get the assistant response (atomic)
-  POST /chat/stream             - same, but streams tokens + tool-progress as SSE
-  GET  /api/patient/{id}/card        - structured patient-card JSON
-  GET  /api/patient/{id}/documents   - past encounters + clinical documents
-  GET  /api/calendar/today           - today's roster (Appointments, fallback)
+  GET  /                                  - chat UI (redirects to /login if anonymous)
+  GET  /login                             - login page (uses OpenEMR creds)
+  POST /api/login                         - validate creds via OpenEMR password grant; opens a server-side session
+  POST /api/logout                        - revoke the current session and clear the cookie
+  GET  /api/me                            - who am I? (UI uses this to render header)
+  POST /chat                              - send a turn, get the assistant response (atomic)
+  POST /chat/stream                       - same, but streams tokens + tool-progress as SSE
+  GET  /api/patient/{id}/card             - structured patient-card JSON
+  GET  /api/patient/{id}/documents        - past encounters + clinical documents
+  GET  /api/calendar/today                - today's roster (Appointments, fallback)
+  GET  /api/admin/sessions                - currently-valid logins (admin only)
+  POST /api/admin/sessions/{sid}/revoke   - kick a session (admin only)
+  GET  /api/admin/auth-events             - login/logout audit log (admin only)
 
-Conversation state is held in-memory per `session_id`. This is fine for the
-MVP; production would persist to Postgres alongside the audit log.
+Chat conversation state is held in-memory per `session_id` (a separate
+concept from the auth session). Auth sessions are durable in SQLite —
+see `app/auth_db.py`.
 """
 
 import asyncio
@@ -22,6 +26,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
 from uuid import uuid4
@@ -47,7 +52,8 @@ from app.agent.graph import MAX_VALIDATION_ATTEMPTS, active_model_label, build_g
 from app.agent.input_guard import JAILBREAK_REFUSAL, detect_jailbreak  # noqa: E402
 from app.agent.intent_router import route_intent  # noqa: E402
 from app.agent.state import AgentState  # noqa: E402
-from app.auth import current_user, is_admin, require_admin, verify_openemr_credentials  # noqa: E402
+from app.auth import current_session, current_user, is_admin, require_admin, verify_openemr_credentials  # noqa: E402
+from app.auth_db import AuthStore  # noqa: E402
 from app.cache import TTLCache  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.fhir import adapter  # noqa: E402
@@ -166,6 +172,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     trace_db_path = Path(os.environ.get("TRACE_DB_PATH", "data/traces.db"))
     app.state.traces = SqliteTraceStore(trace_db_path)
     log.info("trace store: sqlite at %s", trace_db_path)
+    # Auth store shares the same SQLite file (separate tables: `sessions`
+    # and `auth_events`). Same path-override convention as the trace store.
+    auth_db_path = Path(os.environ.get("AUTH_DB_PATH", trace_db_path))
+    app.state.auth_store = AuthStore(auth_db_path)
+    log.info("auth store: sqlite at %s", auth_db_path)
 
     # Don't block startup on the prewarm — let it run while uvicorn binds.
     prewarm_task = asyncio.create_task(_prewarm_dashboard(app))
@@ -176,6 +187,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.fhir.aclose()
         await app.state.openemr_writer.aclose()
         app.state.traces.close()
+        app.state.auth_store.close()
 
 
 app = FastAPI(title="Clinical Co-pilot", lifespan=lifespan)
@@ -233,32 +245,66 @@ class SignOutResponse(BaseModel):
 
 @app.get("/", response_model=None)
 async def index(request: Request) -> FileResponse | RedirectResponse:
-    if not request.session.get("username"):
+    if current_session(request) is None:
         return RedirectResponse(url="/login", status_code=302)
     return FileResponse(WEB_DIR / "index.html")
 
 
 @app.get("/login", response_model=None)
 async def login_page(request: Request) -> FileResponse | RedirectResponse:
-    if request.session.get("username"):
+    if current_session(request) is not None:
         return RedirectResponse(url="/", status_code=302)
     return FileResponse(WEB_DIR / "login.html")
 
 
+def _client_ua_ip(request: Request) -> tuple[str | None, str | None]:
+    """Pull a best-guess UA + IP off the request for the auth audit log.
+    Cloudflared adds X-Forwarded-For; falls back to the direct peer."""
+    ua = request.headers.get("user-agent")
+    ip = request.headers.get("x-forwarded-for") or (
+        request.client.host if request.client else None
+    )
+    # X-Forwarded-For may carry "client, proxy1, proxy2" — keep the leftmost.
+    if ip and "," in ip:
+        ip = ip.split(",", 1)[0].strip()
+    return ua, ip
+
+
 @app.post("/api/login")
 async def login(req: LoginRequest, request: Request) -> dict:
+    ua, ip = _client_ua_ip(request)
     try:
         ok = await verify_openemr_credentials(req.username, req.password)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     if not ok:
+        request.app.state.auth_store.log_event(
+            "login_failure", username=req.username, user_agent=ua, ip=ip,
+        )
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    request.session["username"] = req.username
+    sid = request.app.state.auth_store.create_session(
+        username=req.username, user_agent=ua, ip=ip,
+    )
+    request.session["sid"] = sid
+    request.app.state.auth_store.log_event(
+        "login_success", username=req.username, sid=sid, user_agent=ua, ip=ip,
+    )
     return {"ok": True, "username": req.username}
 
 
 @app.post("/api/logout")
 async def logout(request: Request) -> dict:
+    sid = request.session.get("sid")
+    if sid:
+        ua, ip = _client_ua_ip(request)
+        username = request.app.state.auth_store.revoke_session(sid)
+        # Log a `logout` event (rather than session_revoked) so the audit
+        # feed distinguishes "user clicked sign-out" from "admin kicked".
+        # If the sid was already revoked or absent, username is None and
+        # we still emit the logout marker — the user clicked the button.
+        request.app.state.auth_store.log_event(
+            "logout", username=username, sid=sid, user_agent=ua, ip=ip,
+        )
     request.session.clear()
     return {"ok": True}
 
@@ -283,7 +329,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
     if jb_label is not None:
         guard_trace = new_request_trace(
             session_id=session_id,
-            username=request.session.get("username", ""),
+            username=_user,
             user_msg=req.message,
             model=active_model_label(MODEL_NAME),
         )
@@ -306,7 +352,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
     if routed is not None:
         router_trace = new_request_trace(
             session_id=session_id,
-            username=request.session.get("username", ""),
+            username=_user,
             user_msg=req.message,
             model="intent_router",
         )
@@ -329,7 +375,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
 
     trace = new_request_trace(
         session_id=session_id,
-        username=request.session.get("username", ""),
+        username=_user,
         user_msg=req.message,
         model=active_model_label(MODEL_NAME),
     )
@@ -395,7 +441,7 @@ async def chat_stream(
     if jb_label is not None:
         guard_trace = new_request_trace(
             session_id=session_id,
-            username=request.session.get("username", ""),
+            username=_user,
             user_msg=req.message,
             model=active_model_label(MODEL_NAME),
         )
@@ -435,7 +481,7 @@ async def chat_stream(
     if routed is not None:
         router_trace = new_request_trace(
             session_id=session_id,
-            username=request.session.get("username", ""),
+            username=_user,
             user_msg=req.message,
             model="intent_router",
         )
@@ -474,7 +520,7 @@ async def chat_stream(
 
     trace = new_request_trace(
         session_id=session_id,
-        username=request.session.get("username", ""),
+        username=_user,
         user_msg=req.message,
         model=active_model_label(MODEL_NAME),
     )
@@ -793,7 +839,7 @@ SIGN_OUT_USER_PROMPT = (
 
 
 async def _draft_signout_for_patient(
-    patient_id: str, name: str | None, request: Request,
+    patient_id: str, name: str | None, username: str,
 ) -> SignOutDraft:
     """Run one full agent invocation to produce a sign-out for one patient.
 
@@ -809,7 +855,7 @@ async def _draft_signout_for_patient(
 
     trace = new_request_trace(
         session_id=f"signout:{patient_id}",
-        username=request.session.get("username", ""),
+        username=username,
         user_msg=user_msg,
         model=active_model_label(MODEL_NAME),
     )
@@ -853,8 +899,7 @@ async def _draft_signout_for_patient(
 @app.post("/api/sign-out/draft", response_model=SignOutResponse)
 async def sign_out_draft(
     req: SignOutRequest,
-    request: Request,
-    _user: str = Depends(current_user),
+    user: str = Depends(current_user),
 ) -> SignOutResponse:
     """Generate per-patient sign-out drafts for the doctor's panel.
 
@@ -892,7 +937,7 @@ async def sign_out_draft(
         return SignOutResponse(drafts=[])
 
     drafts = await asyncio.gather(*[
-        _draft_signout_for_patient(pid, name, request)
+        _draft_signout_for_patient(pid, name, user)
         for pid, name in roster
     ])
     return SignOutResponse(drafts=drafts)
@@ -1040,7 +1085,7 @@ async def get_trace(request_id: str, _user: str = Depends(current_user)) -> dict
 
 @app.get("/observability", response_model=None)
 async def observability_page(request: Request) -> FileResponse | RedirectResponse:
-    if not request.session.get("username"):
+    if current_session(request) is None:
         return RedirectResponse(url="/login", status_code=302)
     return FileResponse(WEB_DIR / "observability.html")
 
@@ -1053,10 +1098,10 @@ async def admin_page(request: Request) -> FileResponse | RedirectResponse:
     """Admin oversight page. Login-gated; non-admins get redirected to /
     rather than getting a 403 — the page wouldn't be useful to them anyway,
     and a redirect is friendlier than an error for a misclick."""
-    username = request.session.get("username")
-    if not username:
+    session = current_session(request)
+    if session is None:
         return RedirectResponse(url="/login", status_code=302)
-    if not is_admin(username):
+    if not is_admin(session.username):
         return RedirectResponse(url="/", status_code=302)
     return FileResponse(WEB_DIR / "admin.html")
 
@@ -1097,7 +1142,6 @@ async def admin_recent_activity(
         # in the wrong zone whenever the server and browser disagree
         # (Hetzner runs UTC; admins likely view from MDT). The UTC-suffixed
         # ISO sorts correctly as a string and round-trips through JS Date.
-        from datetime import datetime, timezone  # noqa: PLC0415
         ts_iso = (
             datetime.fromtimestamp(t.started_at, tz=timezone.utc)
             .isoformat(timespec="seconds")
@@ -1140,4 +1184,83 @@ async def admin_practitioners(_admin: str = Depends(require_admin)) -> dict:
                 for t in (p.get("telecom") or [])
             ],
         })
+    return {"count": len(items), "items": items}
+
+
+def _ts_iso(ts: float | None) -> str | None:
+    """UTC-explicit ISO for JSON responses. None passes through so the
+    browser-side renderer can decide how to handle missing values."""
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
+
+
+@app.get("/api/admin/sessions")
+async def admin_active_sessions(_admin: str = Depends(require_admin)) -> dict:
+    """List sessions that are currently valid (not revoked, not idle-timed-out,
+    not absolute-timed-out). The list updates as sessions come and go — for
+    a durable history of every login/logout, see /api/admin/auth-events."""
+    sessions = app.state.auth_store.list_active_sessions()
+    items = [
+        {
+            "sid": s.sid,
+            "username": s.username,
+            "created_at": _ts_iso(s.created_at),
+            "last_seen": _ts_iso(s.last_seen),
+            "expires_at": _ts_iso(s.expires_at),
+            "user_agent": s.user_agent,
+            "ip": s.ip,
+        }
+        for s in sessions
+    ]
+    return {"count": len(items), "items": items}
+
+
+@app.post("/api/admin/sessions/{sid}/revoke")
+async def admin_revoke_session(
+    sid: str,
+    request: Request,
+    admin_user: str = Depends(require_admin),
+) -> dict:
+    """Revoke a single active session. The doctor's next request gets 401
+    and is bounced back to /login. Recorded in `auth_events` as a
+    `session_revoked` event with the admin's username in `detail`."""
+    revoked_username = app.state.auth_store.revoke_session(sid)
+    if revoked_username is None:
+        raise HTTPException(status_code=404, detail="session not found or already revoked")
+    ua, ip = _client_ua_ip(request)
+    app.state.auth_store.log_event(
+        "session_revoked",
+        username=revoked_username,
+        sid=sid,
+        user_agent=ua,
+        ip=ip,
+        detail=f"by:{admin_user}",
+    )
+    return {"ok": True, "revoked_username": revoked_username}
+
+
+@app.get("/api/admin/auth-events")
+async def admin_auth_events(
+    limit: int = 200,
+    _admin: str = Depends(require_admin),
+) -> dict:
+    """Newest-first audit log of authentication events: login_success,
+    login_failure, logout, session_revoked, session_expired. This table
+    is append-only — events are never overwritten. Bounded ring view via
+    `limit` (default 200)."""
+    events = app.state.auth_store.list_auth_events(limit=limit)
+    items = [
+        {
+            "id": e.id,
+            "event_type": e.event_type,
+            "username": e.username,
+            "sid": e.sid,
+            "at": _ts_iso(e.at),
+            "user_agent": e.user_agent,
+            "ip": e.ip,
+            "detail": e.detail,
+        }
+        for e in events
+    ]
     return {"count": len(items), "items": items}
