@@ -11,8 +11,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # LLM
+    # LLM provider — "anthropic" (direct API) or "bedrock" (AWS Bedrock).
+    # Bedrock is required for HIPAA-grade deployment because Anthropic only
+    # offers a BAA via Bedrock, not via the direct API. Default stays
+    # "anthropic" so dev / demo work unchanged; production flips to
+    # "bedrock" via env and the AWS creds are picked up by boto3.
+    llm_provider: str = "anthropic"
+
+    # Anthropic-direct
     anthropic_api_key: str = Field(..., description="Claude API key, sk-ant-...")
+
+    # AWS Bedrock — only used when llm_provider == "bedrock". boto3 picks
+    # AWS credentials up from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY env
+    # vars or from ~/.aws/credentials; we don't read them here.
+    aws_region: str = "us-east-1"
+    bedrock_model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
     # Observability (optional — disable tracing if no key)
     langsmith_api_key: str | None = None

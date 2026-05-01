@@ -11,6 +11,11 @@ dependencies = [
     "anthropic>=0.40",
     "langchain-core>=0.3",
     "langchain-anthropic>=0.2",
+    # BAA-grade path: when llm_provider="bedrock" we route Claude calls
+    # through AWS Bedrock instead of Anthropic direct so a real hospital
+    # deployment can sign Anthropic's BAA (only available via Bedrock).
+    # Pulled in always so the env-var flip is one step, not a re-install.
+    "langchain-aws>=0.2",
     "langgraph>=0.2",
     # Observability
     "langsmith>=0.1.140",

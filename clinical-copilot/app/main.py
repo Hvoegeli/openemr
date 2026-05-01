@@ -43,7 +43,7 @@ logging.basicConfig(
 )
 logging.getLogger("agent").setLevel(logging.INFO)
 
-from app.agent.graph import MAX_VALIDATION_ATTEMPTS, build_graph, message_text  # noqa: E402
+from app.agent.graph import MAX_VALIDATION_ATTEMPTS, active_model_label, build_graph, message_text  # noqa: E402
 from app.agent.input_guard import JAILBREAK_REFUSAL, detect_jailbreak  # noqa: E402
 from app.agent.state import AgentState  # noqa: E402
 from app.auth import current_user, verify_openemr_credentials  # noqa: E402
@@ -284,7 +284,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
             session_id=session_id,
             username=request.session.get("username", ""),
             user_msg=req.message,
-            model=MODEL_NAME,
+            model=active_model_label(MODEL_NAME),
         )
         guard_trace.error = f"jailbreak_blocked:{jb_label}"
         guard_trace.finalize()
@@ -306,7 +306,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
         session_id=session_id,
         username=request.session.get("username", ""),
         user_msg=req.message,
-        model=MODEL_NAME,
+        model=active_model_label(MODEL_NAME),
     )
     token = set_current_trace(trace)
     try:
@@ -372,7 +372,7 @@ async def chat_stream(
             session_id=session_id,
             username=request.session.get("username", ""),
             user_msg=req.message,
-            model=MODEL_NAME,
+            model=active_model_label(MODEL_NAME),
         )
         guard_trace.error = f"jailbreak_blocked:{jb_label}"
         guard_trace.finalize()
@@ -411,7 +411,7 @@ async def chat_stream(
         session_id=session_id,
         username=request.session.get("username", ""),
         user_msg=req.message,
-        model=MODEL_NAME,
+        model=active_model_label(MODEL_NAME),
     )
 
     async def event_stream():
@@ -746,7 +746,7 @@ async def _draft_signout_for_patient(
         session_id=f"signout:{patient_id}",
         username=request.session.get("username", ""),
         user_msg=user_msg,
-        model=MODEL_NAME,
+        model=active_model_label(MODEL_NAME),
     )
     token = set_current_trace(trace)
     try:

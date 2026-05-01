@@ -27,6 +27,7 @@ from app.agent.system_prompt import SYSTEM_PROMPT
 from app.agent.tools import TOOLS, dispatch
 from app.agent.input_guard import detect_jailbreak, quarantine_marker
 from app.agent.validator import find_invalid_citations, find_uncited_clinical_claims
+from app.config import settings
 from app.fhir.client import FhirClient
 from app.observability import record_tool_event
 
@@ -66,6 +67,50 @@ def message_text(message: BaseMessage) -> str:
     return ""
 
 
+def _build_llm(model_name: str):
+    """Construct the LangChain chat model based on `settings.llm_provider`.
+
+    Default is `anthropic` (direct API to api.anthropic.com). Production
+    HIPAA-grade deployments flip to `bedrock` for the BAA-covered path
+    via AWS Bedrock. The `langchain_aws` import is lazy so installs that
+    haven't pulled it in keep working on the default path.
+
+    Both clients return a model that supports `.bind_tools(TOOLS)`,
+    streaming via `astream_events`, and Anthropic's prompt-cache
+    `cache_control` blocks on the system message — so call_llm /
+    execute_tools / validate_citations don't need to know the difference.
+    """
+    provider = (settings.llm_provider or "anthropic").lower()
+    if provider == "bedrock":
+        try:
+            from langchain_aws import ChatBedrockConverse  # noqa: PLC0415
+        except ImportError as e:
+            raise RuntimeError(
+                "llm_provider=bedrock requires the langchain-aws package. "
+                "Install with: uv add langchain-aws"
+            ) from e
+        log.info(
+            "llm: routing through AWS Bedrock (region=%s, model=%s)",
+            settings.aws_region, settings.bedrock_model_id,
+        )
+        return ChatBedrockConverse(
+            model=settings.bedrock_model_id,
+            region_name=settings.aws_region,
+            temperature=0,
+        ).bind_tools(TOOLS)
+    log.info("llm: routing through Anthropic direct (model=%s)", model_name)
+    return ChatAnthropic(model_name=model_name, timeout=60, stop=None).bind_tools(TOOLS)
+
+
+def active_model_label(model_name: str) -> str:
+    """Return the model identifier that's actually in use, for trace
+    attribution. Bedrock and direct paths use different IDs; the audit
+    log should reflect what was really called, not the build-time default."""
+    if (settings.llm_provider or "").lower() == "bedrock":
+        return settings.bedrock_model_id
+    return model_name
+
+
 def build_graph(
     client: FhirClient,
     notes_store: Any,
@@ -81,7 +126,7 @@ def build_graph(
     serve `get_vital_trends`. Typed loosely as `Any` so this module doesn't
     depend on the app-level dataclass / circular-import chain.
     """
-    model = ChatAnthropic(model_name=model_name, timeout=60, stop=None).bind_tools(TOOLS)
+    model = _build_llm(model_name)
 
     # Mark the system prompt as cacheable. The prompt is ~1200-1500 tokens
     # (above Sonnet 4.6's 1024-token minimum) and identical on every turn,
