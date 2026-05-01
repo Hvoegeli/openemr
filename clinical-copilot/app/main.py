@@ -17,7 +17,10 @@ Endpoints:
 
 Chat conversation state is held in-memory per `session_id` (a separate
 concept from the auth session). Auth sessions are durable in SQLite —
-see `app/auth_db.py`.
+see `app/auth_db.py`. End-of-shift charting (the previous "sign-out
+drafting" tab) was removed: the Clinical Notes tab covers the
+shift-handoff use case, and the doctor still charts in OpenEMR's own
+sign-out workflow regardless.
 """
 
 import asyncio
@@ -218,26 +221,6 @@ class ChatResponse(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
-
-
-class SignOutRequest(BaseModel):
-    """Optional `patient_ids`: when omitted, defaults to today's calendar.
-    Letting the doctor draft for a subset (e.g. "just the ICU bed-block")
-    means we accept an explicit list as well."""
-    patient_ids: list[str] | None = None
-
-
-class SignOutDraft(BaseModel):
-    patient_id: str
-    name: str | None = None
-    draft: str
-    sources: list[str]
-    validation_warning: bool
-    error: str | None = None
-
-
-class SignOutResponse(BaseModel):
-    drafts: list[SignOutDraft]
 
 
 # ─── auth + shell ────────────────────────────────────────────────────────
@@ -836,124 +819,6 @@ async def calendar_today(_user: str = Depends(current_user)) -> dict:
         return await app.state.cache.get_or_compute("calendar:today", _compute)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
-
-
-# ─── sign-out drafting (Use Case C) ──────────────────────────────────────
-
-
-SIGN_OUT_USER_PROMPT = (
-    "Draft a sign-out for patient_id={patient_id} ({name}). Use the "
-    "exact ONE-LINER / EVENTS TODAY / ACTIVE CONCERNS / OVERNIGHT TO-DOS "
-    "format from the system prompt. No preamble, no closing footer. Pull "
-    "the chart with get_patient_card before drafting; consult "
-    "get_observations_24h, get_med_changes_24h, or get_notes_24h if the "
-    "doctor would care about overnight changes."
-)
-
-
-async def _draft_signout_for_patient(
-    patient_id: str, name: str | None, username: str,
-) -> SignOutDraft:
-    """Run one full agent invocation to produce a sign-out for one patient.
-
-    Each draft gets its own RequestTrace so the audit log captures it
-    alongside chat traces — same SQLite table, same dashboard view. The
-    citation validator still gates the output: a draft with a fake or
-    missing citation triggers the same retry edge as any other turn.
-    """
-    state = _fresh_state()
-    state["patient_id"] = patient_id
-    user_msg = SIGN_OUT_USER_PROMPT.format(patient_id=patient_id, name=name or "?")
-    state["messages"] = [HumanMessage(content=user_msg)]
-
-    trace = new_request_trace(
-        session_id=f"signout:{patient_id}",
-        username=username,
-        user_msg=user_msg,
-        model=active_model_label(MODEL_NAME),
-    )
-    token = set_current_trace(trace)
-    try:
-        try:
-            result = await app.state.graph.ainvoke(
-                state,
-                config={"callbacks": [TokenUsageCallback()]},
-            )
-        except Exception as e:  # noqa: BLE001
-            trace.error = f"{type(e).__name__}: {e}"
-            trace.finalize()
-            app.state.traces.add(trace)
-            return SignOutDraft(
-                patient_id=patient_id, name=name, draft="",
-                sources=[], validation_warning=False,
-                error=trace.error,
-            )
-
-        last = result["messages"][-1]
-        text = message_text(last) if isinstance(last, AIMessage) else ""
-        attempts = result.get("validation_attempts", 0)
-
-        trace.validator_attempts = attempts
-        trace.validator_failed = attempts >= MAX_VALIDATION_ATTEMPTS
-        trace.finalize()
-        app.state.traces.add(trace)
-
-        return SignOutDraft(
-            patient_id=patient_id,
-            name=name,
-            draft=text,
-            sources=list(result["conversation_sources"]),
-            validation_warning=attempts >= MAX_VALIDATION_ATTEMPTS,
-        )
-    finally:
-        reset_current_trace(token)
-
-
-@app.post("/api/sign-out/draft", response_model=SignOutResponse)
-async def sign_out_draft(
-    req: SignOutRequest,
-    user: str = Depends(current_user),
-) -> SignOutResponse:
-    """Generate per-patient sign-out drafts for the doctor's panel.
-
-    With no body (or empty `patient_ids`), defaults to today's calendar
-    so the doctor's "draft sign-outs for my list" lands as a single click.
-    Each patient is drafted concurrently — wall-clock time is roughly the
-    longest single draft, not the sum.
-    """
-    cal_data: dict = {}
-    if not req.patient_ids:
-        async def _compute() -> dict:
-            result = await get_calendar_today(app.state.fhir)
-            return result["data"]
-        try:
-            cal_data = await app.state.cache.get_or_compute("calendar:today", _compute)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"calendar fetch failed: {e!s}") from e
-        roster = [
-            (p["patient_id"], p.get("name"))
-            for p in cal_data.get("patients", [])
-            if p.get("patient_id")
-        ]
-    else:
-        # When the caller supplies IDs explicitly, do a quick pass on the
-        # cached calendar (if present) just to surface names in the response.
-        # If the calendar isn't cached yet we still draft — names just stay None.
-        cal_data = app.state.cache.get("calendar:today") or {}
-        name_by_id = {
-            p["patient_id"]: p.get("name")
-            for p in cal_data.get("patients", []) if p.get("patient_id")
-        }
-        roster = [(pid, name_by_id.get(pid)) for pid in req.patient_ids]
-
-    if not roster:
-        return SignOutResponse(drafts=[])
-
-    drafts = await asyncio.gather(*[
-        _draft_signout_for_patient(pid, name, user)
-        for pid, name in roster
-    ])
-    return SignOutResponse(drafts=drafts)
 
 
 # ─── clinical notes ──────────────────────────────────────────────────────

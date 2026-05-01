@@ -44,9 +44,9 @@ _THANKS_RESPONSE = "You got it."
 _HELP_RESPONSE = (
     "I'm a chart assistant for hospitalists. Ask me about a patient on "
     "your roster — pre-round summaries, vital trends, what changed "
-    "overnight, sign-out drafts. Every clinical claim comes back with an "
-    "inline `[ResourceType/ID]` citation you can click to jump to the "
-    "chart record."
+    "overnight, anything I should notice on a chart. Every clinical claim "
+    "comes back with an inline `[ResourceType/ID]` citation you can click "
+    "to jump to the chart record."
 )
 
 

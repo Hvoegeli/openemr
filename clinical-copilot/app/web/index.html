@@ -168,42 +168,6 @@
       color: var(--text);
     }
 
-    /* Sign-out drafting */
-    .signout-intro { padding: 0.8rem 1rem; border-bottom: 1px solid var(--border); }
-    .signout-intro p { margin: 0 0 0.6rem 0; color: var(--muted); font-size: 0.9rem; }
-    .signout-status { margin-top: 0.5rem; font-size: 0.85rem; color: var(--muted); min-height: 1.2em; }
-    #signout-drafts { padding: 0.6rem 1rem 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
-    .signout-card {
-      border: 1px solid var(--border); border-radius: 6px;
-      background: white;
-    }
-    .signout-card-head {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 0.5rem 0.8rem; border-bottom: 1px solid var(--border);
-      background: #fafafb;
-    }
-    .signout-card-head h4 { margin: 0; font-size: 0.95rem; font-weight: 600; }
-    .signout-copy {
-      padding: 0.25rem 0.7rem; border: 1px solid var(--border); border-radius: 4px;
-      background: white; font: inherit; font-size: 0.82rem; cursor: pointer;
-    }
-    .signout-copy:hover { border-color: var(--accent); }
-    .signout-draft-text {
-      margin: 0; padding: 0.7rem 0.9rem;
-      white-space: pre-wrap; font-size: 0.88rem; line-height: 1.45;
-      color: var(--text); font-family: inherit;
-    }
-    .signout-meta {
-      padding: 0.3rem 0.9rem 0.6rem; font-size: 0.78rem; color: var(--muted);
-    }
-    .signout-warn {
-      padding: 0.5rem 0.9rem; background: #fff8e6; color: #8a6500;
-      border-bottom: 1px solid var(--border); font-size: 0.85rem;
-    }
-    .signout-error {
-      padding: 0.5rem 0.9rem; background: #fdecea; color: #b3261e;
-      border-bottom: 1px solid var(--border); font-size: 0.85rem;
-    }
     .cn-meta { font-size: 0.78rem; color: var(--muted); margin-top: 0.4rem; }
 
     /* ── Patient-card vitals snapshot + trends ───────────────────────── */
@@ -646,9 +610,6 @@
       <button class="tab" data-tab="docs" role="tab" aria-selected="false">
         Supporting Documents <span class="count" id="docs-count">·</span>
       </button>
-      <button class="tab" data-tab="signout" role="tab" aria-selected="false">
-        Sign-Out
-      </button>
     </div>
 
     <div class="tab-body" id="tab-cal" role="tabpanel">
@@ -662,14 +623,6 @@
     </div>
     <div class="tab-body hidden" id="tab-docs" role="tabpanel">
       <div class="empty">Select a patient first.</div>
-    </div>
-    <div class="tab-body hidden" id="tab-signout" role="tabpanel">
-      <div class="signout-intro">
-        <p>Generate per-patient sign-out drafts for everyone on today's roster. Each draft is cited and gets the same safety checks as a chat answer. Review and edit before pasting into the EHR.</p>
-        <button id="signout-generate" type="button" class="cn-btn">Generate sign-out drafts</button>
-        <div id="signout-status" class="signout-status"></div>
-      </div>
-      <div id="signout-drafts"></div>
     </div>
 
     <!-- Document viewer overlay (occupies the full left/expanded pane) -->
@@ -729,7 +682,6 @@
     const tabDocs  = document.getElementById('tab-docs');
     const tabCal   = document.getElementById('tab-cal');
     const tabNotes = document.getElementById('tab-notes');
-    const tabSignout = document.getElementById('tab-signout');
     const docsCount = document.getElementById('docs-count');
     const calCount  = document.getElementById('cal-count');
 
@@ -809,7 +761,6 @@
       tabDocs.classList.toggle('hidden',  name !== 'docs');
       tabCal.classList.toggle('hidden',   name !== 'cal');
       tabNotes.classList.toggle('hidden', name !== 'notes');
-      tabSignout.classList.toggle('hidden', name !== 'signout');
       // Reload the active tab's data lazily — clinical notes are user-mutable
       // so we want fresh state every visit. For Supporting Documents we
       // re-render from buffer on every tab switch so a save that happened
@@ -2178,85 +2129,6 @@
 
     /* ── Restore prior chat (after all referenced functions/consts are defined) ── */
     restoreChatState();
-
-    /* ── Sign-out drafting (Use Case C) ───────────────────────────── */
-    const signoutBtn = document.getElementById('signout-generate');
-    const signoutStatus = document.getElementById('signout-status');
-    const signoutDrafts = document.getElementById('signout-drafts');
-
-    if (signoutBtn) {
-      signoutBtn.addEventListener('click', async () => {
-        signoutBtn.disabled = true;
-        signoutBtn.textContent = 'Drafting…';
-        signoutStatus.textContent = 'Pulling each chart and drafting in parallel — typical 30–60s for a full panel.';
-        signoutDrafts.innerHTML = '';
-        const t0 = Date.now();
-        try {
-          const r = await fetch('/api/sign-out/draft', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({}),
-          });
-          if (!r.ok) {
-            signoutStatus.textContent = 'Failed (' + r.status + '). Try again or check the observability dashboard for traces.';
-            return;
-          }
-          const data = await r.json();
-          const drafts = data.drafts || [];
-          const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-          signoutStatus.textContent = drafts.length + ' draft(s) generated in ' + elapsed + 's. Review each before pasting into the EHR.';
-          signoutDrafts.innerHTML = drafts.map(renderSignoutDraft).join('');
-          // Wire copy buttons after render.
-          signoutDrafts.querySelectorAll('button.signout-copy').forEach(btn => {
-            btn.addEventListener('click', async () => {
-              const idx = btn.dataset.idx;
-              const card = signoutDrafts.querySelector('.signout-card[data-idx="' + idx + '"] .signout-draft-text');
-              if (!card) return;
-              try {
-                await navigator.clipboard.writeText(card.textContent);
-                btn.textContent = 'Copied';
-                setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
-              } catch (e) {
-                btn.textContent = 'Copy failed';
-                setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
-              }
-            });
-          });
-        } catch (e) {
-          signoutStatus.textContent = 'Error: ' + (e && e.message ? e.message : e);
-        } finally {
-          signoutBtn.disabled = false;
-          signoutBtn.textContent = 'Regenerate';
-        }
-      });
-    }
-
-    function renderSignoutDraft(d, idx) {
-      const name = (d.name || d.patient_id || '(unknown)').replace(/[<&>"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
-      const text = (d.draft || '').replace(/[<&>"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
-      const errorBlock = d.error
-        ? '<div class="signout-error">Draft failed: ' + d.error.replace(/[<&>"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])) + '</div>'
-        : '';
-      const warning = d.validation_warning
-        ? '<div class="signout-warn">⚠️ Citation validator flagged this draft after retries — verify before use.</div>'
-        : '';
-      const meta = d.sources && d.sources.length
-        ? '<div class="signout-meta">' + d.sources.length + ' citation(s)</div>'
-        : '';
-      return (
-        '<div class="signout-card" data-idx="' + idx + '">'
-        + '<div class="signout-card-head">'
-        + '<h4>' + name + '</h4>'
-        + '<button class="signout-copy" data-idx="' + idx + '" type="button">Copy</button>'
-        + '</div>'
-        + warning
-        + errorBlock
-        + '<pre class="signout-draft-text">' + text + '</pre>'
-        + meta
-        + '</div>'
-      );
-    }
   </script>
 </body>
 </html>

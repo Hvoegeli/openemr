@@ -114,7 +114,7 @@ Everything below ships on master via the `clinical-notes-2 → master` merge.
 
 | Stakeholder | Role |
 |---|---|
-| **Hospitalist physician** | Primary user. Carries 15–20 inpatients. Uses the agent at three points in the shift: morning pre-round, midday med safety check, evening sign-out. |
+| **Hospitalist physician** | Primary user. Carries 15–20 inpatients. Uses the agent at two points in the shift: morning pre-round, end-of-shift charting via the Clinical Notes tab. |
 | **Nurse / resident** | Secondary users (read-only access, scoped to their assigned patients). |
 | **OpenEMR** | The EHR system of record. The agent reads from it via FHIR; it never writes back in v1. |
 | **Hospital IT / CTO** | The "are we comfortable deploying this" approver. Cares about: standards (FHIR), security (OAuth2, audit log), failure modes (cited claims, refusal-to-confabulate), and scale (300 concurrent users, 500-bed hospital). |
@@ -256,7 +256,7 @@ These are documented gaps. The mitigation is the prompt rule: the LLM is instruc
 
 Pulled from the durable trace store at `/root/openemr/clinical-copilot/data/traces.db`
 on the Hetzner deploy (LangSmith mirror at project `agent_forge`). Numbers below
-are the cumulative spend across all `/chat` and `/api/sign-out/draft` invocations
+are the cumulative spend across all `/chat` invocations
 during the build week (2026-04-27 → 2026-05-03):
 
 > **Total: $<TODO — fill from `SELECT SUM(cost_usd) FROM request_traces`>** across
@@ -397,7 +397,7 @@ input-cost reduction on cache hits — measurable directly in the
 | Architecture defense | 2026-04-27 evening | This doc + presearch.md + verbal walkthrough | ✅ delivered |
 | **MVP** | **2026-04-28 (Tue) 11:59 PM CT** | Forked OpenEMR + publicly accessible deploy + AUDIT + USERS + ARCHITECTURE + 3-5 min demo. Working agent is a *bonus* (not required by the brief — Thursday's gate). | ✅ this submission |
 | Early submission | 2026-04-30 (Thu) 11:59 PM CT | Working agent deployed on same infra as OpenEMR + eval suite (130 snapshots, snapshot+replay gate as prek pre-push hook) + per-request observability dashboard (`/observability` + `/api/traces`) + LangSmith env wired + app-layer auth + new demo video. Audit-log-to-Postgres deferred to Sunday with in-memory `RequestTrace` ring buffer covering observability needs (200-deep). | in flight |
-| Final | 2026-05-03 (Sun) | + audit log → Postgres (per-FHIR-call append-only) + Use Case B (clinical_rules tool) + Use Case C (sign-out drafting) + deterministic-first intent router (§8.1) + cache-friendly prompt restructure (§8.2) + cost analysis (100/1K/10K/100K) + social post + production-readiness gaps closed | planned |
+| Final | 2026-05-03 (Sun) | + durable server-side sessions + admin oversight page + `clinical_flags` rule engine + deterministic intent router (§8.1) + prompt caching (§8.2) + cost analysis (100/1K/10K/100K) + social post + production-readiness gaps closed. **Use Case B (advisory med-safety) and the previously-planned agent-generated sign-out document were both deliberately scoped out** — see §8 for rationale. | shipped |
 
 **MVP-day decision log** (things not visible in the design but worth stating for the interview):
 

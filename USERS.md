@@ -17,7 +17,7 @@ Concretely:
 Why this specific user, not "any clinician":
 - Hospitalists carry **more patients per shift** than primary care, with **less continuity**, so the cognitive cost of context-switching dominates their day. The marginal value of "summarize what changed since I last saw this person" is highest here.
 - Their **decisions live closer to harm** than a primary care physician choosing a flu vaccine — wrong med dose in a CKD patient, missed AFib anticoagulation, mishandled allergy — so verification is non-negotiable, not nice-to-have. This forces architectural rigor early.
-- Their workflow has **predictable temporal anchors** (pre-round, midday, sign-out) that map cleanly to discrete agent invocations rather than always-on assistance. Easier to evaluate and defend.
+- Their workflow has **predictable temporal anchors** (pre-round, midday, end-of-shift charting) that map cleanly to discrete agent invocations rather than always-on assistance. Easier to evaluate and defend.
 
 Out of scope for v1, on purpose:
 - ED triage (different time pressure, different data shape).
@@ -46,11 +46,11 @@ Mid-shift, considering starting a new med. The classic friction: cross-checking 
 
 With the agent: "Is it safe to start trimethoprim-sulfamethoxazole on Cohen?" The agent pulls allergies (Sulfa → flag), CKD3 (renal-dose flag), and current meds (interaction check). Returns a cited yes / no / with-caveats answer with the specific records that drove each part of the conclusion.
 
-### Moment 3: 17:30–18:30 — sign-out drafting
+### Moment 3: 17:30–18:30 — end-of-shift charting
 
-End of shift. Eighteen patients to write sign-outs for. Each blurb is 4–6 sentences: one-liner, today's events, active concerns, overnight to-dos. The doctor knows what they want to say but typing 18 of these is the worst part of the day.
+End of shift. Eighteen patients to chart on. Each one needs vitals captured, today's note finalized, and any rec list updated for the night team. The doctor knows what they want to say but the typing is the worst part of the day.
 
-With the agent: "Draft sign-outs for my list for the night team." The agent produces per-patient drafts the doctor edits (not accepts blindly). Conversational because the doctor will tweak: "Put more emphasis on the AFib for Cohen", "swap to the night team's preferred format". Output is writing, not lookup.
+With the agent: the **Clinical Notes** tab pre-loads the patient's chart context so the doctor can focus on the *narrative* (notes + recs) instead of looking up vitals. On finalize, structured vitals (HR, BP, SpO2, Temp, RR) round-trip into OpenEMR's vitals chart — that's the only thing the agent writes back to the EHR. The actual sign-out / handoff is still the doctor's responsibility in OpenEMR's own workflow; the co-pilot's job is to take the typing pain out of charting, not to replace the legal handoff.
 
 ## Use cases — what we will build, and why an agent
 
@@ -80,17 +80,19 @@ Every agent capability in `ARCHITECTURE.md` traces back to one of these.
 
 **Status:** Thursday work. Requires a `clinical_rules` tool (not yet built — system prompt currently forbids the LLM from inventing rules from training to avoid the failure mode the brief warns about).
 
-### Use Case C — Sign-out / handoff drafting
+### Use Case C — End-of-shift clinical notes (with vitals round-trip)
 
-> "Draft sign-outs for my 18 patients for the night team."
->
-> "For Cohen, lead with the hypertensive urgency, then the AFib."
+> Doctor opens the **Clinical Notes** tab on a patient's card, types
+> the shift note + recommendations, fills the vital fields, clicks
+> **Save and lock**.
 
-**What it does:** generates per-patient sign-out drafts in the doctor's preferred format, with the doctor iterating per-patient ("emphasize X", "drop the bowel regimen detail"). Output is editable text the doctor pastes into the EHR.
+**What it does:** captures the doctor's shift note, recommendations, and structured vitals into the co-pilot, and on finalize pushes the structured vitals back to OpenEMR's `form_vitals` chart so the EHR sees what the doctor entered. The note's prose stays in the co-pilot's local store and shows up in the patient's Supporting Documents alongside FHIR documents.
 
-**Why an agent (not a template):** sign-outs are *writing*, and good writing is iterative. A template forces the doctor to rewrite from scratch when the focus is wrong. An agent gets a first draft right 80% of the time and accepts steering on the 20%. The conversational shape matches the actual cognitive task.
+**Why an agent-flavored UI (not a raw form):** the doctor's **chart context is already loaded** — patient card, last vitals, supporting documents, recent observations, prior-shift note from the same patient. They write *into* that context, not separately. The chat agent and the notes form share the same patient card, so a doctor can ask "what was her potassium yesterday?" and immediately enter the new value into the note without switching apps.
 
-**Status:** Sunday-final work. Easiest to demo once the chart-summary tools work, because each per-patient blurb is a constrained version of Use Case A.
+**Status:** shipped on master post-MVP. Vitals push uses a separate write-capable OAuth client; the chat agent itself remains read-only against FHIR.
+
+**Note on sign-out / handoff:** drafting a per-patient sign-out *as a separate document* was previously scoped as Use Case C and was dropped. The Clinical Notes tab covers the same end-of-shift moment from a different angle — the doctor still has to chart and sign in OpenEMR's own workflow either way, and a parallel agent-generated draft would diverge from the legal record. We took the agent out of the sign-out path on purpose.
 
 ## What "useful" looks like — measurable bar per use case
 
@@ -98,7 +100,7 @@ Every agent capability in `ARCHITECTURE.md` traces back to one of these.
 |---|---|---|
 | A — Pre-round | Reads it in <30s, trusts every claim, cuts review time per patient by ≥60%. | Citation integrity ≥99%; refusal rather than guess on missing fields. |
 | B — Med safety | Returns a verdict in <15s, flags every contraindication present in the chart, never invents one. | Recall ≥95% on adjudicated unsafe combos; precision ≥90% on flagged unsafe. |
-| C — Sign-out | First draft is ≥70% acceptable as-is; iterations land in ≤2 turns per patient. | Factuality ≥99%, completeness covers the brief's expected sections. |
+| C — Clinical notes | Vitals round-trip to OpenEMR on finalize; note prose appears in Supporting Documents next click. | Successful FHIR write on ≥95% of finalize events; finalize is idempotent on retry. |
 
 ## Why the doctor would choose this (the real test)
 
@@ -107,7 +109,7 @@ The brief's bar: *"the agent is the thing the user would actually choose."*
 The case for our hospitalist:
 - **A** saves 20–30 minutes pre-round, which is real time on a long shift.
 - **B** prevents a category of errors that cause real harm (Bactrim → Sulfa allergy is a textbook avoidable adverse event).
-- **C** displaces the most-hated 30 minutes of every shift.
+- **C** removes the typing pain from end-of-shift charting and gets vitals into the EHR with one click instead of three.
 
 The case against (and our answer):
 - *"It will hallucinate and I will catch hell for it."* The verification layer is structural, not best-effort: claims that can't trace to a chart record are rejected before they reach the user, and the system says "insufficient evidence" instead of inventing.

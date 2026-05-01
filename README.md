@@ -35,7 +35,8 @@ All four required documents are at the **root of the repo** per the brief:
 
 The MVP shipped Tuesday with a working chart-summary agent (Use Case A). Between Tuesday and Sunday we added:
 
-- **Sign-out drafting** (Use Case C) — one click drafts per-patient sign-outs for the doctor's whole panel, each with the same citation discipline as the chat agent.
+- **Clinical Notes tab + vitals round-trip** (Use Case C) — doctor types the shift note alongside the patient card; on finalize the structured vitals (HR, BP, SpO2, Temp, RR) round-trip into OpenEMR's `form_vitals` chart. The note prose appears in Supporting Documents.
+- **`clinical_flags` rule engine** — surfaces well-known fact pairs from the chart (metformin + low eGFR, warfarin + high INR, Bactrim + sulfa allergy, etc.) with citations. Surfaces facts, not advice.
 - **Time-windowed FHIR tools** — `get_observations_24h`, `get_notes_24h`, `get_med_changes_24h` so the agent can answer "what changed overnight?" without re-pulling the whole chart.
 - **Defense-in-depth jailbreak guard** — pre-LLM regex scrubber (`app/agent/input_guard.py`) catches role-override / prompt-injection attempts before the LLM is even called; logs them in the audit feed.
 - **Deterministic intent router** — pure greetings / thanks / help short-circuit to a canned reply in ~50ms with zero LLM cost. Strict full-message anchoring; real chart questions always reach the LLM.
@@ -49,7 +50,7 @@ The MVP shipped Tuesday with a working chart-summary agent (Use Case A). Between
 
 Both URLs are publicly reachable and run on a dedicated **Hetzner Cloud CPX21** in Ashburn, VA — no laptop in the path. OpenEMR is the standard `docker/development-easy` docker-compose stack; the co-pilot runs as a `systemd` service alongside it; both `cloudflared` quick-tunnels are themselves `systemd` services with `Restart=always`. The agent streams responses via SSE — token-by-token output begins in ~2s with progress indicators ("Searching for patient…", "Loading chart…") in between. Our originally-attempted Fly.io deploy of OpenEMR (configs in [`deploy/fly/`](deploy/fly/)) hit a known issue with the upstream image's first-boot install path on a fresh Fly volume; the Hetzner deploy uses the same docker-compose that's verified working locally and sidesteps that bug.
 
-**Scope note on verification.** This is a **chart summarizer + sign-out drafter**, not a clinical advisor. We deliberately do not implement medication safety / drug-interaction checks (the brief's "domain constraint enforcement"); a confidently-wrong dosage check is the exact patient-harm failure the brief warns against. Drug-interaction databases (FDB, RxNorm-DDI) are the right tool for that job. See [ARCHITECTURE.md §8 — Production-readiness gaps](ARCHITECTURE.md#8-production-readiness-gaps-honest) for the deliberate-scope discussion.
+**Scope note on verification.** This is a **chart summarizer + clinical-notes capture tool**, not a clinical advisor. The `clinical_flags` rule engine surfaces well-known fact pairs from the chart (with citations), but it does not recommend actions. We deliberately do not implement advisory medication-safety or drug-interaction checks (the brief's "domain constraint enforcement" requirement) — a confidently-wrong dosage *recommendation* is the exact patient-harm failure the brief warns against. Drug-interaction databases (FDB, RxNorm-DDI) are the right tool for that job. See [ARCHITECTURE.md §8 — Production-readiness gaps](ARCHITECTURE.md#8-production-readiness-gaps-honest) for the deliberate-scope discussion.
 
 ---
 
@@ -92,8 +93,8 @@ The OpenEMR fork itself (`/src`, `/library`, `/interface`, `/apis`, etc.) is **u
 A focused tool, not always-on. Two shipped use cases (see [USERS.md](USERS.md)):
 
 - **A — Pre-round patient summary** ("Catch me up on Cohen") — *shipped*
-- **C — Sign-out drafting** ("Draft sign-outs for my panel") — *shipped*; one click drafts per-patient sign-outs with the same citation discipline as the chat agent
-- **B — Medication safety check** — *out of scope by design.* This is a chart summarizer, not a clinical advisor. A confidently-wrong dosage / interaction check is the exact patient-harm failure the brief warns against; the right tool for that job is a licensed drug-interaction database (FDB, RxNorm-DDI), not an LLM's training knowledge. See [ARCHITECTURE.md §8](ARCHITECTURE.md#8-production-readiness-gaps-honest).
+- **C — End-of-shift clinical notes with vitals round-trip** — *shipped*; doctor charts the shift note alongside the patient card, finalize pushes structured vitals to OpenEMR's `form_vitals`. The doctor still signs their actual handoff in OpenEMR's own workflow — we removed the previously-planned agent-generated sign-out *draft document* on purpose; a parallel agent draft would diverge from the legal record.
+- **B — Medication safety check (advisory)** — *deliberately scoped out.* The new `clinical_flags` tool surfaces chart-internal fact pairs (metformin + low eGFR, etc.) but **does not recommend actions**. A confidently-wrong dosage / interaction recommendation is the exact patient-harm failure the brief warns against; the right tool for that job is a licensed drug-interaction database (FDB, RxNorm-DDI), not an LLM's training knowledge. See [ARCHITECTURE.md §8](ARCHITECTURE.md#8-production-readiness-gaps-honest).
 
 Verification is **structural, not best-effort**: the LLM has no path to FHIR, every tool returns `{data, sources: [...]}`, and a deterministic citation validator rejects responses that cite resource IDs not in the cumulative tool-output set. The system prompt also forbids the LLM from emitting clinical reasoning (drug interactions, dose-reduction rules) that didn't come from a tool — exactly the "confident hallucination → patient harm" failure mode the brief calls out. A pre-LLM jailbreak guard catches role-override and prompt-injection attempts before the LLM is even called, and every blocked attempt is recorded in the audit feed.
 
@@ -151,10 +152,12 @@ This is the same mechanism we used for the MVP "deployed app" link above.
 | Sprint gate | Date | What landed | Status |
 |---|---|---|---|
 | **MVP** | 2026-04-28 | Forked + deployed OpenEMR, Stage 3-5 docs, working agent against Cohen (Use Case A), cookie-session login, SSE streaming, dashboard TTL cache + startup prewarm, citation-click navigation, demo video | ✅ shipped |
-| **Early submission** | 2026-04-30 | Hetzner same-host deploy, eval framework (145 snapshots / 25 rules, prek pre-push gate), LangSmith observability live in production, durable SQLite trace store + `/observability` page, app-layer auth, defense-in-depth jailbreak guard, deterministic intent router, Anthropic prompt caching, Bedrock-ready provider switch, sign-out drafting (Use Case C), time-windowed FHIR tools, vital-trends UI | ✅ shipped |
-| **Final** | 2026-05-03 | Durable server-side sessions ([app/auth_db.py](clinical-copilot/app/auth_db.py)) with idle/absolute timeouts + admin-driven revocation + auth-events audit log, admin oversight page (`/admin`), cost analysis with per-tier architectural notes, social post, scope-defense docs (no clinical rules / no agent-side patient-scope) | ✅ shipped |
+| **Early submission** | 2026-04-30 | Hetzner same-host deploy, eval framework (145 snapshots / 25 rules, prek pre-push gate), LangSmith observability live in production, durable SQLite trace store + `/observability` page, app-layer auth, defense-in-depth jailbreak guard, deterministic intent router, Anthropic prompt caching, Bedrock-ready provider switch, Clinical Notes tab with vitals round-trip (Use Case C), time-windowed FHIR tools, vital-trends UI | ✅ shipped |
+| **Final** | 2026-05-03 | Durable server-side sessions ([app/auth_db.py](clinical-copilot/app/auth_db.py)) with idle/absolute timeouts + admin-driven revocation + auth-events audit log, admin oversight page (`/admin`), `clinical_flags` rule engine (chart-internal fact-pair surfacing), cost analysis with per-tier architectural notes, social post, scope-defense docs | ✅ shipped |
 
-Use Case B (medication safety) was deliberately taken out of scope mid-sprint — see [ARCHITECTURE.md §8](ARCHITECTURE.md#8-production-readiness-gaps-honest) for the rationale and the "what would close this gap properly" plan.
+Two deliberate scope changes mid-sprint, both documented in [ARCHITECTURE.md §8](ARCHITECTURE.md#8-production-readiness-gaps-honest):
+- **Use Case B (medication safety, advisory)** — out of scope by design. The `clinical_flags` engine surfaces fact pairs but does not recommend actions.
+- **Sign-out drafting (the previously-planned agent-generated handoff document)** — removed. The Clinical Notes tab covers the same end-of-shift moment; the doctor signs their actual handoff in OpenEMR's own workflow.
 
 ---
 
