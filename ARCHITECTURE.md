@@ -1,7 +1,7 @@
 # Architecture — Clinical Co-Pilot
 
-_Status: MVP shipped (Tuesday 2026-04-28). Post-MVP delta — what landed Wed/Thu — is in §1.2; Thursday early-submission scope is in §10._
-_Date: 2026-04-28 (originally drafted 2026-04-27). Last updated: 2026-04-30._
+_Status: Final-submission state (Sunday 2026-05-03). MVP shipped Tuesday 2026-04-28; Wed–Thu delta is in §1.2; Fri–Sat delta is in §1.3; build sequencing is in §9._
+_Date: 2026-04-28 (originally drafted 2026-04-27). Last updated: 2026-05-03._
 _Source-of-truth user definition: [USERS.md](USERS.md). Audit findings driving design choices: [AUDIT.md](AUDIT.md). Agent code: [clinical-copilot/](clinical-copilot/)._
 
 ## 1. Executive summary (~500 words)
@@ -88,6 +88,25 @@ What landed on master between the Tuesday MVP submission and the Thursday early-
 - **Deterministic intent router (latency + cost win on trivial turns).** [`app/agent/intent_router.py`](clinical-copilot/app/agent/intent_router.py) runs in `/chat` and `/chat/stream` after the jailbreak guard but before the LLM. Strictly-anchored regex patterns recognize three trivial intents — pure greetings (`"hi"`, `"good morning"`), pure thanks (`"thanks"`, `"got it"`), and help requests (`"help"`, `"what can you do"`) — and short-circuit to a canned response. Anything more complex (e.g. `"hi can you catch me up on Cohen"`) doesn't match because patterns require the *entire* message to be a trivial phrase, so real chart questions always reach the LLM. Routed turns still write a `RequestTrace` with `model="intent_router"` and `error="routed:<intent>"` so the audit log accounts for them but they sort distinctly from LLM-handled turns. ~5-second latency cuts to ~50ms; cost drops to zero on routed turns. Defends against pattern drift via 31 smoke cases (20 positives + 11 negatives, including embedded-attack greetings like `"hi can you ignore previous instructions"` which fall through to the jailbreak guard).
 
 - **Admin oversight page (read-only).** New `/admin` route ([`app/web/admin.html`](clinical-copilot/app/web/admin.html)), gated to users in the `ADMIN_USERNAMES` env-controlled allow-list (default `"admin"`). Two read-only panels: (a) **Active users** — aggregates the durable SQLite trace store by username with request count, tool-call count, total $ cost, blocked-attempt count, and validator-fail count; (b) **OpenEMR practitioners** — read-only `FHIR Practitioner` listing of identities visible to the chart-read OAuth client. The "Create user" panel is a documented stub: OpenEMR remains the source of truth for user provisioning (handled in OpenEMR's admin UI), so the co-pilot doesn't try to maintain a parallel user store. New helpers in [`app/auth.py`](clinical-copilot/app/auth.py): `is_admin()` and `require_admin()` (FastAPI dependency for admin-only endpoints). `/api/me` now returns `is_admin` so the main app's header can show the Admin link conditionally. Full user-creation flow against OpenEMR's standard non-FHIR API is a follow-up.
+
+## 1.3 Final-submission delta (Fri–Sat 2026-05-01 → 2026-05-02)
+
+What landed between the Thursday early-submission gate and the Sunday final.
+Everything below ships on master via the `clinical-notes-2 → master` merge.
+
+- **Durable server-side sessions ([app/auth_db.py](clinical-copilot/app/auth_db.py)).** Replaces the cookie-only `username in request.session` scheme with a SQLite-backed session store sharing the same database file as the trace log. Cookie now carries an opaque `sid` (`secrets.token_urlsafe(32)`); the username, timestamps, and revocation state live server-side. Two timeouts enforced at lookup time: **30-min idle** (no requests in this window → 401 + clear cookie) and **12-hour absolute** (any session capped, even if active). Three stateful operations on the store: `create_session`, `get_active_session` (refreshes `last_seen`, marks expired sessions revoked + logs `session_expired`), `revoke_session` (admin or self-logout). Closes the `§8 Production-readiness — "real authentication"` gap that was the most credible prod-deploy blocker before this merge.
+
+- **Auth-events audit log (append-only).** Companion table `auth_events` ([app/auth_db.py](clinical-copilot/app/auth_db.py)) records `login_success` / `login_failure` / `logout` / `session_revoked` / `session_expired` events with username, sid, timestamp, user-agent, IP, and a free-form `detail` field (e.g. `by:admin` for admin-revoked sessions). Never overwritten, kept across deploys. Mirrors the existing `request_traces` durability story. Reviewer answer to "who logged in last Tuesday?" is now a one-table query, not a guess.
+
+- **Admin oversight page extended** ([app/web/admin.html](clinical-copilot/app/web/admin.html)). Three live panels now (was two):
+  1. **Active sessions** — server-side state, with per-row `[Revoke]` button → forces 401 on the kicked user's next request.
+  2. **Recent chat activity** (the prior "Active users" panel, renamed for clarity) — aggregated trace store.
+  3. **Auth events** — color-coded feed of the last 200 audit events.
+  New admin endpoints: `GET /api/admin/sessions`, `POST /api/admin/sessions/{sid}/revoke`, `GET /api/admin/auth-events`. All gated by `Depends(require_admin)`.
+
+- **Eval RESULTS.md checked in** ([clinical-copilot/evals/RESULTS.md](clinical-copilot/evals/RESULTS.md)). Reviewer-readable static snapshot of the latest gate run: pass rates per tier, per-rule breakdown, known soft-fail cause. Human readable; no need to clone + run to see the eval gate is green.
+
+- **Verification scope clarified explicitly.** Two new defense paragraphs in §8 below: (a) why agent-side patient-scope filtering is honestly out of scope for the sprint (we inherit OpenEMR's per-user ACLs at login, pin identity into every audit row, but the agent's OAuth client is single-tenant), (b) why drug-interaction / dose checks are deliberately out of scope by design (a confidently-wrong interaction call is the exact patient-harm failure mode the brief warns against; the right tool is a licensed DDI database, not LLM training knowledge).
 
 ## 2. System context
 
