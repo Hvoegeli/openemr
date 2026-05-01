@@ -152,6 +152,35 @@ async def get_med_changes_24h(patient_id: str, hours: int = 24) -> str:
     raise NotImplementedError("Dispatched in agent.graph.execute_tools_node")
 
 
+@tool
+async def clinical_flags(patient_id: str) -> str:
+    """Surface chart-internal fact pairs the doctor would want to see together.
+
+    Returns flags for well-known pairings drawn from data already in the
+    chart — e.g. "metformin prescribed AND eGFR < 30", "warfarin AND INR > 4",
+    "Bactrim AND documented sulfa allergy". Each flag is FACTUAL, not a
+    recommendation: the agent surfaces the pair with citations and the
+    doctor decides what to do. The agent itself does not advise on dose
+    changes, drug substitutions, or actions.
+
+    Call after `get_patient_card` whenever the doctor's question is about
+    medication safety, contraindications, or "anything I should notice"
+    on a patient. Empty result list does NOT mean "the chart is safe" —
+    the rule set is intentionally narrow (5 rules covering common
+    high-frequency pairings); it means none of those specific rules fired.
+
+    Returns JSON with `data.flags` (each with `rule_id`, `summary` carrying
+    inline `[ResourceType/ID]` citations, and `evidence` list) plus
+    `sources` listing every cited resource ID. The `summary` is the
+    user-facing text — quote it verbatim and the citation validator
+    accepts the references.
+
+    Args:
+        patient_id: The FHIR Patient resource ID.
+    """
+    raise NotImplementedError("Dispatched in agent.graph.execute_tools_node")
+
+
 TOOLS = [
     current_time,
     resolve_patient,
@@ -160,6 +189,7 @@ TOOLS = [
     get_observations_24h,
     get_notes_24h,
     get_med_changes_24h,
+    clinical_flags,
 ]
 
 
@@ -222,6 +252,69 @@ async def _get_vital_trends_impl(
     }
 
 
+async def _clinical_flags_impl(
+    client: FhirClient, patient_id: str,
+) -> SourcedResult:
+    """Fetch the chart slice the rule engine needs, then evaluate it.
+
+    Pulls active meds + allergies + active problems via `get_patient_card`,
+    then a separate Observation search for the lab category over a 30-day
+    lookback (so a stale-but-still-meaningful eGFR or K+ trip doesn't get
+    silently missed because today's lab panel was incomplete). Lab rows go
+    through `_format_vital` so the rule helpers see the same shape they
+    use for vitals (id/name/value/unit/time)."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    from app.agent.clinical_flags import evaluate_chart
+    from app.fhir.adapter import _format_vital
+
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=30)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    card_result, lab_obs = await asyncio.gather(
+        adapter.get_patient_card(client, patient_id=patient_id),
+        client.search(
+            "Observation",
+            {
+                "patient": patient_id,
+                "category": "laboratory",
+                "date": f"ge{cutoff_iso}",
+                "_count": 100,
+            },
+        ),
+    )
+    card_data = card_result["data"]
+    labs: list[dict] = []
+    for o in lab_obs:
+        for row in _format_vital(o):
+            labs.append(row)
+
+    flags = evaluate_chart(
+        active_meds=card_data.get("active_medications") or [],
+        recent_labs=labs,
+        active_problems=card_data.get("active_problems") or [],
+        allergies=card_data.get("allergies") or [],
+    )
+
+    sources: list[str] = []
+    seen: set[str] = set()
+    for f in flags:
+        for ref in f.evidence:
+            if ref not in seen:
+                seen.add(ref)
+                sources.append(ref)
+
+    return {
+        "data": {
+            "patient_id": patient_id,
+            "rule_count": len(flags),
+            "flags": [f.to_dict() for f in flags],
+        },
+        "sources": sources,
+    }
+
+
 async def dispatch(
     name: str, args: dict, client: FhirClient, notes_store: Any,
 ) -> SourcedResult:
@@ -254,4 +347,6 @@ async def dispatch(
             patient_id=args["patient_id"],
             hours=int(args.get("hours", 24)),
         )
+    if name == "clinical_flags":
+        return await _clinical_flags_impl(client, patient_id=args["patient_id"])
     raise ValueError(f"Unknown tool: {name}")
