@@ -96,7 +96,6 @@ def _build_llm(model_name: str):
         return ChatBedrockConverse(
             model=settings.bedrock_model_id,
             region_name=settings.aws_region,
-            temperature=0,
         ).bind_tools(TOOLS)
     log.info("llm: routing through Anthropic direct (model=%s)", model_name)
     return ChatAnthropic(model_name=model_name, timeout=60, stop=None).bind_tools(TOOLS)

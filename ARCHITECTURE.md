@@ -333,7 +333,7 @@ at scale.
 
 This is what would still be required to ship this to a real hospital:
 
-- **BAA with LLM provider** — sprint demo uses Anthropic direct (synthetic data, no PHI). The Bedrock provider switch is wired ([app/agent/graph.py:71](clinical-copilot/app/agent/graph.py#L71)); production flips `LLM_PROVIDER=bedrock` and routes through AWS with a signed BAA. The code path is shipped; the BAA paperwork and a Bedrock end-to-end smoke test are not.
+- **BAA with LLM provider** — the brief states "act as if you have a signed Business Associate Agreement with all LLM providers"; the sprint demo therefore uses Anthropic direct against synthetic data with no PHI on the wire. As above-spec readiness, the Bedrock provider switch is already wired ([app/agent/graph.py:70](clinical-copilot/app/agent/graph.py#L70)) so flipping `LLM_PROVIDER=bedrock` routes Claude calls through AWS Bedrock — the path Anthropic's actual BAA covers. Production additionally needs the signed BAA paperwork, AWS account + Bedrock model access, and a real end-to-end smoke test on that path; the code is ready, the operational steps are out of sprint scope.
 - **Encryption at rest** for the durable SQLite store at `data/traces.db` (sessions, audit-log events, request traces) and the JSON note store at `data/clinical_notes.json`. Single-host disk on Hetzner has none of this today; production moves to managed Postgres with `pgcrypto` column-level encryption for note bodies and audit detail.
 - **Disaster recovery** — backup/restore SLA, multi-region failover, RPO/RTO targets. Today the only durability is the daily Hetzner volume snapshot.
 - **Clinical validation** — IRB review, physician evaluation panel, and adversarial-prompt red-teaming with practicing clinicians before any live use.
