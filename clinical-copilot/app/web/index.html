@@ -266,13 +266,18 @@
     }
     .vc-list {
       list-style: none; padding: 0; margin: 0.4rem 0 0;
-      max-height: 7rem; overflow-y: auto;
+      /* Show exactly 4 rows; the 5th and beyond appear under a per-table
+         scrollbar. Each li is ~1.5rem tall (0.78rem font × ~1.2 line-height
+         + 0.5rem vertical padding), so 4 rows ≈ 6rem; add a small slack so
+         the 4th row's bottom border isn't clipped. */
+      max-height: 6.2rem; overflow-y: auto;
       border-top: 1px solid #f1f3f6;
     }
     .vc-list li {
       display: grid; grid-template-columns: auto 1fr auto;
       gap: 0.4rem; align-items: baseline;
       padding: 0.25rem 0.05rem;
+      min-height: 1.4rem;
       font-size: 0.78rem;
       border-bottom: 1px dashed #f1f3f6;
       cursor: pointer;
@@ -1357,10 +1362,11 @@
     // "View Vital Trends →" / "← Back to patient card" toggles AND
     // clicks on individual chart data-points (which open the detail row).
     tabCard.addEventListener('click', (e) => {
-      const openBtn  = e.target.closest('#open-trends');
-      const closeBtn = e.target.closest('#close-trends');
-      const dot      = e.target.closest('circle[data-vital-key]');
-      const row      = e.target.closest('.vc-list li[data-vital-key]');
+      const openBtn   = e.target.closest('#open-trends');
+      const closeBtn  = e.target.closest('#close-trends');
+      const dot       = e.target.closest('circle[data-vital-key]');
+      const row       = e.target.closest('.vc-list li[data-vital-key]');
+      const sourceRef = e.target.closest('.source-ref[data-fhir-ref]');
       if (!activePatientId) return;
       if (openBtn)  { showVitalTrends(activePatientId); return; }
       if (closeBtn) {
@@ -1368,6 +1374,29 @@
         const e2 = buffer.get(activePatientId) || {};
         if (e2.card) tabCard.innerHTML = renderCard(e2.card);
         else refreshCard(activePatientId);
+        return;
+      }
+      // The trends-detail panel ("· FHIR Observation · Observation/abc") was
+      // visually a clickable link (cursor: pointer) but had no handler — clicks
+      // produced no navigation. Hand off to the same provenance routing the
+      // chat citations use: switch back to the snapshot card, then jump to
+      // the matching list item. ClinicalNote refs land on the Clinical Notes
+      // tab since jumpToCitation doesn't model them.
+      if (sourceRef) {
+        const ref = sourceRef.getAttribute('data-fhir-ref') || '';
+        if (!ref) return;
+        if (ref.startsWith('ClinicalNote/')) {
+          switchTab('notes');
+          return;
+        }
+        // Render the snapshot view first so jumpToCitation has the list items
+        // it needs to scroll into view.
+        cardView.set(activePatientId, 'snapshot');
+        const e3 = buffer.get(activePatientId) || {};
+        if (e3.card) tabCard.innerHTML = renderCard(e3.card);
+        else refreshCard(activePatientId);
+        // Defer one tick so the snapshot DOM is parsed before we query it.
+        setTimeout(() => jumpToCitation(ref), 0);
         return;
       }
       const target = dot || row;
