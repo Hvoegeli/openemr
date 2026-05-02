@@ -725,11 +725,62 @@
       sessionId = null;
     }
 
+    /* ── UI state persistence (tab + active patient + cardView) ──────
+       Same problem shape as chat persistence: navigating to /observability
+       or /admin and back would otherwise drop the user back on the
+       calendar tab even if they had a patient card open. We snapshot
+       (activeTab, activePatientId, cardView) on every state-change site
+       and replay after the calendar boot finishes (so the patient row
+       exists for the active-row highlight). */
+    const UI_STATE_KEY = 'copilot_ui_state_v1';
+
+    function saveUiState() {
+      try {
+        const tabBtn = document.querySelector('.tab.active');
+        const activeTab = tabBtn ? tabBtn.dataset.tab : 'cal';
+        const cv = {};
+        cardView.forEach((v, k) => { cv[k] = v; });
+        const payload = { activeTab, activePatientId, cardView: cv };
+        localStorage.setItem(UI_STATE_KEY, JSON.stringify(payload));
+      } catch (_) { /* quota / storage disabled — silent skip */ }
+    }
+    function clearUiState() {
+      try { localStorage.removeItem(UI_STATE_KEY); } catch (_) {}
+    }
+    async function restoreUiState() {
+      try {
+        const raw = localStorage.getItem(UI_STATE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!parsed) return;
+        if (parsed.cardView && typeof parsed.cardView === 'object') {
+          for (const [k, v] of Object.entries(parsed.cardView)) {
+            if (typeof v === 'string') cardView.set(k, v);
+          }
+        }
+        if (parsed.activePatientId && typeof parsed.activePatientId === 'string') {
+          await selectPatient(parsed.activePatientId);
+          // If the user was on the trends sub-view, swap the card to it now
+          // (selectPatient always lands on the snapshot).
+          if (parsed.cardView && parsed.cardView[parsed.activePatientId] === 'trends') {
+            await showVitalTrends(parsed.activePatientId);
+          }
+        }
+        if (parsed.activeTab && typeof parsed.activeTab === 'string') {
+          switchTab(parsed.activeTab);
+        }
+      } catch (_) { /* corrupted state — ignore and start fresh */ }
+    }
+
     /* ── Boot ─────────────────────────────────────────────────────── */
     // Fire both requests in parallel — the calendar is the slow one and
     // doesn't depend on /api/me (both share the same session cookie).
+    // We hold onto the calendar promise so the end-of-script
+    // `restoreUiState()` can wait for the patient roster to render
+    // before re-selecting the previously-active patient.
+    let _calBootPromise = null;
     (() => {
-      const calPromise = loadCalendar();
+      _calBootPromise = loadCalendar();
       fetch('/api/me').then(async (r) => {
         if (r.ok) {
           const me = await r.json();
@@ -740,14 +791,15 @@
           }
         } else if (r.status === 401) { window.location.href = '/login'; }
       }).catch(() => { /* ignore */ });
-      return calPromise;
     })();
 
     /* ── Logout ───────────────────────────────────────────────────── */
     document.getElementById('logout').addEventListener('click', async () => {
       await fetch('/api/logout', {method: 'POST'});
-      // Don't leave one user's chat sitting in localStorage for the next.
+      // Don't leave one user's chat or UI state sitting in localStorage
+      // for the next user on the same machine.
       clearChatState();
+      clearUiState();
       window.location.href = '/login';
     });
 
@@ -780,6 +832,7 @@
           docsCount.textContent = (e.docs.items || []).length || '·';
         }
       }
+      saveUiState();
     }
 
     /* ── Calendar + buffered prefetch ─────────────────────────────── */
@@ -950,6 +1003,7 @@
         } catch {}
         switchTab('card');
       }
+      saveUiState();
     }
 
     function waitForBuffer(pid, key, timeoutMs = 15000) {
@@ -1192,6 +1246,7 @@
 
     async function showVitalTrends(pid) {
       cardView.set(pid, 'trends');
+      saveUiState();
       tabCard.innerHTML = '<div class="empty">Loading Vital Trends…</div>';
       try {
         const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/vital-trends', { credentials: 'same-origin' });
@@ -1371,6 +1426,7 @@
       if (openBtn)  { showVitalTrends(activePatientId); return; }
       if (closeBtn) {
         cardView.set(activePatientId, 'snapshot');
+        saveUiState();
         const e2 = buffer.get(activePatientId) || {};
         if (e2.card) tabCard.innerHTML = renderCard(e2.card);
         else refreshCard(activePatientId);
@@ -1392,6 +1448,7 @@
         // Render the snapshot view first so jumpToCitation has the list items
         // it needs to scroll into view.
         cardView.set(activePatientId, 'snapshot');
+        saveUiState();
         const e3 = buffer.get(activePatientId) || {};
         if (e3.card) tabCard.innerHTML = renderCard(e3.card);
         else refreshCard(activePatientId);
@@ -2156,8 +2213,16 @@
       return String(s).replace(/[^a-zA-Z0-9_-]/g, c => '\\' + c);
     }
 
-    /* ── Restore prior chat (after all referenced functions/consts are defined) ── */
+    /* ── Restore prior chat + UI tab/patient state ────────────────────
+       Chat history can replay synchronously (it just renders messages).
+       UI restore has to wait until the calendar boot finishes so the
+       active-patient `.cal-row` exists for selectPatient's highlight
+       step; we chain off the boot promise that the IIFE above stashed.
+    */
     restoreChatState();
+    if (_calBootPromise) {
+      _calBootPromise.then(() => restoreUiState()).catch(() => {});
+    }
   </script>
 </body>
 </html>
