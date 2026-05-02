@@ -333,13 +333,12 @@ at scale.
 
 This is what would still be required to ship this to a real hospital:
 
-- **BAA with LLM provider** — for the sprint demo we use Anthropic direct (no PHI); production routes through AWS Bedrock with a signed BAA.
-- **Real authentication** — current plan is OpenEMR session passthrough; a hospital deployment would integrate with their SSO (SAML/OIDC).
-- **Encryption at rest** in our Postgres for conversation history and audit log (Fly.io managed Postgres has this; configuration check needed).
-- **Drug interaction database** — for Use Case B, we'd license First Databank (FDB) or RxNorm-DDI rather than relying on the LLM's training knowledge of interactions.
-- **Disaster recovery** — backup/restore SLA, multi-region failover, RPO/RTO targets.
-- **Clinical validation** — IRB review, physician evaluation panel before live use.
-- **The chart UI** — we ship a prototype; production needs a clinical UX review.
+- **BAA with LLM provider** — sprint demo uses Anthropic direct (synthetic data, no PHI). The Bedrock provider switch is wired ([app/agent/graph.py:71](clinical-copilot/app/agent/graph.py#L71)); production flips `LLM_PROVIDER=bedrock` and routes through AWS with a signed BAA. The code path is shipped; the BAA paperwork and a Bedrock end-to-end smoke test are not.
+- **Encryption at rest** for the durable SQLite store at `data/traces.db` (sessions, audit-log events, request traces) and the JSON note store at `data/clinical_notes.json`. Single-host disk on Hetzner has none of this today; production moves to managed Postgres with `pgcrypto` column-level encryption for note bodies and audit detail.
+- **Disaster recovery** — backup/restore SLA, multi-region failover, RPO/RTO targets. Today the only durability is the daily Hetzner volume snapshot.
+- **Clinical validation** — IRB review, physician evaluation panel, and adversarial-prompt red-teaming with practicing clinicians before any live use.
+- **Hospital SSO integration** — current login is OpenEMR username/password validated via the password-grant client. A real deployment would broker through Epic/Cerner SAML or OIDC and inherit the hospital's MFA policy.
+- **The chart UI** — the right-side patient card is a prototype, not a clinical UX review. Real deployment needs a designer's pass and physician usability study.
 
 ### 8.1 Deterministic-first routing — known optimization (Sunday-track)
 
@@ -390,6 +389,61 @@ once `langchain-anthropic` exposes a clean way to do so. Either yields ~80–90%
 input-cost reduction on cache hits — measurable directly in the
 `/observability` dashboard's `cache_read_tokens` field.
 
+### 8.3 Deliberate scope choices — what we are *not* building, and why
+
+The brief asks for "domain constraints and architectural boundaries that
+reflect deliberate scope decisions." Three choices below were made on purpose
+— not deferred — and the rationale is structural rather than calendar-driven.
+
+**1. Authorization scope is inherited from OpenEMR, not re-implemented in
+the agent.** A hospital deployment's "doctor X can see patient Y" rules are
+already enforced by OpenEMR's ACL layer at the FHIR-server boundary: the
+client_credentials caller our agent uses gets back exactly the resources the
+acting user is permitted to read, no more. We do not re-check scope in the
+agent itself. Re-implementing patient-scope filtering inside the agent would
+create a second source of truth for ACLs that drifts from OpenEMR's, which is
+worse than relying on a single enforcement point that the hospital's
+compliance team already audits. The agent does carry identity through every
+turn — sessions and auth events are persisted in
+[app/auth_db.py](clinical-copilot/app/auth_db.py) and per-request traces in
+[app/observability_db.py](clinical-copilot/app/observability_db.py), both
+keyed by authenticated username, so the audit trail is complete; we just do
+not *re-decide* what the user is allowed to see.
+
+**2. Advisory drug-interaction logic is out of scope; `clinical_flags` is
+deliberately a fact-pairing tool, not a recommender.** The earlier plan
+included a Use Case B "is it safe to start Bactrim on Cohen?" advisory tool.
+We removed it. The reason is structural: the LLM cannot generate
+training-derived clinical advice without violating R2 in the system prompt
+(*"no clinical reasoning beyond tool output"*), and a real advisor would
+require either a licensed drug-interaction database (First Databank, RxNorm-DDI)
+or a clinical-decision-support partnership with attached liability coverage —
+neither of which we can credibly stand up in a sprint, and neither of which is
+the *kind of thing* the brief is asking for. The compromise we shipped is
+[`clinical_flags`](clinical-copilot/app/agent/clinical_flags.py): five narrow
+chart-internal pairings (e.g. "metformin prescribed AND eGFR <30", "warfarin
+AND INR >4") that surface the *facts together with citations* and let the
+doctor make the call. The agent quotes the flag's `summary` verbatim and adds
+no interpretation; the system-prompt R2 forbids "what should I do?" answers
+even when the doctor asks directly. This is the architectural shape of "the
+agent surfaces, the doctor decides," and it generalizes — adding a new rule
+is a pure-data change, not a model change.
+
+**3. The agent-generated sign-out draft document was removed on purpose.**
+An earlier branch produced a per-patient "draft sign-out" alongside the
+clinical note. We took it out. A draft document that lives outside the EHR's
+own sign-out workflow creates a parallel handoff record the doctor still has
+to reconcile against the legal one, which is more friction, not less, and
+introduces a divergence risk if the agent's draft and the EHR's record
+disagree at a clinically meaningful level. The end-of-shift surface we kept
+is the **Clinical Notes tab with structured-vitals round-trip**: the doctor
+writes prose against fully-loaded chart context, and on finalize the agent
+pushes only the structured vitals back to OpenEMR's `form_vitals` chart. The
+note prose stays in the co-pilot's local store and surfaces in Supporting
+Documents next to FHIR DocumentReferences. The legal sign-out remains the
+doctor's responsibility in OpenEMR's own UI — a deliberate boundary, not a
+gap. See [USERS.md](USERS.md) for the matching change in the use-case story.
+
 ## 9. Build sequencing
 
 | Sprint gate | Date | Scope | Status |
@@ -415,9 +469,11 @@ Likely questions and the short answer for each:
 |---|---|
 | "Why a chat agent and not a dashboard?" | Doctors ask follow-ups ("show me the trend"; "what's he on that affects K?"). A dashboard can't anticipate the thread. |
 | "How do you stop hallucinations?" | Architectural: every claim must trace to a tool result. A validator rejects the response if a citation is missing or invalid. The LLM cannot lie about chart contents because it cannot bypass the structural gate. |
-| "What about privacy/HIPAA?" | OAuth2 system-level auth, per-tool authorization scoped to the doctor's panel, append-only audit log of every chart access, BAA with LLM provider in production, demo data only in sprint. |
-| "How does this scale to 300 concurrent doctors?" | FastAPI is async; FHIR calls parallelize; Anthropic prompt caching keeps per-turn cost flat; Postgres handles the audit log easily at this scale. Fly.io scales horizontally. Bottleneck would be OpenEMR itself, not us. |
+| "What about privacy/HIPAA?" | OpenEMR's ACL layer enforces patient scope at the FHIR-server boundary — we inherit it rather than re-implement it (see §8.3). Durable session store with idle + absolute timeout, append-only audit log of every chart access keyed by username, Bedrock provider switch wired for BAA-grade routing, synthetic data only in the sprint demo. |
+| "How does this scale to 300 concurrent doctors?" | FastAPI is async; FHIR calls parallelize; prompt caching is teed up (§8.2). At 300 concurrent the bottleneck is the FHIR backend, not us — see §6.3 cost-model "bottleneck shift." The current single-host Hetzner deploy is sized for sprint demo; production moves to a horizontally-scaled deployment behind a managed Postgres. |
 | "Why LangGraph and not OpenAI SDK / DSPy / a custom loop?" | We need an explicit verification node between LLM and user. LangGraph's state-machine model makes that gate first-class; AgentExecutor hides it; raw SDK reinvents it. |
-| "What happens when the LLM is wrong?" | Three layers: (1) it physically can't cite a resource that doesn't exist (validator); (2) for medication safety it gets a second-pass fact-check; (3) doctor sees the citation and verifies it themselves — the right-side patient card makes this one click. |
-| "What if a doctor asks about a patient they shouldn't see?" | Tool returns an error the LLM relays as "you don't have access to that record." The audit log captures the attempt. |
-| "Why Fly.io?" | Fast deploy, managed Postgres, Docker-native (so the same image runs in AWS later), no vendor lock-in. |
+| "What happens when the LLM is wrong?" | Two structural layers: (1) the citation validator rejects any claim whose `[ResourceType/id]` does not appear in the cumulative tool-output set; (2) `clinical_flags` returns chart-internal fact pairs with pre-validated citations rather than training-derived advice (§8.3). The doctor sees every citation inline and one click jumps them to the chart record. |
+| "What if a doctor asks about a patient they shouldn't see?" | OpenEMR's FHIR ACL returns no rows (or a 403) for an out-of-scope read; the agent sees an empty/erroring tool result and surfaces "no patient found" rather than fabricating one. The audit log captures the attempt under the authenticated username. |
+| "Why don't you do drug-interaction checking?" | Deliberately out of scope — see §8.3. The compromise we shipped is `clinical_flags`, which surfaces chart-internal pairings as facts with citations and never as recommendations. A real advisory tool needs FDB/RxNorm-DDI licensing and clinical liability coverage, which is the wrong shape for a sprint deliverable. |
+| "Where does the sign-out document go?" | We do not generate one. The end-of-shift surface is the Clinical Notes tab; structured vitals round-trip to OpenEMR's `form_vitals` chart on finalize, prose lives in the co-pilot's note store and Supporting Documents. The legal sign-out stays in OpenEMR's own UI — see §8.3. |
+| "Why Hetzner / cloudflared, not AWS?" | Single-host CPX21 + cloudflared quick-tunnel is a sprint shape, not a production shape. The app is Docker-native and Bedrock-ready, so the same image runs on AWS ECS or EKS without code change when the BAA paperwork lands. |
