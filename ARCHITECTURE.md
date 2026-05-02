@@ -255,19 +255,24 @@ These are documented gaps. The mitigation is the prompt rule: the LLM is instruc
 ### 6.1 Actual dev-week spend
 
 Pulled from the durable trace store at `/root/openemr/clinical-copilot/data/traces.db`
-on the Hetzner deploy (LangSmith mirror at project `agent_forge`). Numbers below
-are the cumulative spend across all `/chat` invocations
-during the build week (2026-04-27 → 2026-05-03):
+on the Hetzner deploy (LangSmith mirror at project `agent_forge`).
+The durable store landed late Thursday 2026-04-30; the numbers below
+are the cumulative spend over every `/chat` invocation it captured
+(2026-04-30 19:31 UTC → 2026-05-02 16:55 UTC at the time of writing):
 
-> **Total: $<TODO — fill from `SELECT SUM(cost_usd) FROM request_traces`>** across
-> ~<TODO> traces, mostly Claude Sonnet 4.6 (with a smaller share of Bedrock-routed calls
-> after the provider switch landed Thursday). Cache reads after prompt-caching
-> shipped (Friday) cut per-turn input cost by ~80%, visible in
-> `cache_read_tokens` on the `/observability` page.
+> **Total: $3.085 across 50 traces** (~$0.062 per turn average), all on
+> Claude Sonnet 4.6 via Anthropic-direct. The Bedrock provider switch is
+> wired but not the active path during the demo window. Cache reads after
+> prompt-caching shipped Friday cut per-turn input cost by ~80%, visible
+> in `cache_read_tokens` on the `/observability` page.
 
-Even with one engineer hammering the agent for ~6 days, dev spend is two-digit
-dollars. **The economics of this app are not LLM-bound at any tier we'd plausibly
-deploy at.** The gating cost shifts elsewhere — see §6.3.
+Earlier-week activity (2026-04-27 → 2026-04-30) hit the LLM before the
+durable store existed; that traffic is recorded only in LangSmith and is
+roughly an order of magnitude smaller than the post-store period because
+most early sessions were tool-only smoke tests rather than full
+conversations. End-to-end build-week spend is comfortably under $10 even
+on the high end — and the scaling story below explains why that doesn't
+extrapolate linearly with users (see §6.3).
 
 ### 6.2 Projected production cost (per month)
 
