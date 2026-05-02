@@ -367,6 +367,7 @@
           if (e.event_type === 'login_success') badgeClass = 'good';
           else if (e.event_type === 'login_failure' || e.event_type === 'session_revoked') badgeClass = 'error';
           else if (e.event_type === 'session_expired') badgeClass = 'warn';
+          else if (e.event_type === 'patient_access_denied') badgeClass = 'error';
           return ''
             + '<tr>'
             + '<td class="muted">' + escHtml(fmtTs(e.at)) + '</td>'

@@ -16,3 +16,8 @@ class AgentState(TypedDict):
     conversation_sources: list[str]
     patient_id: str | None
     validation_attempts: int
+    # `username` is the authenticated session owner (None if no auth context,
+    # e.g. CLI smokes). Tool dispatch resolves it into a `panel` via
+    # `app.access_control.get_panel_for_user` and gates patient-id-taking
+    # tools against that panel.
+    username: str | None

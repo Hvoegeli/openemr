@@ -207,6 +207,10 @@ async def record_one(case: Case, patient: Patient | None) -> Snapshot:
         "conversation_sources": [],
         "patient_id": None,
         "validation_attempts": 0,
+        # Eval replays should see every patient regardless of ACL — they're
+        # testing agent behavior, not access control. Pin "admin" so the
+        # access_control gate returns panel=None (no filter).
+        "username": "admin",
     }
 
     turns_out: list[Turn] = []

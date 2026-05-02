@@ -32,7 +32,11 @@ class CalendarEntry(TypedDict, total=False):
     seeded: bool  # True for fallback stubs
 
 
-async def get_calendar_today(client: FhirClient) -> SourcedResult:
+async def get_calendar_today(
+    client: FhirClient,
+    *,
+    panel: frozenset[str] | None = None,
+) -> SourcedResult:
     """Return the inpatient roster for the dashboard.
 
     Demo behavior: every seeded patient is treated as currently admitted —
@@ -40,6 +44,14 @@ async def get_calendar_today(client: FhirClient) -> SourcedResult:
     deployment would filter on encounter status (in-progress / arrived) or
     a separate "active inpatient" flag, but the demo has no discharge
     workflow so we surface every patient in the system.
+
+    `panel` is the per-user patient-ID allow-list resolved by
+    [app.access_control](../access_control.py). `None` means no filter
+    (admin); `frozenset()` means an empty panel (logged-in user with no
+    assigned patients). The filter is applied client-side — OpenEMR's FHIR
+    layer accepts `?general-practitioner=Practitioner/{id}` on Patient
+    search but we already have the broad list cached, so reusing it is
+    cheaper than a second FHIR roundtrip per user.
 
     Each row carries the latest encounter's start time + reason for the
     chip's secondary line. Endpoint name kept as `today` for backwards
@@ -49,6 +61,8 @@ async def get_calendar_today(client: FhirClient) -> SourcedResult:
     sources: list[str] = []
 
     patients = await _safe_search(client, "Patient", {"_count": 50})
+    if panel is not None:
+        patients = [p for p in patients if p.get("id") in panel]
     if not patients:
         return {"data": {"date": today_iso, "patients": []}, "sources": sources}
 

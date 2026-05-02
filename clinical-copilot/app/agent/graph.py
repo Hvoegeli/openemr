@@ -22,6 +22,8 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 
+from app import access_control
+from app.access_control import PatientAccessDenied
 from app.agent.state import AgentState
 from app.agent.system_prompt import SYSTEM_PROMPT
 from app.agent.tools import TOOLS, dispatch
@@ -151,13 +153,19 @@ def build_graph(
         new_sources = list(state["conversation_sources"])
         new_patient_id = state.get("patient_id")
 
+        # Resolve the caller's patient panel once per node invocation. The
+        # access_control module caches per-username for 5 min, so subsequent
+        # tool calls in the same conversation hit the cache.
+        username = state.get("username")
+        panel = await access_control.get_panel_for_user(client, username)
+
         for call in last.tool_calls:
             t0 = time.time()
             sources_added = 0
             tool_ok = True
             tool_err: str | None = None
             try:
-                result = await dispatch(call["name"], call["args"], client, notes_store)
+                result = await dispatch(call["name"], call["args"], client, notes_store, panel=panel)
                 sources_added = len(result["sources"])
                 new_sources.extend(result["sources"])
                 if call["name"] == "resolve_patient" and isinstance(result["data"], dict) \
@@ -167,6 +175,22 @@ def build_graph(
                 log.info(
                     "tool=%s args=%s sources=%d",
                     call["name"], call["args"], sources_added,
+                )
+            except PatientAccessDenied as e:
+                # Privacy-conservative: surface the same shape `resolve_patient`
+                # uses for a no-match. The LLM cannot tell denial from typo,
+                # which is the desired property — confirming a patient exists
+                # would leak panel boundaries. Audit signal lives on the
+                # trace event via `tool_err`.
+                content = json.dumps({
+                    "data": {"found": False, "patient_id": e.patient_id},
+                    "sources": [],
+                })
+                tool_ok = False
+                tool_err = f"patient_access_denied:{e.patient_id}"
+                log.warning(
+                    "tool=%s denied user=%s patient=%s",
+                    call["name"], username, e.patient_id,
                 )
             except Exception as e:  # noqa: BLE001 — surface tool errors to the LLM
                 content = json.dumps({"error": str(e), "tool": call["name"]})

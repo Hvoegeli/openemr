@@ -55,6 +55,7 @@ from app.agent.graph import MAX_VALIDATION_ATTEMPTS, active_model_label, build_g
 from app.agent.input_guard import JAILBREAK_REFUSAL, detect_jailbreak  # noqa: E402
 from app.agent.intent_router import route_intent  # noqa: E402
 from app.agent.state import AgentState  # noqa: E402
+from app import access_control  # noqa: E402
 from app.auth import current_session, current_user, is_admin, require_admin, verify_openemr_credentials  # noqa: E402
 from app.auth_db import AuthStore  # noqa: E402
 from app.cache import TTLCache  # noqa: E402
@@ -97,6 +98,7 @@ def _fresh_state() -> AgentState:
         "conversation_sources": [],
         "patient_id": None,
         "validation_attempts": 0,
+        "username": None,
     }
 
 
@@ -120,9 +122,12 @@ async def _prewarm_dashboard(app: FastAPI) -> None:
         log.info("prewarm: oauth token ready in %.2fs", time.time() - t0)
 
         async def _calendar() -> dict:
-            r = await get_calendar_today(fhir)
+            # Prewarm the admin/no-filter view — matches `_calendar_cache_key(None)`
+            # so the first admin request hits warm. Per-user filtered views are
+            # cold on first request (rare in demo; 5-min TTL after).
+            r = await get_calendar_today(fhir, panel=None)
             return r["data"]
-        cal_data = await cache.get_or_compute("calendar:today", _calendar)
+        cal_data = await cache.get_or_compute("calendar:today:all", _calendar)
         log.info(
             "prewarm: calendar ready in %.2fs (%d patients)",
             time.time() - t0, len(cal_data.get("patients", [])),
@@ -368,6 +373,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
     state = SESSIONS.get(session_id) or _fresh_state()
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
+    state["username"] = _user
 
     trace = new_request_trace(
         session_id=session_id,
@@ -393,6 +399,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
         "conversation_sources": result["conversation_sources"],
         "patient_id": result.get("patient_id"),
         "validation_attempts": result.get("validation_attempts", 0),
+        "username": _user,
     }
     SESSIONS[session_id] = new_state
 
@@ -513,6 +520,7 @@ async def chat_stream(
     state = SESSIONS.get(session_id) or _fresh_state()
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
+    state["username"] = _user
 
     trace = new_request_trace(
         session_id=session_id,
@@ -556,6 +564,7 @@ async def chat_stream(
                                 "conversation_sources": output.get("conversation_sources", []),
                                 "patient_id": output.get("patient_id"),
                                 "validation_attempts": output.get("validation_attempts", 0),
+                                "username": _user,
                             }
                             SESSIONS[session_id] = new_state
 
@@ -763,8 +772,37 @@ def _decorate_card_vitals(card_data: dict, notes: list, trends: dict) -> dict:
     }
 
 
+async def _check_patient_access(
+    request: Request, username: str, patient_id: str,
+) -> None:
+    """Raise 404 if `username` cannot access `patient_id`. Audit-log the denial.
+
+    404 (not 403) is intentional: a 403 confirms the patient exists, which
+    leaks chart-roster information across panel boundaries. 404 matches the
+    "no patient found" response a typo would get.
+    """
+    panel = await access_control.get_panel_for_user(request.app.state.fhir, username)
+    if access_control.is_in_panel(panel, patient_id):
+        return
+    request.app.state.auth_store.log_event(
+        event_type="patient_access_denied",
+        username=username,
+        sid=request.session.get("sid"),
+        user_agent=request.headers.get("user-agent"),
+        ip=request.client.host if request.client else None,
+        detail=f"patient={patient_id}",
+    )
+    log.warning("acl: user=%s denied patient=%s", username, patient_id)
+    raise HTTPException(status_code=404, detail="Patient not found")
+
+
 @app.get("/api/patient/{patient_id}/card")
-async def patient_card(patient_id: str, _user: str = Depends(current_user)) -> dict:
+async def patient_card(
+    patient_id: str,
+    request: Request,
+    username: str = Depends(current_user),
+) -> dict:
+    await _check_patient_access(request, username, patient_id)
     async def _compute() -> dict:
         result = await adapter.get_patient_card(app.state.fhir, patient_id=patient_id)
         return result["data"]
@@ -782,7 +820,12 @@ async def patient_card(patient_id: str, _user: str = Depends(current_user)) -> d
 
 
 @app.get("/api/patient/{patient_id}/vital-trends")
-async def patient_vital_trends(patient_id: str, _user: str = Depends(current_user)) -> dict:
+async def patient_vital_trends(
+    patient_id: str,
+    request: Request,
+    username: str = Depends(current_user),
+) -> dict:
+    await _check_patient_access(request, username, patient_id)
     try:
         return await app.state.cache.get_or_compute(
             f"trends:{patient_id}",
@@ -793,7 +836,12 @@ async def patient_vital_trends(patient_id: str, _user: str = Depends(current_use
 
 
 @app.get("/api/patient/{patient_id}/documents")
-async def patient_documents(patient_id: str, _user: str = Depends(current_user)) -> dict:
+async def patient_documents(
+    patient_id: str,
+    request: Request,
+    username: str = Depends(current_user),
+) -> dict:
+    await _check_patient_access(request, username, patient_id)
     async def _compute() -> dict:
         result = await get_supporting_documents(app.state.fhir, patient_id=patient_id)
         return result["data"]
@@ -810,13 +858,28 @@ async def patient_documents(patient_id: str, _user: str = Depends(current_user))
     return {"items": items}
 
 
+def _calendar_cache_key(panel: frozenset[str] | None) -> str:
+    """Cache key for `/api/calendar/today` keyed on the panel content, not the
+    user. Two users with the same allow-list share the cache; admin (panel=None)
+    matches the prewarm key so admin's first request hits warm.
+    """
+    if panel is None:
+        return "calendar:today:all"
+    if not panel:
+        return "calendar:today:empty"
+    return "calendar:today:p=" + ",".join(sorted(panel))
+
+
 @app.get("/api/calendar/today")
-async def calendar_today(_user: str = Depends(current_user)) -> dict:
+async def calendar_today(username: str = Depends(current_user)) -> dict:
+    panel = await access_control.get_panel_for_user(app.state.fhir, username)
+    cache_key = _calendar_cache_key(panel)
+
     async def _compute() -> dict:
-        result = await get_calendar_today(app.state.fhir)
+        result = await get_calendar_today(app.state.fhir, panel=panel)
         return result["data"]
     try:
-        return await app.state.cache.get_or_compute("calendar:today", _compute)
+        return await app.state.cache.get_or_compute(cache_key, _compute)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
 
@@ -833,10 +896,12 @@ class ClinicalNoteRequest(BaseModel):
 @app.get("/api/patient/{patient_id}/clinical-notes/draft")
 async def get_clinical_note_draft(
     patient_id: str,
+    request: Request,
     username: str = Depends(current_user),
 ) -> dict:
     """Return the current author's open draft for this patient × current shift,
     or a stub indicating no draft exists yet."""
+    await _check_patient_access(request, username, patient_id)
     note = app.state.clinical_notes.get_draft(patient_id, username, now=now_utc())
     if note is None:
         return {"draft": None}
@@ -847,11 +912,13 @@ async def get_clinical_note_draft(
 async def upsert_clinical_note_draft(
     patient_id: str,
     body: ClinicalNoteRequest,
+    request: Request,
     username: str = Depends(current_user),
 ) -> dict:
     """Create or update the author's open draft. Multiple saves within a
     shift consolidate into the same draft until it is finalized; once
     finalized, a subsequent save opens a fresh draft (an addendum)."""
+    await _check_patient_access(request, username, patient_id)
     note = app.state.clinical_notes.upsert_draft(
         patient_id=patient_id,
         author=username,
@@ -873,6 +940,7 @@ async def upsert_clinical_note_draft(
 @app.post("/api/patient/{patient_id}/clinical-notes/save")
 async def finalize_clinical_note(
     patient_id: str,
+    request: Request,
     username: str = Depends(current_user),
 ) -> dict:
     """Explicit Save — promote the open draft to immutable 'final' status,
@@ -880,6 +948,7 @@ async def finalize_clinical_note(
     sees what the doctor entered. A push failure does not roll back the
     local finalize — the note remains the canonical record either way.
     """
+    await _check_patient_access(request, username, patient_id)
     try:
         note = app.state.clinical_notes.finalize(patient_id, username, now=now_utc())
     except ClinicalNoteNotFound as e:
@@ -922,10 +991,12 @@ async def finalize_clinical_note(
 @app.get("/api/patient/{patient_id}/clinical-notes/latest-prior-shift")
 async def latest_prior_shift_note(
     patient_id: str,
-    _user: str = Depends(current_user),
+    request: Request,
+    username: str = Depends(current_user),
 ) -> dict:
     """Most recent finalized note from a *prior* shift — what a doctor sees
     first when they click into a patient at the start of their shift."""
+    await _check_patient_access(request, username, patient_id)
     note = app.state.clinical_notes.latest_prior_shift(patient_id, now=now_utc())
     return {"note": note.to_doc_item() if note else None}
 

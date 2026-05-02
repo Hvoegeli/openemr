@@ -33,6 +33,10 @@ def fresh_state() -> AgentState:
         "conversation_sources": [],
         "patient_id": None,
         "validation_attempts": 0,
+        # CLI runs system-level (no auth context); pin "admin" so the ACL
+        # gate in `app.access_control` treats us as the no-filter caller
+        # and the CLI keeps its prior "see every patient" behavior.
+        "username": "admin",
     }
 
 

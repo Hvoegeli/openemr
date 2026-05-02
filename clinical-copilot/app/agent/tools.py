@@ -315,14 +315,60 @@ async def _clinical_flags_impl(
     }
 
 
+# Tools that take a `patient_id` directly. For these, dispatch verifies the
+# patient sits inside the caller's panel before running the FHIR fetch — a
+# user who knows another patient's UUID still gets a "not found" answer rather
+# than chart contents from outside their assignment.
+_PATIENT_ID_TOOLS = frozenset({
+    "get_patient_card",
+    "get_vital_trends",
+    "get_observations_24h",
+    "get_notes_24h",
+    "get_med_changes_24h",
+    "clinical_flags",
+})
+
+
 async def dispatch(
-    name: str, args: dict, client: FhirClient, notes_store: Any,
+    name: str,
+    args: dict,
+    client: FhirClient,
+    notes_store: Any,
+    panel: frozenset[str] | None = None,
 ) -> SourcedResult:
-    """Run the actual adapter call for a tool name + args."""
+    """Run the actual adapter call for a tool name + args.
+
+    `panel` is the per-user patient-ID allow-list resolved by
+    [app.access_control](../access_control.py). `None` means no filter
+    (admin); a non-`None` set restricts which patients the agent can fetch
+    or resolve. Tools without a `patient_id` arg (`current_time`) ignore
+    `panel`. `resolve_patient` filters its name-search results client-side
+    via the existing `doctor_panel_ids` adapter parameter.
+
+    Raises `PatientAccessDenied` for patient-ID-taking tools whose
+    `patient_id` is outside `panel` — the caller (`execute_tools_node` in
+    `graph.py`) translates that into a "not found"-shaped tool message so
+    the LLM treats it as a typo rather than an error to surface. The
+    `tool_err` recorded on the trace event preserves the audit signal.
+    """
+    from app.access_control import PatientAccessDenied
+
+    if (
+        name in _PATIENT_ID_TOOLS
+        and panel is not None
+        and (target := args.get("patient_id"))
+        and target not in panel
+    ):
+        raise PatientAccessDenied(target)
+
     if name == "current_time":
         return await _current_time_impl()
     if name == "resolve_patient":
-        return await adapter.resolve_patient(client, query=args["query"])
+        return await adapter.resolve_patient(
+            client,
+            query=args["query"],
+            doctor_panel_ids=list(panel) if panel is not None else None,
+        )
     if name == "get_patient_card":
         return await adapter.get_patient_card(client, patient_id=args["patient_id"])
     if name == "get_vital_trends":
