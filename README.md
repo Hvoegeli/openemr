@@ -21,7 +21,7 @@ Everything a reviewer needs is in this section. Each link below is at the **top 
 
 ### Required documents
 
-All four required documents are at the **root of the repo** per the brief:
+All required documents (and supplementary references) are at the **root of the repo**:
 
 | Doc | What it is |
 |---|---|
@@ -153,7 +153,7 @@ This is the same mechanism we used for the MVP "deployed app" link above.
 |---|---|---|---|
 | **MVP** | 2026-04-28 | Forked + deployed OpenEMR, Stage 3-5 docs, working agent against Cohen (Use Case A), cookie-session login, SSE streaming, dashboard TTL cache + startup prewarm, citation-click navigation, demo video | ✅ shipped |
 | **Early submission** | 2026-04-30 | Hetzner same-host deploy, eval framework (145 snapshots / 25 rules, prek pre-push gate), LangSmith observability live in production, durable SQLite trace store + `/observability` page, app-layer auth, defense-in-depth jailbreak guard, deterministic intent router, Anthropic prompt caching, Bedrock-ready provider switch, Clinical Notes tab with vitals round-trip (Use Case C), time-windowed FHIR tools, vital-trends UI | ✅ shipped |
-| **Final** | 2026-05-03 | Durable server-side sessions ([app/auth_db.py](clinical-copilot/app/auth_db.py)) with idle/absolute timeouts + admin-driven revocation + auth-events audit log, admin oversight page (`/admin`), `clinical_flags` rule engine (chart-internal fact-pair surfacing), cost analysis with per-tier architectural notes, social post, scope-defense docs | ✅ shipped |
+| **Final** | 2026-05-03 | Durable server-side sessions ([app/auth_db.py](clinical-copilot/app/auth_db.py)) with idle/absolute timeouts + admin-driven revocation + auth-events audit log, admin oversight page (`/admin`), `clinical_flags` rule engine (chart-internal fact-pair surfacing), cost analysis with per-tier architectural notes, scope-defense docs | ✅ shipped |
 
 Two deliberate scope changes mid-sprint, both documented in [ARCHITECTURE.md §8](ARCHITECTURE.md#8-production-readiness-gaps-honest):
 - **Use Case B (medication safety, advisory)** — out of scope by design. The `clinical_flags` engine surfaces fact pairs but does not recommend actions.

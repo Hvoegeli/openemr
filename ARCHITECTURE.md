@@ -20,9 +20,9 @@ The architecture is shaped by one specific failure mode: a confidently-stated ha
 
 **Two consequential decisions inherited from [AUDIT.md](AUDIT.md):**
 - OpenEMR's FHIR API only writes 4 of 30+ resources — clinical-data writes go through a separate non-FHIR REST API with a different scope vocabulary. We registered **two distinct OAuth clients**: a `private_key_jwt` + `system/∗.read` client for the agent's read path, and a `client_secret_post` + `password`-grant + `user/∗.cruds` client originally registered for demo-data seeding. **Post-MVP, the write client is also exercised in production** by the clinical-note finalize flow (vitals only) — see §1.2. The chat agent still uses only the read client.
-- OpenEMR's FHIR + standard-API surfaces don't write to its audit-log tables consistently — we own the audit log in our app, append-only Postgres, written by the FHIR adapter on every call (Thursday work).
+- OpenEMR's FHIR + standard-API surfaces don't write to its audit-log tables consistently — we own the audit log in our app, append-only SQLite ([app/observability_db.py](clinical-copilot/app/observability_db.py)) written on every chat turn, plus a companion auth-events log ([app/auth_db.py](clinical-copilot/app/auth_db.py)) for login/logout/revocation. Both shipped post-MVP — see §1.2 / §1.3.
 
-**Stack:** FastAPI + LangGraph + Anthropic Claude Sonnet 4.6 + httpx; deployed alongside OpenEMR on a single Hetzner host (PHP/Apache + private MariaDB on the same box; uvicorn under `copilot.service`; cloudflared named-tunnel front for public access). The full stack ships from a single repo (`Hvoegeli/openemr`). _Originally targeted Fly.io; retired post-MVP — see §1.2._
+**Stack:** FastAPI + LangGraph + Anthropic Claude Sonnet 4.6 + httpx; deployed alongside OpenEMR on a single Hetzner host (PHP/Apache + private MariaDB on the same box; uvicorn under `copilot.service`; cloudflared quick-tunnel front for public access, itself running as a `systemd` service with `Restart=always`). The full stack ships from a single repo (`Hvoegeli/openemr`). _Originally targeted Fly.io; retired post-MVP — see §1.2._
 
 **Known gaps the brief expects us to flag:** no audit log writing yet (Thursday), no LangSmith tracing wired (Thursday), no clinical-rules tool (slated Sunday final), no Postgres for sessions (in-memory MVP only). Chat-turn latency is still ~14s — dominated by the LLM call; further drop comes Thursday from prompt caching and tool-call parallelism. **MVP-day deltas vs the original plan:** cookie-session login validating against OpenEMR's password grant is shipped; SSE token streaming is shipped; a server-side TTL cache + startup prewarm makes dashboard endpoints ~10ms warm (calendar/card/documents); citation clicks now navigate (Patient → card tab; Encounter → doc viewer; Allergy/Condition/Med/Obs → scroll-and-flash on the card).
 
@@ -45,10 +45,10 @@ What is actually shipped tonight versus aspirational, organized by sprint gate:
 | Audit log | ❌ in-memory session dict only; no audit-log writes yet | ✅ post-MVP: SQLite-backed durable trace store at `data/traces.db` ([observability_db.py](clinical-copilot/app/observability_db.py)) — every `/chat` request flushes one row with request_id, session, username, full tool events (incl. patient_id, args, sources returned), validator outcome, tokens + cost; survives restart; surfaced via `/observability` + `/api/traces` | + retention enforcement (90d chats / 7y audit) + Postgres swap for multi-host + per-tool patient-panel ACL |
 | **In-app observability dashboard** | — | ✅ `/observability` page + `/api/traces` endpoint; per-request latency, tokens, $ cost, tool events, validator outcome | — |
 | LangSmith observability | ❌ env wired, integration not active | ✅ post-MVP: env wired AND active in Hetzner production (`LANGSMITH_TRACING=true` + valid key); traces every node + tool + token + cost via langchain-anthropic auto-tracing — every chat turn streams a span tree to https://smith.langchain.com under project `agent_forge` | — |
-| Sessions / conversation history | in-memory dict (MVP) | Postgres, per session_id | + Redis for cross-machine state |
+| Sessions / conversation history | in-memory dict (MVP) | in-memory dict (durability landed Sun) | ✅ durable SQLite session store + auth-events log ([app/auth_db.py](clinical-copilot/app/auth_db.py)); 30-min idle / 12-hr absolute timeouts; admin revocation; + Postgres swap for multi-host |
 | Anthropic prompt caching | ❌ system prompt re-sent every turn | ⚠️ deferred — Sonnet 4.6 minimum cacheable prefix is empirically ~2048 tokens; current prompt is 952. Reaching threshold cleanly is a Sunday-track item alongside the deterministic intent-router (see §10.5) | — |
 | **Citation shorthand fix (A4)** | — | ✅ system prompt forbids `et al.` / `…` / `…` inside citation brackets; eval `lab_normal × cohen` re-recorded | — |
-| Eval framework | ❌ ad-hoc smokes | ✅ snapshot+replay gate at `clinical-copilot/evals/` (25 rules × 50 templates → 130 snapshots); golden 100% / labeled ≥90%; runs as prek pre-push hook | + CI gate on every PR |
+| Eval framework | ❌ ad-hoc smokes | ✅ snapshot+replay gate at `clinical-copilot/evals/` (25 rules × 145 snapshots); golden 100% / labeled ≥90%; runs as prek pre-push hook | + CI gate on every PR |
 | BAA / HIPAA-grade hosting | ❌ Anthropic direct, Fly.io | ⚠️ post-MVP: Bedrock-ready — `LLM_PROVIDER=bedrock` env flip routes Claude calls through AWS Bedrock (langchain-aws `ChatBedrockConverse`) so a real hospital deploy can sign Anthropic's BAA. AWS creds via `AWS_*` env vars; `BEDROCK_MODEL_ID` configurable. Default stays `anthropic` for dev/demo. Hosting relocation (Hetzner→AWS or HIPAA-eligible host) still required for full PHI deployment. | — |
 
 ## 1.2 Post-MVP delta (Wed–Thu 2026-04-29 → 2026-04-30)
@@ -81,7 +81,7 @@ What landed on master between the Tuesday MVP submission and the Thursday early-
 
 - **Zero-citation gate (closes Tuesday-grader feedback #2).** The validator now runs `find_uncited_clinical_claims` ([app/agent/validator.py:139](clinical-copilot/app/agent/validator.py#L139)) alongside the existing fake-citation check. Sentence-level regexes detect clinical-shaped statements that lack any `[Type/ID]` bracket — measurable values with units (`138 mmHg`, `72 bpm`, `98.6°F`), lab/vital names followed by a number (`creatinine 2.1`, `HR 78`, `BP 138/82`), med-usage patterns (`taking Apixaban`, `started on Lisinopril`), and patient-context pronouns plus clinical vocabulary. Either check failing fires the same `VALIDATION FAILED` retry edge in the graph, with a diagnostic message naming the offending sentences so the LLM can restate or fall back to "insufficient evidence in chart". Conservative-by-design — false positives would block legitimate refusals, so the bar to flag is high; the existing fake-cite check still catches the worst case where IDs are made up.
 
-- **Deploy: Hetzner replaces Fly.io.** The MVP-day cloudflared tunnel and in-flight Fly.io deploy were both retired in favor of a single Hetzner host running OpenEMR (PHP/Apache + private MariaDB) and the co-pilot (uvicorn under `copilot.service`) side-by-side, fronted by a cloudflared-named-tunnel for public access. Lower friction for a one-person sprint; production deployment guidance unchanged (BAA, Bedrock, etc.).
+- **Deploy: Hetzner replaces Fly.io.** The MVP-day cloudflared tunnel and in-flight Fly.io deploy were both retired in favor of a single Hetzner host running OpenEMR (PHP/Apache + private MariaDB) and the co-pilot (uvicorn under `copilot.service`) side-by-side, fronted by a cloudflared quick-tunnel that itself runs as a `systemd` service for public access. Lower friction for a one-person sprint; production deployment guidance unchanged (BAA, Bedrock, etc.).
 
 - **Bedrock-ready LLM provider switch.** [`app/agent/graph.py`](clinical-copilot/app/agent/graph.py) now constructs the chat model via a `_build_llm` factory keyed on `settings.llm_provider`. Default `"anthropic"` keeps the direct-API path; setting `LLM_PROVIDER=bedrock` (plus `AWS_REGION` and `BEDROCK_MODEL_ID`) routes Claude calls through AWS Bedrock via `langchain_aws.ChatBedrockConverse`. This is the architectural answer to HIPAA: Anthropic offers a BAA only via Bedrock. The trace's `model` field reflects whichever model is actually being called (Bedrock model ID vs Anthropic model name) so the audit log is truthful. Bedrock dep is `langchain-aws>=0.2`, lazily imported so installs without it keep working on the default path. Switching production over still needs an AWS account + IAM creds + a HIPAA-eligible host (Hetzner is not BAA-covered) — but the code path is wired and tested.
 
@@ -167,7 +167,7 @@ Everything below ships on master via the `clinical-notes-2 → master` merge.
 
 Cross-cutting:
   • LangSmith — traces every node + tool + token + cost
-  • Postgres (Fly.io) — sessions, conversation history, audit log
+  • SQLite (Hetzner) — sessions, auth-events, durable trace store
   • Anthropic prompt caching — system prompt + per-patient context
 ```
 
@@ -228,7 +228,7 @@ These are documented gaps. The mitigation is the prompt rule: the LLM is instruc
 ### 4.5 Observability
 
 - **LangSmith** traces every conversation as a tree: user input → LLM calls → tool calls → validator → response. Every node carries latency and cost.
-- The same LangSmith project hosts the **eval suite** — a YAML dataset of scenarios per use case, scored on factual accuracy, citation coverage, refusal correctness, and latency. Runs on every commit.
+- The **eval suite** is a snapshot+replay gate at [clinical-copilot/evals/](clinical-copilot/evals/) — 25 rules × 145 snapshots, covering citation integrity (A), refusal correctness (B), patient resolution (C), tool ordering (D), no-clinical-fabrication (E), PII discipline (F), adversarial-input handling (G), and response well-formedness (H). Runs as a `prek` pre-push hook so regressions are blocked locally before they hit master. Latest run: [evals/RESULTS.md](clinical-copilot/evals/RESULTS.md).
 
 ## 5. Latency model
 
@@ -236,7 +236,7 @@ These are documented gaps. The mitigation is the prompt rule: the LLM is instruc
 |---|---|---|---|---|
 | A — Pre-round summary | < 2s | < 8s | **~14s total** (3 LLM round-trips + 6 sequential FHIR queries) | Streaming TTFW + parallel tool calls + prompt caching → projected p95 ~7s |
 | B — Med safety check | < 2s | < 15s | not implemented | TBD Thursday |
-| C — Sign-out drafting | < 2s | < 60s for 18 patients | not implemented | Stream per-patient |
+| C — Clinical notes (vitals round-trip) | n/a — not chat-mediated | n/a — see §1.2 for the data path | ✅ shipped post-MVP | — |
 
 **MVP-day measured breakdown for Use Case A**: ~70% of latency is LLM round-trips (Sonnet 4.6 with bound tools, no streaming, three sequential decision turns), ~25% is sequential FHIR queries inside `get_patient_card`, ~5% is OpenEMR's PHP layer overhead. The architecture ships with tool-call latency over the target by design — we prioritized verification correctness over speed in week 1. Latency is now the explicit Thursday goal.
 
@@ -455,8 +455,8 @@ gap. See [USERS.md](USERS.md) for the matching change in the use-case story.
 |---|---|---|---|
 | Architecture defense | 2026-04-27 evening | This doc + presearch.md + verbal walkthrough | ✅ delivered |
 | **MVP** | **2026-04-28 (Tue) 11:59 PM CT** | Forked OpenEMR + publicly accessible deploy + AUDIT + USERS + ARCHITECTURE + 3-5 min demo. Working agent is a *bonus* (not required by the brief — Thursday's gate). | ✅ this submission |
-| Early submission | 2026-04-30 (Thu) 11:59 PM CT | Working agent deployed on same infra as OpenEMR + eval suite (130 snapshots, snapshot+replay gate as prek pre-push hook) + per-request observability dashboard (`/observability` + `/api/traces`) + LangSmith env wired + app-layer auth + new demo video. Audit-log-to-Postgres deferred to Sunday with in-memory `RequestTrace` ring buffer covering observability needs (200-deep). | in flight |
-| Final | 2026-05-03 (Sun) | + durable server-side sessions + admin oversight page + `clinical_flags` rule engine + deterministic intent router (§8.1) + prompt caching (§8.2) + cost analysis (100/1K/10K/100K) + social post + production-readiness gaps closed. **Use Case B (advisory med-safety) and the previously-planned agent-generated sign-out document were both deliberately scoped out** — see §8 for rationale. | shipped |
+| Early submission | 2026-04-30 (Thu) 11:59 PM CT | Working agent deployed on same infra as OpenEMR + eval suite (snapshot+replay gate as prek pre-push hook) + per-request observability dashboard (`/observability` + `/api/traces`) + LangSmith active in production + app-layer auth + durable SQLite trace store + Bedrock-ready provider switch + deterministic intent router + Clinical Notes tab with vitals round-trip. | ✅ shipped |
+| Final | 2026-05-03 (Sun) | + durable server-side sessions ([app/auth_db.py](clinical-copilot/app/auth_db.py)) with idle/absolute timeouts + admin-driven revocation + auth-events audit log + admin oversight page + `clinical_flags` rule engine + cost analysis with per-tier architectural notes + scope-defense docs. **Use Case B (advisory med-safety) and the previously-planned agent-generated sign-out document were both deliberately scoped out** — see §8 for rationale. **Deferred:** prompt caching (§8.2 — current prompt below Sonnet 4.6's empirical cacheable threshold). | ✅ shipped |
 
 **MVP-day decision log** (things not visible in the design but worth stating for the interview):
 
