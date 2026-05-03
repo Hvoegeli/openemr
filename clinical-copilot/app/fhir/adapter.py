@@ -105,7 +105,10 @@ async def resolve_patient(
     # bed and MRN paths are TODO once we have demo data shaped.
     matches = await client.search("Patient", {"family": query, "_count": 5})
 
-    if doctor_panel_ids:
+    # `is not None` (not truthiness) so an empty allow-list correctly drops
+    # every match — `if doctor_panel_ids:` would treat `[]` as "no filter"
+    # and leak patients outside the caller's panel.
+    if doctor_panel_ids is not None:
         matches = [p for p in matches if p["id"] in doctor_panel_ids]
 
     if not matches:
