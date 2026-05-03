@@ -25,7 +25,7 @@ All required documents (and supplementary references) are at the **root of the r
 
 | Doc | What it is |
 |---|---|
-| [USERS.md](USERS.md) | **Stage 4** — target user (hospitalist), workflow, three use cases with explicit "why an agent" defense |
+| [USERS.md](USERS.md) | **Stage 4** — target user (hospitalist), workflow, six shipped use cases (A, C, D, E, F, G) plus the deliberate scope-out of B, each with an explicit "why an agent" defense |
 | [AUDIT.md](AUDIT.md) | **Stage 3** — five-section audit of OpenEMR with a 500-word summary leading with the highest-impact findings |
 | [ARCHITECTURE.md](ARCHITECTURE.md) / [ARCHITECTURE.pdf](ARCHITECTURE.pdf) | **Stage 5** — agent integration plan, 500-word summary, implementation-status table, layer walkthrough, latency + cost models |
 | [clinical-copilot/evals/RESULTS.md](clinical-copilot/evals/RESULTS.md) | Eval suite results — last run pass rates, per-rule breakdown, known failures |
@@ -44,7 +44,8 @@ The MVP shipped Tuesday with a working chart-summary agent (Use Case A). Between
 - **Admin oversight page** (`/admin`, gated to `ADMIN_USERNAMES` env allow-list) — three live panels: active sessions, recent chat activity, auth events. The verification + observability story is browsable, not just claimed.
 - **Anthropic prompt caching** — system prompt is now cache-eligible; ~80–90% input-cost reduction on cache hits, measurable in `/observability` `cache_read_tokens`.
 - **Bedrock-ready provider switch** — `LLM_PROVIDER=bedrock` flips Claude calls onto AWS Bedrock so a real hospital deploy can sign Anthropic's BAA. Default stays `anthropic` for dev.
-- **Eval suite + pre-push gate** — 145 snapshots × 25 rules; golden 100% / labeled ≥90% required to push; running results in [clinical-copilot/evals/RESULTS.md](clinical-copilot/evals/RESULTS.md).
+- **Per-tool patient-panel ACL + admin assignment UI** ([app/access_control.py](clinical-copilot/app/access_control.py), [app/web/admin.html](clinical-copilot/app/web/admin.html)) — calendar, every per-patient endpoint, and every patient-id-taking agent tool gates against a per-user assignment table. Admin UI is the only legal mutation point. Empty panel returns a clean "no patient found" rather than a leak; mismatches are written to the auth-events log.
+- **Eval suite + pre-push gate** — 150 snapshots × 25 rules (added ACL boundary cases + Use Case D/E/F coverage); golden 100% / labeled ≥90% required to push; running results in [clinical-copilot/evals/RESULTS.md](clinical-copilot/evals/RESULTS.md).
 
 ### Caveat for reviewers
 
@@ -90,11 +91,15 @@ The OpenEMR fork itself (`/src`, `/library`, `/interface`, `/apis`, etc.) is **u
 
 ## The agent — what it actually does
 
-A focused tool, not always-on. Two shipped use cases (see [USERS.md](USERS.md)):
+A focused tool, not always-on. Six shipped use cases (see [USERS.md](USERS.md) for the full set with "why an agent" defense per case):
 
-- **A — Pre-round patient summary** ("Catch me up on Cohen") — *shipped*
+- **A — Pre-round patient summary** ("Catch me up on Cohen") — *shipped.*
 - **C — End-of-shift clinical notes with vitals round-trip** — *shipped*; doctor charts the shift note alongside the patient card, finalize pushes structured vitals to OpenEMR's `form_vitals`. The doctor still signs their actual handoff in OpenEMR's own workflow — we removed the previously-planned agent-generated sign-out *draft document* on purpose; a parallel agent draft would diverge from the legal record.
-- **B — Medication safety check (advisory)** — *deliberately scoped out.* The new `clinical_flags` tool surfaces chart-internal fact pairs (metformin + low eGFR, etc.) but **does not recommend actions**. A confidently-wrong dosage / interaction recommendation is the exact patient-harm failure the brief warns against; the right tool for that job is a licensed drug-interaction database (FDB, RxNorm-DDI), not an LLM's training knowledge. See [ARCHITECTURE.md §8](ARCHITECTURE.md#8-production-readiness-gaps-honest).
+- **D — 24-hour lab trend review** ("what's drifting?") — *shipped*; time-windowed Observations with per-result citations.
+- **E — Overnight watch handoff brief** ("what does the night team need to keep an eye on?") — *shipped*; surfaces nursing notes, med changes, and observation drift. Never tells the night team what to *do*.
+- **F — Time-window delta** ("what's changed since I rounded yesterday?") — *shipped*; doctor-specified window via `hours=N` on the time-windowed tools.
+- **G — Daily list / panel overview** ("walk me through my list") — *shipped*; calendar respects per-user panel ACL; no cross-panel leakage.
+- **B — Medication safety check (advisory)** — *deliberately scoped out.* The `clinical_flags` tool surfaces chart-internal fact pairs (metformin + low eGFR, warfarin + high INR, Bactrim + sulfa allergy, etc.) but **does not recommend actions**. A confidently-wrong dosage / interaction recommendation is the exact patient-harm failure the brief warns against; the right tool for that job is a licensed drug-interaction database (FDB, RxNorm-DDI), not an LLM's training knowledge. See [ARCHITECTURE.md §8.3](ARCHITECTURE.md#83-deliberate-scope-choices--what-we-are-not-building-and-why).
 
 Verification is **structural, not best-effort**: the LLM has no path to FHIR, every tool returns `{data, sources: [...]}`, and a deterministic citation validator rejects responses that cite resource IDs not in the cumulative tool-output set. The system prompt also forbids the LLM from emitting clinical reasoning (drug interactions, dose-reduction rules) that didn't come from a tool — exactly the "confident hallucination → patient harm" failure mode the brief calls out. A pre-LLM jailbreak guard catches role-override and prompt-injection attempts before the LLM is even called, and every blocked attempt is recorded in the audit feed.
 
@@ -153,7 +158,7 @@ This is the same mechanism we used for the MVP "deployed app" link above.
 |---|---|---|---|
 | **MVP** | 2026-04-28 | Forked + deployed OpenEMR, Stage 3-5 docs, working agent against Cohen (Use Case A), cookie-session login, SSE streaming, dashboard TTL cache + startup prewarm, citation-click navigation, demo video | ✅ shipped |
 | **Early submission** | 2026-04-30 | Hetzner same-host deploy, eval framework (145 snapshots / 25 rules, prek pre-push gate), LangSmith observability live in production, durable SQLite trace store + `/observability` page, app-layer auth, defense-in-depth jailbreak guard, deterministic intent router, Anthropic prompt caching, Bedrock-ready provider switch, Clinical Notes tab with vitals round-trip (Use Case C), time-windowed FHIR tools, vital-trends UI | ✅ shipped |
-| **Final** | 2026-05-03 | Durable server-side sessions ([app/auth_db.py](clinical-copilot/app/auth_db.py)) with idle/absolute timeouts + admin-driven revocation + auth-events audit log, admin oversight page (`/admin`), `clinical_flags` rule engine (chart-internal fact-pair surfacing), per-tool **patient-panel ACL** ([app/access_control.py](clinical-copilot/app/access_control.py) + admin assignment UI), cost analysis with per-tier architectural notes, scope-defense docs | ✅ shipped |
+| **Final** | 2026-05-03 | Durable server-side sessions ([app/auth_db.py](clinical-copilot/app/auth_db.py)) with idle/absolute timeouts + admin-driven revocation + auth-events audit log, admin oversight page (`/admin`), `clinical_flags` rule engine (chart-internal fact-pair surfacing), per-tool **patient-panel ACL** ([app/access_control.py](clinical-copilot/app/access_control.py) + admin assignment UI), eval suite expanded to 150 snapshots (ACL boundary cases + Use Case D/E/F coverage), cost analysis with per-tier architectural notes, scope-defense docs in ARCHITECTURE.md §8.3 | ✅ shipped |
 
 Two deliberate scope changes mid-sprint, both documented in [ARCHITECTURE.md §8](ARCHITECTURE.md#8-production-readiness-gaps-honest):
 - **Use Case B (medication safety, advisory)** — out of scope by design. The `clinical_flags` engine surfaces fact pairs but does not recommend actions.
