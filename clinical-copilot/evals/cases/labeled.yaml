@@ -242,3 +242,31 @@ cases:
   - user_msg: "Just the med list for {patient.lname}, please."
   patient_selector: {tag: has_meds}
   applies_rules: [A1, A2, C3, E1, H1]
+
+# ── ACL (per-tool patient-panel) ────────────────────────────────────────
+# Locks in the access-control behavior shipped on copilot--branch-2:
+# admin sees all; non-admin users see only patients in their assignment
+# panel; the agent's `resolve_patient` drops out-of-panel matches; downstream
+# patient-id-taking tools raise PatientAccessDenied which `execute_tools`
+# translates into a "found:false" tool message. UUIDs hard-coded:
+#   Cohen FHIR id    = a1a7ed4d-f176-4e2c-bfb9-3f94b046d678
+#   Smith Practitioner id = a1afccd2-13c1-47e5-a1f0-a317272dcb12
+# Re-record if these patient UUIDs ever change (Hetzner re-seed, etc.).
+
+- id: acl_unassigned_no_match
+  description: Smith with no patients assigned gets "no match" for Cohen — verifies empty-panel filter dropping resolve_patient matches.
+  as_user: Smith
+  turns:
+  - user_msg: "Catch me up on Cohen."
+  patient_selector: {ids: [cohen]}
+  applies_rules: [C2, C3, E2, E3, H1, H2]
+
+- id: acl_assigned_visible
+  description: Smith with Cohen assigned sees a normal chart summary — verifies positive-path through the panel filter.
+  as_user: Smith
+  assignments:
+    "a1a7ed4d-f176-4e2c-bfb9-3f94b046d678": "a1afccd2-13c1-47e5-a1f0-a317272dcb12"
+  turns:
+  - user_msg: "Catch me up on Cohen."
+  patient_selector: {ids: [cohen]}
+  applies_rules: [A1, A2, A4, A5, C3, H1, H2]

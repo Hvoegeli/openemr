@@ -63,6 +63,13 @@ class Case:
     must_match_regex: list[dict[str, str]] = field(default_factory=list)      # [{pattern, reason}]
     must_not_match_regex: list[dict[str, str]] = field(default_factory=list)  # [{pattern, reason}]
     notes: str = ""
+    # ACL-aware recording knobs. Both default to None for backward compat
+    # with every existing case (which records as the admin "see-all" user).
+    # `as_user` overrides the recorder's default username; `assignments`
+    # pre-populates an in-memory `AssignmentStore` before the graph runs
+    # so the per-tool ACL gate sees a known panel for the test user.
+    as_user: str | None = None
+    assignments: dict[str, str] = field(default_factory=dict)  # patient_id -> practitioner_id
 
 
 # ── Snapshot (cached agent trace) ───────────────────────────────────────

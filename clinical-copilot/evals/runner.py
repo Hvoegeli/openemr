@@ -98,6 +98,8 @@ def load_cases() -> list[Case]:
                 must_match_regex=list(row.get("must_match_regex", [])),
                 must_not_match_regex=list(row.get("must_not_match_regex", [])),
                 notes=row.get("notes", ""),
+                as_user=row.get("as_user"),
+                assignments=dict(row.get("assignments") or {}),
             ))
     return out
 
@@ -200,17 +202,38 @@ async def record_one(case: Case, patient: Patient | None) -> Snapshot:
     # to /tmp and `record_one` is a rare manual recording path.
     notes_dir = tempfile.mkdtemp(prefix="eval-notes-")
     notes_store = ClinicalNoteStore(Path(notes_dir) / "clinical_notes.json")
-    graph = build_graph(fhir, notes_store)
+
+    # ACL-aware recording: cases that pin a non-admin `as_user` need an
+    # `AssignmentStore` so the per-tool gate has a known panel to filter
+    # against. Build a fresh in-memory store per case so two ACL cases can't
+    # contaminate each other's panel cache. For admin / unspecified cases,
+    # pass None — `access_control.get_panel_for_user` short-circuits to
+    # panel=None and behavior matches every existing snapshot recording.
+    assignments_store = None
+    if case.as_user or case.assignments:
+        from app.assignments_db import AssignmentStore  # local to keep gate-path light
+        assignments_dir = tempfile.mkdtemp(prefix="eval-assignments-")
+        assignments_store = AssignmentStore(Path(assignments_dir) / "assignments.db")
+        for pid, prac_id in case.assignments.items():
+            assignments_store.upsert(
+                patient_id=pid, practitioner_id=prac_id, assigned_by="eval-runner",
+            )
+        # The access_control module caches panels in a process-global dict;
+        # clear it so this recording doesn't see leftovers from a prior case.
+        from app import access_control  # local for the same reason
+        access_control.invalidate_panel()
+
+    graph = build_graph(fhir, notes_store, assignments_store=assignments_store)
 
     state: AgentState = {
         "messages": [],
         "conversation_sources": [],
         "patient_id": None,
         "validation_attempts": 0,
-        # Eval replays should see every patient regardless of ACL — they're
-        # testing agent behavior, not access control. Pin "admin" so the
-        # access_control gate returns panel=None (no filter).
-        "username": "admin",
+        # Default "admin" preserves the prior "see every patient" behavior
+        # for cases that don't pin `as_user`. ACL-aware cases override this
+        # via `as_user` to record the agent under a specific user's panel.
+        "username": case.as_user or "admin",
     }
 
     turns_out: list[Turn] = []
