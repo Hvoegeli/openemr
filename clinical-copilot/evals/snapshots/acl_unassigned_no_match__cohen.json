@@ -1,0 +1,40 @@
+{
+  "case_id": "acl_unassigned_no_match",
+  "patient_id": "cohen",
+  "recorded_at": "2026-05-03T01:02:19+00:00",
+  "agent_sha": "2b4ec6701",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "Catch me up on Cohen.",
+      "tool_calls": [
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Cohen"
+          },
+          "result_data": {
+            "found": false,
+            "query": "Cohen"
+          },
+          "result_sources": []
+        },
+        {
+          "name": "current_time",
+          "args": {},
+          "result_data": {
+            "iso_datetime": "2026-05-03T01:02:16+00:00",
+            "date": "2026-05-03",
+            "weekday": "Sunday",
+            "timezone": "UTC"
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "No patient matching \"Cohen\" was found in the chart. It's possible the name is spelled differently or the patient is under a different last name.\n\n- Could you double-check the spelling or provide an alternate name/patient ID?\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [],
+  "validation_attempts": 0,
+  "schema_version": 1
+}
