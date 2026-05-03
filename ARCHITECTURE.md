@@ -42,7 +42,7 @@ What is actually shipped tonight versus aspirational, organized by sprint gate:
 | **Streaming** | ✅ token-by-token SSE via `astream_events`; tool-progress events drive UI status pills | — | — |
 | **Dashboard UI** | ✅ 2-pane layout: tabs (Today's Calendar default → Patient Card → Supporting Documents) on left, chat on right; doc viewer overlay with Close button | ✅ post-MVP: Clinical Notes tab with shift-aware drafts + per-shift addenda; finalize pushes structured vitals (HR/BP/SpO2/Temp/RR) into OpenEMR's `form_vitals` via the standard `/api/` write surface (note *prose* still local JSON, FHIR `DocumentReference` write deferred); Vital Trends page (`/vital-trends/{id}`) with snapshot card + per-vital charts; Recent Vitals grouped + collapsed to most-recent (older readings via Trends); Sources-cited footer removed | — |
 | **Dashboard cache + prewarm** | ✅ in-process TTL cache (5-min); lifespan prewarms calendar + every patient on it; warm calendar/card/documents endpoints ~10ms | + event-driven invalidation on chart writes | + Redis for cross-machine cache |
-| Audit log | ❌ in-memory session dict only; no audit-log writes yet | ✅ post-MVP: SQLite-backed durable trace store at `data/traces.db` ([observability_db.py](clinical-copilot/app/observability_db.py)) — every `/chat` request flushes one row with request_id, session, username, full tool events (incl. patient_id, args, sources returned), validator outcome, tokens + cost; survives restart; surfaced via `/observability` + `/api/traces` | + retention enforcement (90d chats / 7y audit) + Postgres swap for multi-host + per-tool patient-panel ACL |
+| Audit log | ❌ in-memory session dict only; no audit-log writes yet | ✅ post-MVP: SQLite-backed durable trace store at `data/traces.db` ([observability_db.py](clinical-copilot/app/observability_db.py)) — every `/chat` request flushes one row with request_id, session, username, full tool events (incl. patient_id, args, sources returned), validator outcome, tokens + cost; survives restart; surfaced via `/observability` + `/api/traces` | + retention enforcement (90d chats / 7y audit) + Postgres swap for multi-host |
 | **In-app observability dashboard** | — | ✅ `/observability` page + `/api/traces` endpoint; per-request latency, tokens, $ cost, tool events, validator outcome | — |
 | LangSmith observability | ❌ env wired, integration not active | ✅ post-MVP: env wired AND active in Hetzner production (`LANGSMITH_TRACING=true` + valid key); traces every node + tool + token + cost via langchain-anthropic auto-tracing — every chat turn streams a span tree to https://smith.langchain.com under project `agent_forge` | — |
 | Sessions / conversation history | in-memory dict (MVP) | in-memory dict (durability landed Sun) | ✅ durable SQLite session store + auth-events log ([app/auth_db.py](clinical-copilot/app/auth_db.py)); 30-min idle / 12-hr absolute timeouts; admin revocation; + Postgres swap for multi-host |
@@ -108,7 +108,9 @@ Everything below ships on master via the `clinical-notes-2 → master` merge.
 
 - **`clinical_flags` tool — chart-internal rule engine.** New tool ([app/agent/clinical_flags.py](clinical-copilot/app/agent/clinical_flags.py)) surfaces well-known **fact pairs** drawn from data already in the chart — e.g. "metformin prescribed AND eGFR <30", "warfarin AND INR >4", "Bactrim AND documented sulfa allergy." Five rules at launch, each implemented as a pure function of the chart slice (active meds + recent labs + active problems + allergies). Each flag emits a `summary` carrying inline `[ResourceType/ID]` citations and an `evidence` list — the citation validator accepts the references without retry. **The agent surfaces the pair; it does NOT recommend an action.** When `clinical_flags` returns no flags, the agent must say so plainly ("none of the rule-set's narrow patterns fired"), not imply the chart is safe. This is the spec's "domain constraint enforcement" requirement satisfied conservatively — surfacing facts vs recommending decisions. R2 in the system prompt updated accordingly: training-derived clinical reasoning is still forbidden, but quoting `clinical_flags` output is now the canonical path. Adding a rule requires (a) a pure-function rule, (b) paired eval cases that both fire and don't fire, (c) defensibility against a "this fired wrongly" complaint — see the module docstring.
 
-- **Verification scope clarified explicitly.** Two new defense paragraphs in §8 below: (a) why agent-side patient-scope filtering is honestly out of scope for the sprint (we inherit OpenEMR's per-user ACLs at login, pin identity into every audit row, but the agent's OAuth client is single-tenant), (b) the `clinical_flags` rule engine is the chart-internal answer to the brief's "domain constraints" requirement — bigger drug-interaction database integration (FDB, RxNorm-DDI) remains a follow-up.
+- **Verification scope clarified explicitly.** Two new defense paragraphs in §8 below: (a) the patient-panel ACL is implemented in three layers (calendar filter, per-patient endpoint gate with audit trail, agent-tool dispatch gate) backed by a co-pilot-side assignment store + admin UI — we discovered mid-sprint that OpenEMR's UI doesn't write to FHIR `Patient.generalPractitioner`, so a FHIR-search-based filter would have returned empty regardless of operator action, (b) the `clinical_flags` rule engine is the chart-internal answer to the brief's "domain constraints" requirement — bigger drug-interaction database integration (FDB, RxNorm-DDI) remains a follow-up.
+
+- **Per-tool patient-panel ACL ([app/access_control.py](clinical-copilot/app/access_control.py)).** New module resolves a per-user `frozenset[str]` panel keyed on a `USERNAME_TO_PRACTITIONER` map (admin bypasses with `panel=None`). Source of truth is [app/assignments_db.py](clinical-copilot/app/assignments_db.py) — a SQLite-backed `patient_assignments` table sharing the same DB file as the trace + auth stores. Three enforcement layers in [app/main.py](clinical-copilot/app/main.py) and [app/agent/graph.py](clinical-copilot/app/agent/graph.py): (1) `/api/calendar/today` filters its patient list and uses a panel-content-keyed cache so two users with the same allow-list share compute; (2) every `/api/patient/{id}/...` endpoint calls `_check_patient_access` which 404s + writes a `patient_access_denied` row to `auth_events` on a panel mismatch (404 not 403, so the response is indistinguishable from a typo and panel boundaries don't leak); (3) the agent's `dispatch` raises `PatientAccessDenied` for the six patient-id-taking tools, translated into a "found:false" tool message by `execute_tools`. New admin endpoints `GET / POST /api/admin/patient-assignments` plus a "Patient assignments" panel on `/admin` let admins reassign patients and the affected user's cached panel + cached calendar are invalidated immediately. Closes the original "Sunday work: per-tool patient-panel ACL" line in §1.1 / §4.3.
 
 ## 2. System context
 
@@ -196,8 +198,8 @@ Cross-cutting:
 
 ### 4.3 Authorization, audit, HIPAA
 
-- **App-layer auth (shipped MVP, hardened post-MVP).** A cookie-backed session validates credentials against OpenEMR's password-grant OAuth at login, and every data endpoint plus the `/chat` SSE stream requires an authenticated session. The original Thursday gap ("anyone with the URL can `/chat`") is closed. **Per-tool patient-panel scoping is still Sunday work** — the tools currently trust the session, not a per-tool ACL on patient IDs.
-- **Audit log (SQLite-backed durable record, shipped post-MVP).** Every chat request finalizes into a `RequestTrace` and writes a single row to `data/traces.db` ([clinical-copilot/app/observability_db.py](clinical-copilot/app/observability_db.py)) — request_id, session_id, username, model, started/finished timestamps, all tool events (name, args, patient_id, sources returned, latency, error), all LLM events (tokens, cost), validator attempts and final pass/fail. Indexed on `started_at DESC` and `(username, started_at)`. Survives `systemctl restart` and full-host reboot. Surfaced through `/observability` + `/api/traces` for the in-app dashboard, and queryable directly with `sqlite3 data/traces.db`. This is the structural answer to HIPAA's `§164.312(b)` audit-controls requirement at single-process scale; production multi-host deployment swaps SQLite for Postgres but the data shape and write site stay the same. OpenEMR's FHIR layer doesn't audit-log API calls consistently ([AUDIT.md §5.1](AUDIT.md#51-audit-logging--partial)) so we own this entirely. **Sunday work:** retention enforcement (90d chats / 7y audit) + Postgres swap for multi-host; per-tool patient-panel ACL on top of the session check.
+- **App-layer auth (shipped MVP, hardened post-MVP).** A cookie-backed session validates credentials against OpenEMR's password-grant OAuth at login, and every data endpoint plus the `/chat` SSE stream requires an authenticated session. The original Thursday gap ("anyone with the URL can `/chat`") is closed. **Per-tool patient-panel ACL shipped Sunday** ([app/access_control.py](clinical-copilot/app/access_control.py)) — calendar, per-patient endpoints, and every patient-id-taking agent tool now gate against a per-user panel sourced from a co-pilot-side assignment store; admin-only `/admin` UI maintains assignments. See §8.3 for the OpenEMR FHIR-mapping gap that drove the design.
+- **Audit log (SQLite-backed durable record, shipped post-MVP).** Every chat request finalizes into a `RequestTrace` and writes a single row to `data/traces.db` ([clinical-copilot/app/observability_db.py](clinical-copilot/app/observability_db.py)) — request_id, session_id, username, model, started/finished timestamps, all tool events (name, args, patient_id, sources returned, latency, error), all LLM events (tokens, cost), validator attempts and final pass/fail. Indexed on `started_at DESC` and `(username, started_at)`. Survives `systemctl restart` and full-host reboot. Surfaced through `/observability` + `/api/traces` for the in-app dashboard, and queryable directly with `sqlite3 data/traces.db`. This is the structural answer to HIPAA's `§164.312(b)` audit-controls requirement at single-process scale; production multi-host deployment swaps SQLite for Postgres but the data shape and write site stay the same. OpenEMR's FHIR layer doesn't audit-log API calls consistently ([AUDIT.md §5.1](AUDIT.md#51-audit-logging--partial)) so we own this entirely. **Open follow-ups:** retention enforcement (90d chats / 7y audit) + Postgres swap for multi-host.
 - **PHI handling.** Demo data only for the sprint. In production: BAA with the LLM provider (Anthropic offers BAAs via AWS Bedrock); HIPAA-grade hosting (neither the original Fly.io plan nor the current Hetzner host carries a BAA — production must relocate); secrets in a managed secret store, not env files; TLS everywhere.
 
 ### 4.4 Verification — the differentiator
@@ -400,20 +402,36 @@ The brief asks for "domain constraints and architectural boundaries that
 reflect deliberate scope decisions." Three choices below were made on purpose
 — not deferred — and the rationale is structural rather than calendar-driven.
 
-**1. Authorization scope is inherited from OpenEMR, not re-implemented in
-the agent.** A hospital deployment's "doctor X can see patient Y" rules are
-already enforced by OpenEMR's ACL layer at the FHIR-server boundary: the
-client_credentials caller our agent uses gets back exactly the resources the
-acting user is permitted to read, no more. We do not re-check scope in the
-agent itself. Re-implementing patient-scope filtering inside the agent would
-create a second source of truth for ACLs that drifts from OpenEMR's, which is
-worse than relying on a single enforcement point that the hospital's
-compliance team already audits. The agent does carry identity through every
-turn — sessions and auth events are persisted in
-[app/auth_db.py](clinical-copilot/app/auth_db.py) and per-request traces in
-[app/observability_db.py](clinical-copilot/app/observability_db.py), both
-keyed by authenticated username, so the audit trail is complete; we just do
-not *re-decide* what the user is allowed to see.
+**1. Patient-panel ACL — co-pilot owns the assignment table because
+OpenEMR's UI doesn't write the FHIR field.** The original plan was to
+inherit "doctor X can see patient Y" from OpenEMR's FHIR ACL layer
+(`?general-practitioner=Practitioner/{id}` filter at the search
+boundary). On Sunday we discovered that OpenEMR's Demographics →
+Provider UI does **not** populate FHIR `Patient.generalPractitioner` —
+patients edited via OpenEMR show `generalPractitioner: []` in every
+FHIR response, so a FHIR-search-based filter returns empty for every
+non-admin user no matter how the operator uses OpenEMR. Until that
+mapping gap closes upstream, the co-pilot owns assignments end-to-end:
+[app/assignments_db.py](clinical-copilot/app/assignments_db.py) holds
+a `patient_assignments` SQLite table, [app/access_control.py](clinical-copilot/app/access_control.py)
+resolves a per-user panel from it (cached 5 min), and the admin UI at
+[app/web/admin.html](clinical-copilot/app/web/admin.html) is the only
+legal mutation point. The gate is enforced in three layers: the
+calendar endpoint filters its patient roster, every per-patient
+endpoint (`/api/patient/{id}/...`) returns 404 + writes a
+`patient_access_denied` row to `auth_events` on a panel mismatch, and
+the agent's tool dispatch raises `PatientAccessDenied` for
+patient-id-taking tools — translated by `execute_tools` into a
+"found:false"-shaped tool message so panel boundaries don't leak
+through the chat surface. **Tradeoff acknowledged:** we now have two
+sources of truth (OpenEMR's UI Provider field and the co-pilot's
+`patient_assignments`) for the same logical concept. Production
+deployment would either patch OpenEMR's FHIR Patient mapper upstream
+or wire the admin endpoint to fan out a FHIR PUT after every local
+write so the co-pilot table stays the cache and OpenEMR stays
+authoritative. Identity-side state (sessions, auth events, per-request
+traces) remains keyed by the authenticated OpenEMR username — that
+half is unchanged.
 
 **2. Advisory drug-interaction logic is out of scope; `clinical_flags` is
 deliberately a fact-pairing tool, not a recommender.** The earlier plan
@@ -456,7 +474,7 @@ gap. See [USERS.md](USERS.md) for the matching change in the use-case story.
 | Architecture defense | 2026-04-27 evening | This doc + presearch.md + verbal walkthrough | ✅ delivered |
 | **MVP** | **2026-04-28 (Tue) 11:59 PM CT** | Forked OpenEMR + publicly accessible deploy + AUDIT + USERS + ARCHITECTURE + 3-5 min demo. Working agent is a *bonus* (not required by the brief — Thursday's gate). | ✅ this submission |
 | Early submission | 2026-04-30 (Thu) 11:59 PM CT | Working agent deployed on same infra as OpenEMR + eval suite (snapshot+replay gate as prek pre-push hook) + per-request observability dashboard (`/observability` + `/api/traces`) + LangSmith active in production + app-layer auth + durable SQLite trace store + Bedrock-ready provider switch + deterministic intent router + Clinical Notes tab with vitals round-trip. | ✅ shipped |
-| Final | 2026-05-03 (Sun) | + durable server-side sessions ([app/auth_db.py](clinical-copilot/app/auth_db.py)) with idle/absolute timeouts + admin-driven revocation + auth-events audit log + admin oversight page + `clinical_flags` rule engine + cost analysis with per-tier architectural notes + scope-defense docs. **Use Case B (advisory med-safety) and the previously-planned agent-generated sign-out document were both deliberately scoped out** — see §8 for rationale. **Deferred:** prompt caching (§8.2 — current prompt below Sonnet 4.6's empirical cacheable threshold). | ✅ shipped |
+| Final | 2026-05-03 (Sun) | + durable server-side sessions ([app/auth_db.py](clinical-copilot/app/auth_db.py)) with idle/absolute timeouts + admin-driven revocation + auth-events audit log + admin oversight page + `clinical_flags` rule engine + cost analysis with per-tier architectural notes + scope-defense docs + **per-tool patient-panel ACL** ([app/access_control.py](clinical-copilot/app/access_control.py) + [app/assignments_db.py](clinical-copilot/app/assignments_db.py) + admin UI panel) — calendar / per-patient endpoint / agent-tool gates all source from a co-pilot-side assignment store because OpenEMR's UI doesn't populate FHIR `Patient.generalPractitioner` (see §8.3). **Use Case B (advisory med-safety) and the previously-planned agent-generated sign-out document were both deliberately scoped out** — see §8 for rationale. **Deferred:** prompt caching (§8.2 — current prompt below Sonnet 4.6's empirical cacheable threshold). | ✅ shipped |
 
 **MVP-day decision log** (things not visible in the design but worth stating for the interview):
 
@@ -474,7 +492,7 @@ Likely questions and the short answer for each:
 |---|---|
 | "Why a chat agent and not a dashboard?" | Doctors ask follow-ups ("show me the trend"; "what's he on that affects K?"). A dashboard can't anticipate the thread. |
 | "How do you stop hallucinations?" | Architectural: every claim must trace to a tool result. A validator rejects the response if a citation is missing or invalid. The LLM cannot lie about chart contents because it cannot bypass the structural gate. |
-| "What about privacy/HIPAA?" | OpenEMR's ACL layer enforces patient scope at the FHIR-server boundary — we inherit it rather than re-implement it (see §8.3). Durable session store with idle + absolute timeout, append-only audit log of every chart access keyed by username, Bedrock provider switch wired for BAA-grade routing, synthetic data only in the sprint demo. |
+| "What about privacy/HIPAA?" | Per-tool patient-panel ACL ([app/access_control.py](clinical-copilot/app/access_control.py)) gates the calendar, every per-patient endpoint, and every patient-id-taking agent tool against a per-user panel — admin maintains assignments through `/admin`; non-admin users only see what's been assigned to them (see §8.3 for why we own the assignment table vs inheriting from OpenEMR FHIR). Durable session store with idle + absolute timeout, append-only audit log of every chart access (and every denial) keyed by username, Bedrock provider switch wired for BAA-grade routing, synthetic data only in the sprint demo. |
 | "How does this scale to 300 concurrent doctors?" | FastAPI is async; FHIR calls parallelize; prompt caching is teed up (§8.2). At 300 concurrent the bottleneck is the FHIR backend, not us — see §6.3 cost-model "bottleneck shift." The current single-host Hetzner deploy is sized for sprint demo; production moves to a horizontally-scaled deployment behind a managed Postgres. |
 | "Why LangGraph and not OpenAI SDK / DSPy / a custom loop?" | We need an explicit verification node between LLM and user. LangGraph's state-machine model makes that gate first-class; AgentExecutor hides it; raw SDK reinvents it. |
 | "What happens when the LLM is wrong?" | Two structural layers: (1) the citation validator rejects any claim whose `[ResourceType/id]` does not appear in the cumulative tool-output set; (2) `clinical_flags` returns chart-internal fact pairs with pre-validated citations rather than training-derived advice (§8.3). The doctor sees every citation inline and one click jumps them to the chart record. |
