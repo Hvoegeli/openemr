@@ -1,0 +1,88 @@
+{
+  "case_id": "time_window_delta_6h",
+  "patient_id": "cohen",
+  "recorded_at": "2026-05-03T15:10:31+00:00",
+  "agent_sha": "e1c1db3",
+  "model": "claude-sonnet-4-6",
+  "turns": [
+    {
+      "user_msg": "What's changed for Cohen in the last 6 hours? Anything new?",
+      "tool_calls": [
+        {
+          "name": "current_time",
+          "args": {},
+          "result_data": {
+            "iso_datetime": "2026-05-03T15:10:20+00:00",
+            "date": "2026-05-03",
+            "weekday": "Sunday",
+            "timezone": "UTC"
+          },
+          "result_sources": []
+        },
+        {
+          "name": "resolve_patient",
+          "args": {
+            "query": "Cohen"
+          },
+          "result_data": {
+            "found": true,
+            "patient_id": "a1a7ed4d-f176-4e2c-bfb9-3f94b046d678",
+            "name": "Nora Cohen",
+            "alternatives": []
+          },
+          "result_sources": [
+            "Patient/a1a7ed4d-f176-4e2c-bfb9-3f94b046d678"
+          ]
+        },
+        {
+          "name": "get_observations_24h",
+          "args": {
+            "patient_id": "a1a7ed4d-f176-4e2c-bfb9-3f94b046d678",
+            "hours": 6
+          },
+          "result_data": {
+            "window_hours": 6,
+            "cutoff_iso": "2026-05-03T09:10:26Z",
+            "count": 0,
+            "observations": []
+          },
+          "result_sources": []
+        },
+        {
+          "name": "get_notes_24h",
+          "args": {
+            "patient_id": "a1a7ed4d-f176-4e2c-bfb9-3f94b046d678",
+            "hours": 6
+          },
+          "result_data": {
+            "window_hours": 6,
+            "cutoff_iso": "2026-05-03T09:10:27Z",
+            "count": 0,
+            "documents": []
+          },
+          "result_sources": []
+        },
+        {
+          "name": "get_med_changes_24h",
+          "args": {
+            "patient_id": "a1a7ed4d-f176-4e2c-bfb9-3f94b046d678",
+            "hours": 6
+          },
+          "result_data": {
+            "window_hours": 6,
+            "cutoff_iso": "2026-05-03T09:10:27Z",
+            "count": 0,
+            "medications": []
+          },
+          "result_sources": []
+        }
+      ],
+      "final_response": "Nothing new in the last 6 hours (since ~09:10 UTC) for **Nora Cohen** [Patient/a1a7ed4d-f176-4e2c-bfb9-3f94b046d678]:\n\n- **Labs/vitals:** No new observations recorded.\n- **Notes:** No new clinical notes or documents.\n- **Medications:** No new orders, dose changes, or holds.\n\nThe chart is quiet for this window. If you'd like, I can pull a broader window (e.g., last 24 hours) or run a full chart summary.\n\nFor clinician judgment; verify before acting."
+    }
+  ],
+  "conversation_sources": [
+    "Patient/a1a7ed4d-f176-4e2c-bfb9-3f94b046d678"
+  ],
+  "validation_attempts": 0,
+  "schema_version": 1
+}

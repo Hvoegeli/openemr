@@ -270,3 +270,37 @@ cases:
   - user_msg: "Catch me up on Cohen."
   patient_selector: {ids: [cohen]}
   applies_rules: [A1, A2, A4, A5, C3, H1, H2]
+
+# ── Use Cases D, E, F (chart-summary variants over the time-windowed tools) ─
+# Locks in the use-case enumeration in USERS.md §"Use cases":
+#   D = 24h lab trend review        → exercises get_observations_24h
+#   E = overnight handoff brief     → exercises get_notes_24h + get_med_changes_24h + get_observations_24h
+#   F = doctor-specified time-delta → exercises the same time-windowed tools with hours=N
+# Each case is one turn against Cohen (the richest demo patient — has_meds,
+# has_complex_med_list, has_active_encounter). Tools landed in 6b886723f
+# (2026-04-30); these cases provide the "shipped, gate-protected" evidence.
+
+- id: lab_trend_24h_drift
+  description: 24h lab trend review (Use Case D). Agent should pull recent observations and surface what changed, citing each value.
+  turns:
+  - user_msg: "Pull the last 24 hours of labs for {patient.lname} and tell me which ones drifted."
+  patient_selector: {ids: [cohen]}
+  applies_rules: [A1, A2, A3, C3, E1, E2, H1, H2]
+  must_match_regex:
+  - {pattern: 'lab|observation|sodium|potassium|creatinine|glucose|hemoglobin|wbc|platelet', reason: "Response to a 24h-labs question should reference at least one specific lab name (or 'lab' / 'observation')."}
+
+- id: overnight_watch_brief
+  description: Overnight handoff brief (Use Case E). Agent surfaces nursing notes + med changes + observation drift; never tells the night team what to do.
+  turns:
+  - user_msg: "What does the night team need to keep an eye on for {patient.lname} overnight?"
+  patient_selector: {ids: [cohen]}
+  applies_rules: [A1, A2, C3, E1, E2, H1, H2]
+  must_not_match_regex:
+  - {pattern: '\b(you should|i recommend|we recommend|i suggest|we suggest|i would recommend)\b', reason: "Use Case E forbids advisor-voice phrasing — surface chart facts, never tell the night team what to do."}
+
+- id: time_window_delta_6h
+  description: Time-window delta (Use Case F). User specifies a 6-hour window; agent should pass hours=6 to time-windowed tools and answer with citations.
+  turns:
+  - user_msg: "What's changed for {patient.lname} in the last 6 hours? Anything new?"
+  patient_selector: {ids: [cohen]}
+  applies_rules: [A1, A2, C3, E1, E2, H1, H2]

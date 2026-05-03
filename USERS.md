@@ -66,19 +66,17 @@ Every agent capability in `ARCHITECTURE.md` traces back to one of these.
 
 **Why an agent (not a dashboard):** the doctor's *next* question is unpredictable. After "catch me up", they often want "what was her creatinine trend?", "what did the night resident hold and why?", "did anyone document the chest pain plan?". A dashboard pre-decides what to show and gets it 70% right; an agent reads the chart in response to *this* doctor's *this* question. The right altitude is conversational.
 
-**Status:** implemented for MVP demo against Cohen; tools are `current_time`, `resolve_patient`, `get_patient_card`. Time-windowed tools (24h obs / notes / med changes) are Thursday work.
+**Status:** shipped. Tools: `current_time`, `resolve_patient`, `get_patient_card`. Gate-protected by labeled eval cases in [evals/cases/](clinical-copilot/evals/cases/).
 
-### Use Case B — Medication safety check
+### Use Case B — Medication safety check (scope-deferred by design)
 
 > "Is it safe to start Bactrim on Cohen?"
->
-> "Does her CKD change my Lasix dose?"
 
-**What it does:** given a proposed medication and the current patient context, returns a cited safety verdict — checking allergies, current med interactions, renal/hepatic dose-adjustment thresholds, and active problem list flags. Distinguishes "yes" / "no, here's why" / "insufficient evidence — verify X".
+**What it does (in principle):** given a proposed medication and current patient context, returns a cited safety verdict — checking allergies, current med interactions, renal/hepatic dose-adjustment thresholds, and active problem list flags.
 
-**Why an agent (not a static interaction checker):** modern interaction databases tell the doctor "potential moderate interaction with warfarin" — that's noise for someone already prescribing 12 chronic meds. The hospitalist needs *this patient's* answer, weighing *this patient's* labs and allergies. The conversational interface lets them push back ("ignore the warfarin interaction — I'm aware, just check renal dose") and get a focused answer.
+**Why this is deferred, not in flight:** giving the doctor a "yes, this drug is safe for this patient" answer is **clinical advice**, not chart summarization. A confidently-wrong safety verdict in a hospital workflow can harm a patient — even with a real interactions database (FDB / RxNorm-DDI), the app would still be giving advice the doctor must verify, while creating the *appearance* of verified safety. We chose not to ship a half-trustworthy version. See ARCHITECTURE.md §8 for the full scope-defense rationale.
 
-**Status:** Thursday work. Requires a `clinical_rules` tool (not yet built — system prompt currently forbids the LLM from inventing rules from training to avoid the failure mode the brief warns about).
+**Status:** deliberately scoped out. The system prompt's R2 rule ("no clinical reasoning beyond tool output") is the runtime enforcement of this decision; the architectural enforcement is to never build the tool in the first place. Use Cases D–G cover the chart-summarization moments the hospitalist hits during the same workflow without crossing into advisory territory.
 
 ### Use Case C — End-of-shift clinical notes (with vitals round-trip)
 
@@ -92,15 +90,67 @@ Every agent capability in `ARCHITECTURE.md` traces back to one of these.
 
 **Status:** shipped on master post-MVP. Vitals push uses a separate write-capable OAuth client; the chat agent itself remains read-only against FHIR.
 
-**Note on sign-out / handoff:** drafting a per-patient sign-out *as a separate document* was previously scoped as Use Case C and was dropped. The Clinical Notes tab covers the same end-of-shift moment from a different angle — the doctor still has to chart and sign in OpenEMR's own workflow either way, and a parallel agent-generated draft would diverge from the legal record. We took the agent out of the sign-out path on purpose.
+**Note on sign-out / handoff:** drafting a per-patient sign-out *as a separate document* was previously scoped here and was dropped. The Clinical Notes tab covers the same end-of-shift moment from a different angle — the doctor still has to chart and sign in OpenEMR's own workflow either way, and a parallel agent-generated draft would diverge from the legal record. We took the agent out of the sign-out path on purpose.
+
+### Use Case D — 24-hour lab trend review
+
+> "What's her potassium trend this admission?"
+>
+> "Pull the last 24 hours of labs and tell me which ones drifted."
+
+**What it does:** retrieves time-windowed Observations (labs + vitals) for one patient and surfaces what changed against earlier values. Cited per-result so the doctor can verify each datum.
+
+**Why an agent (not a chart-review tab):** the doctor doesn't want every value — they want the **drifters**. An agent reads the window, identifies movement, and presents only what's clinically interesting; a tab would force the doctor to scroll past 200 normals to find the 3 that moved. The conversational follow-up matters too: "show me the trend for sodium specifically" is one turn, not a UI re-query.
+
+**Status:** shipped. Tools: `get_observations_24h`, `get_vital_trends`. Time window is configurable (`hours` parameter, default 24).
+
+### Use Case E — Overnight watch handoff brief
+
+> "Tell me what I'm walking into for Cohen overnight."
+>
+> "What does the night team need to keep an eye on for bed 412?"
+
+**What it does:** synthesizes recent nursing notes, new med starts/changes, and recent observation drift into a focused **what-to-watch-tonight** brief on a single patient. Surfaces the chart facts the night team would otherwise have to dig for; never tells the night team what to *do* about them.
+
+**Why an agent (not a structured handoff template):** the chart facts that matter for *this* patient overnight are different every shift — sometimes it's a new pressor, sometimes a hold-and-recheck on potassium, sometimes a behavioral plan. A template makes the doctor fill 14 fields most of which are blank; the agent reads the chart and pulls only what the night team would actually need to see.
+
+**Status:** shipped. Tools: `get_notes_24h`, `get_med_changes_24h`, `get_observations_24h`. Output is a chart summary — clinical decisions stay with the night team.
+
+### Use Case F — Time-window delta ("what's changed since…")
+
+> "What's changed for Cohen since I rounded yesterday morning?"
+>
+> "Pull the last 6 hours on Patel — anything new?"
+
+**What it does:** runs the same delta synthesis as Use Case A but against a doctor-specified time window — supports mid-shift "what just happened?" check-ins and post-procedure "did anything I missed change?" recovery.
+
+**Why an agent (not a fixed-window dashboard):** time windows that matter aren't always 24h — a doctor returning from a 3h procedure wants 3h, a doctor coming back from days off wants 72h. The agent takes the window from the question.
+
+**Status:** shipped. Tools: time-windowed variants (`get_observations_24h(hours=N)`, `get_notes_24h(hours=N)`, `get_med_changes_24h(hours=N)`).
+
+### Use Case G — Daily list / panel overview
+
+> "Walk me through my list today."
+>
+> "Who's on my panel right now?"
+
+**What it does:** pulls today's calendar (only patients on this doctor's panel, enforced by ACL), and on follow-up turns walks the doctor through one-card-per-patient summaries. Built on the same per-tool ACL that prevents cross-panel leakage.
+
+**Why an agent (not a static patient list view):** a list view shows names. An agent shows names *and* answers the next question — "who's the new admission?", "skip the discharges, just show the actives", "who has overnight changes?" — without making the doctor open 14 tabs.
+
+**Status:** shipped. Tools: `get_calendar_today` plus per-patient calls, all gated by the panel ACL ([app/access_control.py](clinical-copilot/app/access_control.py)). Demonstrates the patient-panel ACL feature end-to-end.
 
 ## What "useful" looks like — measurable bar per use case
 
 | Use case | Doctor's success criterion | Architectural gate (see ARCHITECTURE.md §eval) |
 |---|---|---|
 | A — Pre-round | Reads it in <30s, trusts every claim, cuts review time per patient by ≥60%. | Citation integrity ≥99%; refusal rather than guess on missing fields. |
-| B — Med safety | Returns a verdict in <15s, flags every contraindication present in the chart, never invents one. | Recall ≥95% on adjudicated unsafe combos; precision ≥90% on flagged unsafe. |
+| B — Med safety | n/a — deliberately not shipped (see §8). | n/a — no `clinical_rules` tool exists; system prompt R2 forbids the LLM from supplying advice. |
 | C — Clinical notes | Vitals round-trip to OpenEMR on finalize; note prose appears in Supporting Documents next click. | Successful FHIR write on ≥95% of finalize events; finalize is idempotent on retry. |
+| D — Lab trend review | Surfaces only the drifters in the requested window; cites every value. | Citation integrity ≥99% on labeled cases; honors the `hours` parameter. |
+| E — Overnight handoff | Brief covers nursing notes + med changes + observation drift; never tells the night team what to *do*. | R2 (no clinical reasoning) check passes on labeled cases; no "should" / "recommend" language in output. |
+| F — Time-window delta | Honors the doctor-specified window (`hours=N`); defaults to 24h on missing window. | Tool args reflect requested window in ≥95% of labeled cases. |
+| G — Panel overview | Calendar respects the doctor's panel ACL — no cross-panel leakage. | ACL eval cases pass: empty panel returns no_match; populated panel returns cited summary. |
 
 ## Why the doctor would choose this (the real test)
 
@@ -108,8 +158,12 @@ The brief's bar: *"the agent is the thing the user would actually choose."*
 
 The case for our hospitalist:
 - **A** saves 20–30 minutes pre-round, which is real time on a long shift.
-- **B** prevents a category of errors that cause real harm (Bactrim → Sulfa allergy is a textbook avoidable adverse event).
 - **C** removes the typing pain from end-of-shift charting and gets vitals into the EHR with one click instead of three.
+- **D** answers "what's drifting?" without forcing the doctor to scroll past 200 normals to find the 3 that moved.
+- **E** turns the start of every overnight shift into a focused brief instead of a 14-tab dig.
+- **F** handles the "I stepped away for 3 hours, what changed?" question with the right window — not always 24h.
+- **G** turns the doctor's panel into a conversation: walk the list, drill into anyone, never leak across panels (ACL-enforced).
+- **B** is the one we deliberately don't do — see §8 and the per-use-case rationale above. The right answer to a med-safety question is "verify in the chart and use your judgment," not "the agent says it's fine."
 
 The case against (and our answer):
 - *"It will hallucinate and I will catch hell for it."* The verification layer is structural, not best-effort: claims that can't trace to a chart record are rejected before they reach the user, and the system says "insufficient evidence" instead of inventing.
