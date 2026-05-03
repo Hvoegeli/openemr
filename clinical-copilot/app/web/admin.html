@@ -140,6 +140,24 @@
     </div>
 
     <div class="section">
+      <h2>Patient assignments</h2>
+      <div class="subtitle">
+        Per-patient provider assignment. Each row's dropdown picks which
+        OpenEMR Practitioner sees the patient on their dashboard and via
+        the chat agent. <strong>Unassigned</strong> means only admins see
+        the patient. Saving invalidates the affected user's cached panel
+        immediately.
+        <br><br>
+        Source of truth is the local <code>patient_assignments</code>
+        table in <code>data/traces.db</code>. OpenEMR's Demographics →
+        Provider field is unrelated — it doesn't propagate to FHIR
+        <code>Patient.generalPractitioner</code>, so the co-pilot owns
+        assignments end-to-end.
+      </div>
+      <div id="assignments-body"><div class="empty">Loading patient assignments…</div></div>
+    </div>
+
+    <div class="section">
       <h2>OpenEMR practitioners</h2>
       <div class="subtitle">
         Read-only view of <code>FHIR Practitioner</code>. These are the
@@ -389,9 +407,92 @@
       }
     }
 
+    // ── Patient assignments ───────────────────────────────────────────
+    let _practitionerCache = null;
+    async function _practitioners() {
+      if (_practitionerCache) return _practitionerCache;
+      const r = await fetch('/api/admin/practitioners');
+      if (!r.ok) throw new Error('practitioners HTTP ' + r.status);
+      const data = await r.json();
+      _practitionerCache = data.items || [];
+      return _practitionerCache;
+    }
+    async function loadAssignments() {
+      const body = document.getElementById('assignments-body');
+      try {
+        const [practs, r] = await Promise.all([
+          _practitioners(),
+          fetch('/api/admin/patient-assignments'),
+        ]);
+        if (!r.ok) {
+          body.innerHTML = '<div class="empty">Error: HTTP ' + r.status + '</div>';
+          return;
+        }
+        const data = await r.json();
+        if (!data.items || !data.items.length) {
+          body.innerHTML = '<div class="empty">No patients in OpenEMR.</div>';
+          return;
+        }
+        const opts = ['<option value="">— Unassigned —</option>']
+          .concat(practs.map(p => '<option value="' + escHtml(p.id) + '">' + escHtml(p.name) + '</option>'))
+          .join('');
+        const rows = data.items.map(it => {
+          const cur = it.assigned_practitioner_id || '';
+          const select = '<select data-pid="' + escHtml(it.patient_id) + '">'
+            + opts.replace(
+                'value="' + escHtml(cur) + '"',
+                'value="' + escHtml(cur) + '" selected'
+              )
+            + '</select>';
+          return ''
+            + '<tr>'
+            + '<td>' + escHtml(it.name) + '</td>'
+            + '<td class="muted" style="font-family:monospace;font-size:11px">' + escHtml(it.patient_id) + '</td>'
+            + '<td>' + select + '</td>'
+            + '<td><button class="assign-save" data-pid="' + escHtml(it.patient_id) + '" type="button">Save</button>'
+            + ' <span class="assign-status muted" data-pid="' + escHtml(it.patient_id) + '"></span></td>'
+            + '</tr>';
+        }).join('');
+        body.innerHTML = ''
+          + '<table>'
+          + '<thead><tr><th>Patient</th><th>FHIR ID</th><th>Assigned to</th><th>Action</th></tr></thead>'
+          + '<tbody>' + rows + '</tbody>'
+          + '</table>';
+        body.querySelectorAll('.assign-save').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const pid = btn.getAttribute('data-pid');
+            const sel = body.querySelector('select[data-pid="' + pid + '"]');
+            const status = body.querySelector('.assign-status[data-pid="' + pid + '"]');
+            const prac_id = sel ? sel.value : '';
+            btn.disabled = true;
+            status.textContent = 'saving…';
+            try {
+              const r = await fetch('/api/admin/patient-assignments', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ patient_id: pid, practitioner_id: prac_id || null }),
+              });
+              if (!r.ok) throw new Error('HTTP ' + r.status);
+              status.textContent = '✓ saved';
+              status.style.color = 'var(--good)';
+              setTimeout(() => { status.textContent = ''; status.style.color = ''; }, 2000);
+            } catch (e) {
+              status.textContent = '✗ ' + (e.message || e);
+              status.style.color = 'var(--error)';
+            } finally {
+              btn.disabled = false;
+            }
+          });
+        });
+      } catch (e) {
+        body.innerHTML = '<div class="empty">Error: ' + escHtml(e && e.message ? e.message : e) + '</div>';
+      }
+    }
+
     loadActiveSessions();
     loadActivity();
     loadAuthEvents();
+    loadAssignments();
     loadPractitioners();
   </script>
 </body>

@@ -19,9 +19,13 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import TYPE_CHECKING
 
 from app.auth import is_admin
 from app.fhir.client import FhirClient
+
+if TYPE_CHECKING:
+    from app.assignments_db import AssignmentStore
 
 log = logging.getLogger("agent.acl")
 
@@ -49,7 +53,9 @@ def get_practitioner_id(username: str | None) -> str | None:
 
 
 async def get_panel_for_user(
-    client: FhirClient, username: str | None,
+    client: FhirClient,
+    username: str | None,
+    assignments: "AssignmentStore | None" = None,
 ) -> frozenset[str] | None:
     """Resolve the set of patient IDs `username` is allowed to see.
 
@@ -58,8 +64,18 @@ async def get_panel_for_user(
       - `frozenset()` -> empty panel; user has no assigned patients.
       - `frozenset({pid, ...})` -> explicit allow-list of FHIR Patient IDs.
 
-    Failures (FHIR error, missing mapping for a non-admin) fail closed by
-    returning an empty panel — the user sees nothing rather than everything.
+    Source of truth: `assignments` (the co-pilot SQLite assignment store).
+    OpenEMR's Demographics → Provider UI does NOT write to FHIR
+    `Patient.generalPractitioner`, so a FHIR-search-based resolution would
+    return empty for every non-admin user no matter how the OpenEMR UI is
+    used. We bypass the FHIR field entirely until that gap closes upstream.
+
+    `client` is unused now but kept for forward-compat with a future hybrid
+    mode (read FHIR.generalPractitioner *and* the local store, union them).
+
+    Failures (missing mapping for a non-admin, no assignments_store) fail
+    closed by returning an empty panel — the user sees nothing rather than
+    everything.
     """
     if not username:
         return frozenset()
@@ -72,22 +88,13 @@ async def get_panel_for_user(
         return cached[1]
 
     prac_id = get_practitioner_id(username)
-    if not prac_id:
-        # Logged-in user with no Practitioner mapping -> sees nothing.
-        # Pre-cache so we don't hit FHIR on every request for an unmapped user.
+    if not prac_id or assignments is None:
+        # Logged-in user with no Practitioner mapping (or no store wired) ->
+        # sees nothing. Pre-cache so we don't recompute on every request.
         _PANEL_CACHE[username] = (now, frozenset())
         return frozenset()
 
-    try:
-        patients = await client.search(
-            "Patient",
-            {"general-practitioner": f"Practitioner/{prac_id}", "_count": 200},
-        )
-        panel: frozenset[str] = frozenset(p["id"] for p in patients if p.get("id"))
-    except Exception as e:  # noqa: BLE001 — fail closed, don't leak chart access on a network blip
-        log.warning("acl: panel fetch failed for user=%s: %s", username, e)
-        panel = frozenset()
-
+    panel: frozenset[str] = frozenset(assignments.patients_for_practitioner(prac_id))
     _PANEL_CACHE[username] = (now, panel)
     log.info("acl: panel for user=%s prac=%s size=%d", username, prac_id, len(panel))
     return panel

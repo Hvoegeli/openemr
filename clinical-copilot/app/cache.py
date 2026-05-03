@@ -43,6 +43,13 @@ class TTLCache:
         """Drop a single key — used after writes that change downstream data."""
         self._store.pop(key, None)
 
+    def invalidate_prefix(self, prefix: str) -> None:
+        """Drop every key starting with `prefix`. Used when one mutation
+        affects multiple cache entries (e.g. an assignment change touches
+        every user's calendar entry)."""
+        for k in [k for k in self._store if k.startswith(prefix)]:
+            self._store.pop(k, None)
+
     async def get_or_compute(
         self, key: str, compute: Callable[[], Awaitable[Any]],
     ) -> Any:

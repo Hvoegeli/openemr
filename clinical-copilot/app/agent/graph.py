@@ -115,6 +115,7 @@ def active_model_label(model_name: str) -> str:
 def build_graph(
     client: FhirClient,
     notes_store: Any,
+    assignments_store: Any | None = None,
     model_name: str = "claude-sonnet-4-6",
 ):
     """Construct the compiled LangGraph for one or more conversation turns.
@@ -124,8 +125,11 @@ def build_graph(
     user turn (the CLI/driver layer does this).
 
     `notes_store` is the `ClinicalNoteStore` instance the dispatch needs to
-    serve `get_vital_trends`. Typed loosely as `Any` so this module doesn't
-    depend on the app-level dataclass / circular-import chain.
+    serve `get_vital_trends`. `assignments_store` is the `AssignmentStore`
+    consulted by the per-tool ACL gate; passing `None` skips the gate (CLI
+    smokes / eval replays do this so they keep their prior "see all" view).
+    Both typed loosely as `Any` so this module doesn't depend on the
+    app-level dataclass / circular-import chain.
     """
     model = _build_llm(model_name)
 
@@ -157,7 +161,7 @@ def build_graph(
         # access_control module caches per-username for 5 min, so subsequent
         # tool calls in the same conversation hit the cache.
         username = state.get("username")
-        panel = await access_control.get_panel_for_user(client, username)
+        panel = await access_control.get_panel_for_user(client, username, assignments_store)
 
         for call in last.tool_calls:
             t0 = time.time()

@@ -57,6 +57,7 @@ from app.agent.intent_router import route_intent  # noqa: E402
 from app.agent.state import AgentState  # noqa: E402
 from app import access_control  # noqa: E402
 from app.auth import current_session, current_user, is_admin, require_admin, verify_openemr_credentials  # noqa: E402
+from app.assignments_db import AssignmentStore  # noqa: E402
 from app.auth_db import AuthStore  # noqa: E402
 from app.cache import TTLCache  # noqa: E402
 from app.config import settings  # noqa: E402
@@ -171,10 +172,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     notes_path = Path(os.environ.get("CLINICAL_NOTES_PATH", "data/clinical_notes.json"))
     app.state.clinical_notes = ClinicalNoteStore(notes_path)
     log.info("clinical-notes store loaded from %s (%d notes)", notes_path, len(app.state.clinical_notes._notes))
-    app.state.graph = build_graph(
-        app.state.fhir, app.state.clinical_notes, model_name=MODEL_NAME,
-    )
-    app.state.cache = TTLCache(ttl_seconds=DATA_CACHE_TTL_S)
     # Audit trail persists to SQLite so traces survive `systemctl restart`
     # and every deploy. Path is overridable for tests / alternate volumes.
     trace_db_path = Path(os.environ.get("TRACE_DB_PATH", "data/traces.db"))
@@ -185,6 +182,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     auth_db_path = Path(os.environ.get("AUTH_DB_PATH", trace_db_path))
     app.state.auth_store = AuthStore(auth_db_path)
     log.info("auth store: sqlite at %s", auth_db_path)
+    # Patient-assignment store shares the same SQLite file (separate table:
+    # `patient_assignments`). Source of truth for the per-tool ACL gate
+    # because OpenEMR's UI doesn't write to FHIR `Patient.generalPractitioner`.
+    app.state.assignments = AssignmentStore(auth_db_path)
+    log.info("assignment store: sqlite at %s", auth_db_path)
+    # build_graph AFTER assignment store so the per-tool ACL gate has its
+    # source of truth wired in.
+    app.state.graph = build_graph(
+        app.state.fhir, app.state.clinical_notes,
+        assignments_store=app.state.assignments, model_name=MODEL_NAME,
+    )
+    app.state.cache = TTLCache(ttl_seconds=DATA_CACHE_TTL_S)
 
     # Don't block startup on the prewarm — let it run while uvicorn binds.
     prewarm_task = asyncio.create_task(_prewarm_dashboard(app))
@@ -196,6 +205,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.openemr_writer.aclose()
         app.state.traces.close()
         app.state.auth_store.close()
+        app.state.assignments.close()
 
 
 app = FastAPI(title="Clinical Co-pilot", lifespan=lifespan)
@@ -781,7 +791,9 @@ async def _check_patient_access(
     leaks chart-roster information across panel boundaries. 404 matches the
     "no patient found" response a typo would get.
     """
-    panel = await access_control.get_panel_for_user(request.app.state.fhir, username)
+    panel = await access_control.get_panel_for_user(
+        request.app.state.fhir, username, request.app.state.assignments,
+    )
     if access_control.is_in_panel(panel, patient_id):
         return
     request.app.state.auth_store.log_event(
@@ -872,7 +884,9 @@ def _calendar_cache_key(panel: frozenset[str] | None) -> str:
 
 @app.get("/api/calendar/today")
 async def calendar_today(username: str = Depends(current_user)) -> dict:
-    panel = await access_control.get_panel_for_user(app.state.fhir, username)
+    panel = await access_control.get_panel_for_user(
+        app.state.fhir, username, app.state.assignments,
+    )
     cache_key = _calendar_cache_key(panel)
 
     async def _compute() -> dict:
@@ -1134,6 +1148,86 @@ async def admin_practitioners(_admin: str = Depends(require_admin)) -> dict:
             ],
         })
     return {"count": len(items), "items": items}
+
+
+class PatientAssignmentRequest(BaseModel):
+    patient_id: str
+    practitioner_id: str | None = None  # None / "" means unassign
+
+
+@app.get("/api/admin/patient-assignments")
+async def admin_patient_assignments(_admin: str = Depends(require_admin)) -> dict:
+    """List every patient with their current assigned practitioner (if any).
+
+    Joins the FHIR Patient roster (source of truth for who exists) with
+    the co-pilot's local `patient_assignments` table (source of truth for
+    who's assigned to whom — see `app.assignments_db` for why we don't
+    use `Patient.generalPractitioner` here). Returns one row per patient,
+    with `assigned_practitioner_id` null if unassigned.
+    """
+    try:
+        patients = await app.state.fhir.search("Patient", {"_count": 200})
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    current = app.state.assignments.all_assignments()  # patient_id -> prac_id
+    items: list[dict] = []
+    for p in patients:
+        pid = p.get("id")
+        if not pid:
+            continue
+        name = (p.get("name") or [{}])[0]
+        given = " ".join(name.get("given") or [])
+        family = name.get("family") or ""
+        full = (given + " " + family).strip() or "(unknown)"
+        items.append({
+            "patient_id": pid,
+            "name": full,
+            "assigned_practitioner_id": current.get(pid),
+        })
+    items.sort(key=lambda r: r["name"].lower())
+    return {"count": len(items), "items": items}
+
+
+@app.post("/api/admin/patient-assignments")
+async def admin_set_patient_assignment(
+    body: PatientAssignmentRequest,
+    admin: str = Depends(require_admin),
+) -> dict:
+    """Assign a patient to a practitioner (or clear the assignment).
+
+    Empty / null `practitioner_id` removes the assignment, restoring the
+    "no panel mapping" state. After mutation we invalidate the in-memory
+    panel cache so the affected user's next request reflects the change
+    immediately rather than waiting up to 5 min for the TTL.
+    """
+    pid = body.patient_id.strip()
+    prac_id = (body.practitioner_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="patient_id required")
+
+    if prac_id:
+        app.state.assignments.upsert(
+            patient_id=pid, practitioner_id=prac_id, assigned_by=admin,
+        )
+        action = "assigned"
+    else:
+        app.state.assignments.unassign(pid)
+        action = "unassigned"
+
+    # Drop ALL cached panels and ALL cached calendar entries — assignment
+    # changes can affect multiple users' views (the previous owner loses
+    # access; the new owner gains it). Cheap to recompute on next request.
+    access_control.invalidate_panel()
+    app.state.cache.invalidate_prefix("calendar:today:")
+    log.info(
+        "assignment %s: patient=%s practitioner=%s by=%s",
+        action, pid, prac_id or "(none)", admin,
+    )
+    return {
+        "ok": True,
+        "patient_id": pid,
+        "assigned_practitioner_id": prac_id or None,
+    }
 
 
 def _ts_iso(ts: float | None) -> str | None:
