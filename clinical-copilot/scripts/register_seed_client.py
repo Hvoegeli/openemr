@@ -61,6 +61,10 @@ SCOPES = " ".join(
         "user/Encounter.write",
         "user/Observation.read",
         "user/Observation.write",
+        # Week 2 — DocumentReference is FHIR-writable in OpenEMR; the
+        # extraction pipeline POSTs source PDFs (lab + intake forms) here.
+        "user/DocumentReference.read",
+        "user/DocumentReference.write",
     ]
 )
 
