@@ -23,7 +23,7 @@ section below):
 | Vector store | FAISS in-memory | §3 |
 | Guideline corpus | USPSTF + ADA (start) | §3 |
 | "Recommendation" tone | Level C with guardrails behind `recommendation_mode` toggle | §6 |
-| Branch | `copilot--branch-3`; no auto-merge to master | — |
+| Branch | `copilot--branch-2`; no auto-merge to master | — |
 | Doc location | `W2_ARCHITECTURE.md` at repo root | — |
 
 ---
@@ -67,6 +67,13 @@ same principle for guidelines.
 
 **TODO:** decide chunking strategy (per-recommendation vs. per-section vs.
 fixed-size with overlap). Hand-curate the source list before mass-indexing.
+
+**TODO (post-MVP fast-follow):** add **AHA** (American Heart Association)
+guidelines as a third corpus once USPSTF + ADA are working end-to-end and
+the eval gate is green. AHA fills the cardiology gap (lipid management,
+ASCVD risk, BP targets) that USPSTF only partially covers. Hold off until
+MVP ships — per the PRD's *"feel narrower than the original spec"*
+guidance, two corpora reliably indexed beats three corpora half-indexed.
 
 ### 3.2 Indexing pipeline
 
@@ -238,6 +245,93 @@ existing Week 1 validator ([app/agent/validator.py](clinical-copilot/app/agent/v
 already enforces citation correctness. **TODO:** decide whether to extend the
 existing validator with semantic checks (slow path, LLM-judge) or add it as
 a graph node post-MVP.
+
+### 5.4 Patient-mismatch verification — extracted-doc vs. assigned-patient
+
+**Decision:** the extractor returns the patient identifiers it sees inside
+the document. The supervisor compares those to the `patient_id` the doctor
+assigned at upload time. On mismatch, the supervisor routes to a
+`confirm_patient` node that surfaces both views to the doctor before any
+persistence happens.
+
+**Why:** the front desk attaches docs by hand. Wrong attachments and
+mislabeled scans are real-world failure modes — exactly the kind of
+data-integrity bug the PRD's *"round-trip through OpenEMR without creating
+duplicate or untraceable records"* requirement is testing for. Catching
+this at upload is cheap (the extractor already pulls the identifiers);
+leaving it for downstream cleanup is expensive. This is a structural
+verification step in the same spirit as the citation validator: the agent
+does not trust the upload context blindly, it verifies its own assignment.
+
+**Tool change:** `attach_and_extract` (§4.1) returns an additional field
+alongside the schema JSON:
+
+```python
+extracted_patient_identifiers: PatientIdentifiers  # {name, dob, mrn}
+```
+
+The extractor pulls these from the same VLM pass that produces the
+schema JSON. Each identifier carries the same `Citation` shape (page,
+bounding box) as the rest of the extracted fields — so when the doctor
+sees the mismatch view, they can click straight to the part of the doc
+the agent read those identifiers from.
+
+**Match policy:**
+
+- **MRN** — exact match required. MRN mismatch is always treated as a
+  hard mismatch (these don't collide by accident).
+- **DOB** — exact match required when present. If the doc didn't carry a
+  DOB, fall through to name comparison.
+- **Name** — normalized fuzzy compare (case + whitespace collapse;
+  optional middle-name omission tolerated). Borderline matches escalate
+  to confirmation rather than auto-accepting.
+
+A mismatch on **any** field that the document carries → confirmation
+prompt. The bar is intentionally low; false positives (asking the doctor
+to confirm a real match) are cheap, false negatives (silently misfiling)
+are expensive.
+
+**Supervisor flow:**
+
+```
+upload → intake_extractor → identifier comparison
+                              ├─ all match           → proceed with persistence
+                              ├─ doc has no
+                              │   identifiers        → log soft warning,
+                              │                        proceed
+                              └─ mismatch            → confirm_patient node
+                                                       ├─ doctor confirms
+                                                       │   → proceed, log event
+                                                       └─ doctor rejects
+                                                           → discard upload,
+                                                             log event
+```
+
+The `confirm_patient` node is a standard LangGraph node, not a hidden
+side-channel. Every path through it is logged with structured fields
+(`assigned_patient_id`, `extracted_identifiers`, `mismatch_reason`,
+`doctor_decision`) into the existing audit log at `traces.db` (§8.1).
+
+**What the doctor sees:** a single confirmation card on the chat surface:
+
+> *"This document was uploaded for **Cohen, Jane (MRN 1234)**, but the
+> document appears to belong to **Patel, Raj (MRN 5678)**.*
+>
+> *Confirm patient assignment, or cancel and re-upload."*
+
+Both names are clickable to their patient cards (existing Week 1
+navigation). The extracted-identifier values link to their bounding
+boxes in the document preview (§4.6 overlay).
+
+**What this is not:** this is *not* a substitute for the patient-panel
+ACL. The ACL gates *which patients the doctor is even allowed to assign
+to*; the mismatch check verifies *that the assignment matches the
+document's contents*. Both apply, in series.
+
+**TODO:** decide whether the rejection path leaves the source document
+in OpenEMR (orphaned, for an admin to reassign) or deletes it. Defaulting
+to keep-with-orphaned-status pending audit-trail review — consistent with
+the rest of the system's append-only posture.
 
 ---
 

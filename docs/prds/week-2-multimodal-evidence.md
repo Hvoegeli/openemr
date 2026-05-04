@@ -94,7 +94,7 @@ here; technical debt from Week 1 should be documented and resolved before
 adding new surface area.
 
 The Week 2 work stays inside the same OpenEMR fork on the existing branch
-(`copilot--branch-3`). The README must clearly separate Week 1 baseline
+(`copilot--branch-2`). The README must clearly separate Week 1 baseline
 behavior from Week 2 multimodal behavior. Graders should be able to run the
 core Week 2 flow without guessing which branch, environment variable, or
 service is required.
@@ -294,7 +294,7 @@ this is a quick-reference summary so the choices are visible from the PRD.
 | Guideline corpus | USPSTF + ADA (start) | Public domain + free-for-education; clean fit for PCP scenario |
 | "Recommendation" tone | Level C with guardrails behind `recommendation_mode` toggle | Refusing Level C means failing the PRD scenario; advisor spike already wired for this shape |
 | Doc placement | `W2_ARCHITECTURE.md` at repo root, exact name | Matches PRD's literal `./W2_ARCHITECTURE.md` reference |
-| Branch | Continue on `copilot--branch-3`; do not auto-merge to master | Standing branch-only rule; master stays at Week 1 submission |
+| Branch | Continue on `copilot--branch-2`; do not auto-merge to master | Standing branch-only rule; master stays at Week 1 submission |
 
 ### Followups to remind about
 
