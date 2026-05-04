@@ -25,7 +25,7 @@ from langgraph.graph import END, START, StateGraph
 from app import access_control
 from app.access_control import PatientAccessDenied
 from app.agent.state import AgentState
-from app.agent.system_prompt import SYSTEM_PROMPT
+from app.agent.system_prompt import ADVISOR_MODE_ADDENDUM, SYSTEM_PROMPT
 from app.agent.tools import TOOLS, dispatch
 from app.agent.input_guard import detect_jailbreak, quarantine_marker
 from app.agent.validator import find_invalid_citations, find_uncited_clinical_claims
@@ -137,14 +137,26 @@ def build_graph(
     # (above Sonnet 4.6's 1024-token minimum) and identical on every turn,
     # so Anthropic's prompt-cache returns it at ~10% of input cost. Cache
     # is `ephemeral` (~5-min TTL), which fits a doctor's working session.
-    system_msg = SystemMessage(content=[{
+    #
+    # Two cached variants: the default chart-summarizer prompt, and an
+    # advisor-mode prompt that appends ADVISOR_MODE_ADDENDUM (relaxes R2
+    # for med-safety reasoning + mandates the disclaimer block). The graph
+    # picks per-turn based on `state["advisor_mode"]`. Each variant gets
+    # its own cache entry; both stay warm during a working session.
+    system_msg_default = SystemMessage(content=[{
         "type": "text",
         "text": SYSTEM_PROMPT,
         "cache_control": {"type": "ephemeral"},
     }])
+    system_msg_advisor = SystemMessage(content=[{
+        "type": "text",
+        "text": SYSTEM_PROMPT + ADVISOR_MODE_ADDENDUM,
+        "cache_control": {"type": "ephemeral"},
+    }])
 
     async def call_llm(state: AgentState) -> dict:
-        messages = [system_msg, *state["messages"]]
+        sys_msg = system_msg_advisor if state.get("advisor_mode") else system_msg_default
+        messages = [sys_msg, *state["messages"]]
         response = await model.ainvoke(messages)
         return {"messages": [response]}
 

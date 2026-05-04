@@ -100,6 +100,7 @@ def _fresh_state() -> AgentState:
         "patient_id": None,
         "validation_attempts": 0,
         "username": None,
+        "advisor_mode": False,
     }
 
 
@@ -223,6 +224,12 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     session_id: str | None = None
     message: str
+    # Per-turn medication-safety advisor toggle (default off). When True the
+    # graph swaps in the R2-relaxed system prompt for this turn (and only
+    # this turn — the value is re-sent by the client on every request, so
+    # turning the UI switch off mid-conversation immediately drops the
+    # agent back into chart-summarizer-only mode).
+    advisor_mode: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -384,6 +391,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
     state["username"] = _user
+    state["advisor_mode"] = req.advisor_mode
 
     trace = new_request_trace(
         session_id=session_id,
@@ -410,6 +418,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
         "patient_id": result.get("patient_id"),
         "validation_attempts": result.get("validation_attempts", 0),
         "username": _user,
+        "advisor_mode": req.advisor_mode,
     }
     SESSIONS[session_id] = new_state
 
@@ -531,6 +540,7 @@ async def chat_stream(
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
     state["username"] = _user
+    state["advisor_mode"] = req.advisor_mode
 
     trace = new_request_trace(
         session_id=session_id,
@@ -575,6 +585,7 @@ async def chat_stream(
                                 "patient_id": output.get("patient_id"),
                                 "validation_attempts": output.get("validation_attempts", 0),
                                 "username": _user,
+                                "advisor_mode": req.advisor_mode,
                             }
                             SESSIONS[session_id] = new_state
 

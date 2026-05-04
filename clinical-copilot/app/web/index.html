@@ -497,6 +497,29 @@
     .pill.live { color: var(--accent); border-color: #c7d2fe; background: var(--accent-soft); }
     .pill.warn { color: var(--warn-text); border-color: #fde68a; background: var(--warn-bg); }
 
+    /* Med-safety advisor toggle. Lives in the chat header next to the
+       patient pill. Off = neutral (matches non-live pills). On = warn
+       palette so the doctor sees at a glance that they're in advisory
+       mode. Disabled state used when no patient is selected — advisor
+       mode is per-patient per the design. */
+    #advisor-toggle {
+      margin-left: auto;
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.18rem 0.65rem; font-size: 0.74rem;
+      border-radius: 999px; border: 1px solid var(--border);
+      background: var(--panel); color: var(--muted);
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #advisor-toggle .label { font-weight: 600; }
+    #advisor-toggle .state { font-weight: 700; letter-spacing: 0.04em; }
+    #advisor-toggle[aria-pressed="true"] {
+      color: var(--warn-text); border-color: #fde68a; background: var(--warn-bg);
+    }
+    #advisor-toggle:disabled {
+      cursor: not-allowed; opacity: 0.5;
+    }
+
     #log {
       overflow-y: auto;
       padding: 1rem 1.25rem;
@@ -654,6 +677,11 @@
       <span class="title">Chat</span>
       <span class="pill" id="ctx-status">Idle</span>
       <span class="pill" id="ctx-patient" style="display:none"></span>
+      <button id="advisor-toggle" type="button" aria-pressed="false" disabled
+              title="Medication-safety advisor — only available with a patient selected. The agent is a chart summarizer; advisor mode lets it reason about med interactions, dose adjustments, and contraindications for the current patient. The attending physician is responsible for the decision.">
+        <span class="label">Med-safety advisor:</span>
+        <span class="state">OFF</span>
+      </button>
     </div>
     <div id="log">
       <div class="msg assistant"><p>Sign in confirmed. Pick a patient from <strong>Today's Calendar</strong> on the left, or ask me anything — try <em>"Catch me up on Cohen."</em></p></div>
@@ -723,6 +751,9 @@
       try { localStorage.removeItem(CHAT_STATE_KEY); } catch (_) {}
       chatHistory.length = 0;
       sessionId = null;
+      // Per-chat lifetime: starting a new chat drops advisor mode back to
+      // off so the doctor opts in deliberately each session.
+      if (typeof setAdvisorMode === 'function') setAdvisorMode(false);
     }
 
     /* ── UI state persistence (tab + active patient + cardView) ──────
@@ -1647,13 +1678,44 @@
     }
 
     /* ── Chat header status pills ────────────────────────────────── */
+    let _advisorPatientPid = null;  // last pid the toggle was bound to
     function updateCtxPatient(name, pid) {
       if (!name && !pid) {
         ctxPatient.style.display = 'none';
+        // No patient → med-safety advisor isn't allowed (it's per-patient).
+        // Force off + disable the toggle so the user can't turn it on.
+        setAdvisorMode(false);
+        if (advisorToggle) advisorToggle.disabled = true;
+        _advisorPatientPid = null;
         return;
       }
       ctxPatient.textContent = name ? name : pid;
       ctxPatient.style.display = '';
+      if (advisorToggle) advisorToggle.disabled = false;
+      // Switching to a different patient drops advisor mode back to off —
+      // safety reasoning shouldn't bleed across patients even if the
+      // toggle was on for the previous one.
+      if (_advisorPatientPid !== null && _advisorPatientPid !== pid) {
+        setAdvisorMode(false);
+      }
+      _advisorPatientPid = pid || null;
+    }
+
+    /* ── Med-safety advisor toggle ────────────────────────────────── */
+    const advisorToggle = document.getElementById('advisor-toggle');
+    let advisorMode = false;
+    function setAdvisorMode(on) {
+      advisorMode = !!on;
+      if (!advisorToggle) return;
+      advisorToggle.setAttribute('aria-pressed', advisorMode ? 'true' : 'false');
+      const stateEl = advisorToggle.querySelector('.state');
+      if (stateEl) stateEl.textContent = advisorMode ? 'ON' : 'OFF';
+    }
+    if (advisorToggle) {
+      advisorToggle.addEventListener('click', () => {
+        if (advisorToggle.disabled) return;
+        setAdvisorMode(!advisorMode);
+      });
     }
     function setCtxStatus(text, kind = 'live') {
       ctxStatus.textContent = text;
@@ -1697,7 +1759,7 @@
         const r = await fetch('/chat/stream', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({session_id: sessionId, message: text}),
+          body: JSON.stringify({session_id: sessionId, message: text, advisor_mode: advisorMode}),
           credentials: 'same-origin',
         });
         if (r.status === 401) { window.location.href = '/login'; return; }

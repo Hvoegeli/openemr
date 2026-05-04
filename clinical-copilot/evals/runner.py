@@ -234,6 +234,9 @@ async def record_one(case: Case, patient: Patient | None) -> Snapshot:
         # for cases that don't pin `as_user`. ACL-aware cases override this
         # via `as_user` to record the agent under a specific user's panel.
         "username": case.as_user or "admin",
+        # Advisor mode is off for every existing eval case; new advisor-mode
+        # cases (post-submission work) will opt in via a case-level field.
+        "advisor_mode": False,
     }
 
     turns_out: list[Turn] = []
