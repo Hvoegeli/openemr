@@ -22,6 +22,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEV_EASY_DIR = "/Users/harrisonvoegeli/openemr/docker/development-easy"
 
 NEW_SCOPES = [
+    # Standard non-FHIR API (multipart upload) — required for the actual
+    # write path used by app/fhir/writer.py:write_document_reference.
+    "user/document.cruds",
+    # FHIR DocumentReference read — used after upload to resolve the new
+    # doc's FHIR resource id, and by the chart-summarizer for the
+    # Supporting Documents tab.
     "user/DocumentReference.read",
     "user/DocumentReference.write",
 ]

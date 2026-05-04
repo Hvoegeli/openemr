@@ -1,33 +1,32 @@
-"""Isolated tests for the DocumentReference body builder.
+"""Isolated tests for the DocumentReference write path.
 
-`OpenEMRWriter.build_document_reference_body` is a static method on the
-writer specifically so it can be tested without standing up OpenEMR. The
-HTTP layers (token acquisition, search, POST) require a real OpenEMR and
-are exercised by `scripts/smoke_document_writer.py` instead.
+The HTTP layers (token acquisition, multipart upload, FHIR GET search) need
+a real OpenEMR and are exercised by `scripts/smoke_document_writer.py`.
+What's testable in isolation here:
 
-What we lock in here:
-- The FHIR body shape matches OpenEMR's R4 expectations.
-- The SHA-256 identifier is computed correctly and lands under the
-  agent-forge URI we'll search by for idempotency.
-- The doc-type → LOINC mapping is one-way deterministic.
-- Unsupported doc types raise a typed error rather than silently producing
-  malformed FHIR.
-- Base64-encoded content round-trips back to the original bytes (so the
-  PDF lands in OpenEMR byte-identical to what we sent).
+- The SHA-256 helper computes the expected hex digest.
+- The idempotency-filename builder is deterministic and embeds the hash in
+  the format the FHIR GET search will match against.
+- The `doc_type → OpenEMR category path` resolver maps each supported
+  doc_type and rejects unknown ones with a typed error rather than letting
+  garbage propagate to the upload endpoint.
+
+Anything beyond these — request shape, dedupe behavior, response handling
+— is HTTP-layer logic; mocking httpx for it would be brittle and would not
+catch real OpenEMR-side regressions, so we leave it to the smoke test.
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 
 import pytest
 
 from app.fhir.writer import (
-    DOC_HASH_SYSTEM,
-    DOC_TYPE_CODES,
+    DOC_CATEGORIES,
     OpenEMRWriteError,
     OpenEMRWriter,
+    _idempotency_filename,
 )
 
 
@@ -35,8 +34,8 @@ COHEN_PUUID = "a1a6044b-c6af-40a4-80aa-4c5ce61014da"
 
 
 def _sample_pdf_bytes() -> bytes:
-    """4-byte PDF magic + minimal content. Not a valid PDF for OpenEMR's
-    parsing purposes, but enough to test byte-for-byte round-trip."""
+    """Minimal PDF magic + body. Not a parseable PDF for OpenEMR's purposes
+    but enough for the hash + filename helpers (which never inspect content)."""
     return b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n0 obj\n<< >>\nendobj\n%%EOF\n"
 
 
@@ -50,102 +49,56 @@ class TestSha256Hex:
         assert len(expected) == 64
 
 
-class TestBuildDocumentReferenceBody:
-    def test_lab_pdf_minimal(self) -> None:
-        body = OpenEMRWriter.build_document_reference_body(
-            patient_uuid=COHEN_PUUID,
-            doc_type="lab_pdf",
-            file_bytes=_sample_pdf_bytes(),
-            filename="cohen_lab_2026-04-30.pdf",
-            creation_iso="2026-04-30T12:00:00+00:00",
-        )
+class TestIdempotencyFilename:
+    def test_format(self) -> None:
+        sha = "a" * 64
+        assert _idempotency_filename(sha, "lab.pdf") == f"sha256-{sha}__lab.pdf"
 
-        assert body["resourceType"] == "DocumentReference"
-        assert body["status"] == "current"
-        assert body["subject"]["reference"] == f"Patient/{COHEN_PUUID}"
-        assert body["date"] == "2026-04-30T12:00:00+00:00"
-        # type → LOINC for laboratory report
-        coding = body["type"]["coding"][0]
-        assert coding == DOC_TYPE_CODES["lab_pdf"]
-
-    def test_intake_form_uses_intake_loinc(self) -> None:
-        body = OpenEMRWriter.build_document_reference_body(
-            patient_uuid=COHEN_PUUID,
-            doc_type="intake_form",
-            file_bytes=_sample_pdf_bytes(),
-            filename="cohen_intake_2026-04-30.pdf",
-            creation_iso="2026-04-30T12:00:00+00:00",
-        )
-        assert body["type"]["coding"][0] == DOC_TYPE_CODES["intake_form"]
-
-    def test_identifier_carries_sha256(self) -> None:
+    def test_deterministic(self) -> None:
         data = _sample_pdf_bytes()
-        body = OpenEMRWriter.build_document_reference_body(
-            patient_uuid=COHEN_PUUID,
-            doc_type="lab_pdf",
-            file_bytes=data,
-            filename="x.pdf",
-            creation_iso="2026-04-30T12:00:00+00:00",
-        )
-        ident = body["identifier"][0]
-        assert ident["system"] == DOC_HASH_SYSTEM
-        assert ident["value"] == hashlib.sha256(data).hexdigest()
+        sha = OpenEMRWriter._sha256_hex(data)
+        first = _idempotency_filename(sha, "lab.pdf")
+        second = _idempotency_filename(sha, "lab.pdf")
+        assert first == second
 
-    def test_attachment_round_trips_bytes(self) -> None:
-        data = _sample_pdf_bytes()
-        body = OpenEMRWriter.build_document_reference_body(
-            patient_uuid=COHEN_PUUID,
-            doc_type="lab_pdf",
-            file_bytes=data,
-            filename="x.pdf",
-            mime_type="application/pdf",
-            creation_iso="2026-04-30T12:00:00+00:00",
-        )
-        att = body["content"][0]["attachment"]
-        assert att["contentType"] == "application/pdf"
-        assert att["title"] == "x.pdf"
-        # Base64 decoding must give us back the exact bytes.
-        assert base64.b64decode(att["data"]) == data
+    def test_includes_full_hash(self) -> None:
+        sha = OpenEMRWriter._sha256_hex(_sample_pdf_bytes())
+        out = _idempotency_filename(sha, "lab.pdf")
+        assert sha in out
+        assert len(sha) == 64
 
-    def test_unsupported_doc_type_rejected(self) -> None:
-        with pytest.raises(OpenEMRWriteError):
-            OpenEMRWriter.build_document_reference_body(
-                patient_uuid=COHEN_PUUID,
-                doc_type="referral_fax",  # type: ignore[arg-type]  # not in DOC_TYPE_CODES
-                file_bytes=_sample_pdf_bytes(),
-                filename="x.pdf",
-            )
+    def test_preserves_original_filename(self) -> None:
+        out = _idempotency_filename("a" * 64, "Cohen-2026-04-30.lab.pdf")
+        assert out.endswith("__Cohen-2026-04-30.lab.pdf")
 
-    def test_creation_iso_defaults_to_now_when_omitted(self) -> None:
-        # We don't lock the exact value (depends on now()), but it must be
-        # populated, an ISO-shaped string, and reflected in both `date` and
-        # the attachment's `creation` field (consistency between the two).
-        body = OpenEMRWriter.build_document_reference_body(
-            patient_uuid=COHEN_PUUID,
-            doc_type="lab_pdf",
-            file_bytes=_sample_pdf_bytes(),
-            filename="x.pdf",
-        )
-        assert isinstance(body["date"], str) and len(body["date"]) >= 10
-        assert body["date"] == body["content"][0]["attachment"]["creation"]
+    def test_different_content_yields_different_filename(self) -> None:
+        a = _idempotency_filename(OpenEMRWriter._sha256_hex(b"a"), "x.pdf")
+        b = _idempotency_filename(OpenEMRWriter._sha256_hex(b"b"), "x.pdf")
+        assert a != b
 
-    def test_default_mime_type_is_application_pdf(self) -> None:
-        body = OpenEMRWriter.build_document_reference_body(
-            patient_uuid=COHEN_PUUID,
-            doc_type="lab_pdf",
-            file_bytes=_sample_pdf_bytes(),
-            filename="x.pdf",
-            creation_iso="2026-04-30T12:00:00+00:00",
-        )
-        assert body["content"][0]["attachment"]["contentType"] == "application/pdf"
 
-    def test_custom_mime_type_honored(self) -> None:
-        body = OpenEMRWriter.build_document_reference_body(
-            patient_uuid=COHEN_PUUID,
-            doc_type="lab_pdf",
-            file_bytes=_sample_pdf_bytes(),
-            filename="x.png",
-            mime_type="image/png",
-            creation_iso="2026-04-30T12:00:00+00:00",
+class TestResolveDocCategory:
+    def test_lab_pdf_maps_to_labreport(self) -> None:
+        assert OpenEMRWriter.resolve_doc_category("lab_pdf") == "labreport"
+
+    def test_intake_form_maps_to_patientinformation(self) -> None:
+        assert (
+            OpenEMRWriter.resolve_doc_category("intake_form") == "patientinformation"
         )
-        assert body["content"][0]["attachment"]["contentType"] == "image/png"
+
+    def test_unsupported_doc_type_raises_typed_error(self) -> None:
+        with pytest.raises(OpenEMRWriteError) as exc_info:
+            OpenEMRWriter.resolve_doc_category("referral_fax")  # type: ignore[arg-type]
+        # Error message should identify the offending type AND the expected set
+        # so an operator can immediately see what they got wrong.
+        assert "referral_fax" in str(exc_info.value)
+        assert "lab_pdf" in str(exc_info.value)
+
+    def test_doc_categories_constant_pre_normalized(self) -> None:
+        """OpenEMR's getLastIdOfPath does case-sensitive equality against
+        `replace(LOWER(name), ' ', '')` — paths must arrive lowercased
+        with no spaces or the upload silently fails to attach to a
+        category. This test locks the convention in."""
+        for path in DOC_CATEGORIES.values():
+            assert path == path.lower(), f"{path!r} not lowercased"
+            assert " " not in path, f"{path!r} contains a space"
