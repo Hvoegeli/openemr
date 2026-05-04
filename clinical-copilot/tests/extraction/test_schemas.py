@@ -19,13 +19,14 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from app.extraction.schemas import (
     Allergy,
     BoundingBox,
     Citation,
     Demographics,
+    ExtractedDocument,
     FamilyHistoryItem,
     IntakeForm,
     LabReport,
@@ -114,6 +115,28 @@ class TestCitation:
                 "quote_or_value": "v",
             })
 
+    @pytest.mark.parametrize(
+        "empty_field",
+        ["source_id", "page_or_section", "field_or_chunk_id", "quote_or_value"],
+    )
+    def test_empty_required_string_field_rejected(self, empty_field: str) -> None:
+        """Every string field in the citation must be non-empty.
+
+        An empty string is structurally indistinguishable from missing data
+        but would silently pass a `citation_present` check downstream — the
+        whole point of the citation is to be locatable and verifiable.
+        """
+        payload = {
+            "source_type": "lab_pdf",
+            "source_id": "x",
+            "page_or_section": "y",
+            "field_or_chunk_id": "z",
+            "quote_or_value": "v",
+        }
+        payload[empty_field] = ""
+        with pytest.raises(ValidationError):
+            Citation.model_validate(payload)
+
 
 class TestBoundingBox:
     def test_minimal(self) -> None:
@@ -131,6 +154,14 @@ class TestBoundingBox:
     def test_negative_y_rejected(self) -> None:
         with pytest.raises(ValidationError):
             BoundingBox(page=1, x=0, y=-1.0, width=10, height=10)
+
+    def test_negative_x_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            BoundingBox(page=1, x=-1.0, y=0, width=10, height=10)
+
+    def test_zero_height_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            BoundingBox(page=1, x=0, y=0, width=10, height=0)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -231,6 +262,19 @@ class TestLabReport:
                     "source_citation": _valid_lab_citation().model_dump(),
                 }],
                 "source_document_id": "DocumentReference/doc-abc-123",
+            })
+
+    def test_empty_source_document_id_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            LabReport.model_validate({
+                "results": [{
+                    "test_name": "HbA1c",
+                    "value": 7.4,
+                    "unit": "%",
+                    "collection_date": "2026-04-30",
+                    "source_citation": _valid_lab_citation().model_dump(),
+                }],
+                "source_document_id": "",
             })
 
 
@@ -401,4 +445,77 @@ class TestIntakeForm:
                 ).model_dump(),
                 "chief_concern": "follow-up",
                 "source_document_id": "DocumentReference/x",
+            })
+
+    def test_empty_source_document_id_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            IntakeForm.model_validate({
+                "demographics": Demographics(
+                    given_name="Jane",
+                    family_name="Cohen",
+                    source_citation=_valid_intake_citation("demographics"),
+                ).model_dump(),
+                "chief_concern": "follow-up",
+                "source_document_id": "",
+            })
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Discriminated union
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestExtractedDocument:
+    """`ExtractedDocument` is a discriminated union — Pydantic should pick
+    the right model based on `document_type` without try/fail-through."""
+
+    _adapter: TypeAdapter[ExtractedDocument] = TypeAdapter(ExtractedDocument)
+
+    def test_lab_pdf_dispatched_to_lab_report(self) -> None:
+        result = self._adapter.validate_python({
+            "document_type": "lab_pdf",
+            "results": [{
+                "test_name": "HbA1c",
+                "value": 7.4,
+                "unit": "%",
+                "collection_date": "2026-04-30",
+                "source_citation": _valid_lab_citation().model_dump(),
+            }],
+            "source_document_id": "DocumentReference/doc-abc-123",
+        })
+        assert isinstance(result, LabReport)
+        assert result.results[0].test_name == "HbA1c"
+
+    def test_intake_form_dispatched_to_intake_form(self) -> None:
+        result = self._adapter.validate_python({
+            "document_type": "intake_form",
+            "demographics": Demographics(
+                given_name="Jane",
+                family_name="Cohen",
+                source_citation=_valid_intake_citation("demographics"),
+            ).model_dump(),
+            "chief_concern": "follow-up for diabetes",
+            "source_document_id": "DocumentReference/intake-xyz-789",
+        })
+        assert isinstance(result, IntakeForm)
+        assert result.chief_concern == "follow-up for diabetes"
+
+    def test_unknown_document_type_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._adapter.validate_python({
+                "document_type": "referral_fax",  # not a member of the union
+                "source_document_id": "x",
+            })
+
+    def test_missing_discriminator_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._adapter.validate_python({
+                "results": [{
+                    "test_name": "HbA1c",
+                    "value": 7.4,
+                    "unit": "%",
+                    "collection_date": "2026-04-30",
+                    "source_citation": _valid_lab_citation().model_dump(),
+                }],
+                "source_document_id": "DocumentReference/doc-abc-123",
             })

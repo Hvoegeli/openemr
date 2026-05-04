@@ -7,20 +7,25 @@ and `IntakeForm` (one filled intake form). Both are returned by
 labs; `Patient` / `Condition` / `AllergyIntolerance` / `MedicationStatement`
 for intake fields).
 
-Every clinical fact in either shape carries a `Citation` — the same citation
-primitive used by the Week 1 chart-summarizer and the Week 2 evidence
-retriever. The citation shape is the one mandated by the Week 2 PRD §5:
+Every clinical fact in either shape carries a `Citation` — a structured
+extension of the Week 1 source-attribution concept (Week 1 used inline
+`[ResourceType/ID]` regex strings; Week 2 needs richer metadata so the UI
+can locate values within unstructured documents). The citation shape is the
+one mandated by the Week 2 PRD §5:
 `{source_type, source_id, page_or_section, field_or_chunk_id, quote_or_value}`,
 plus an optional `bbox` for the visual PDF-overlay UI.
 
 All models use `extra="forbid"` so the VLM cannot smuggle hallucinated fields
-past the schema. Required fields are required; optional fields are explicit.
+past the schema. All required string fields require non-empty values via
+`min_length=1` — an empty citation is structurally indistinguishable from a
+missing one and would silently pass `citation_present` checks downstream.
+Required fields are required; optional fields are explicit.
 """
 
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal
+from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -65,9 +70,9 @@ class Citation(BaseModel):
 
     source_type: SourceType
     source_id: str = Field(min_length=1, description="Stable ID for the source — DocumentReference ID, guideline slug, FHIR resource ID")
-    page_or_section: str = Field(description="Human-readable locator: 'page 1', 'Recommendation Statement', etc.")
-    field_or_chunk_id: str = Field(description="Machine-readable locator within the source: form field name, RAG chunk ID, etc.")
-    quote_or_value: str = Field(description="The literal text or value being cited, for verifiability")
+    page_or_section: str = Field(min_length=1, description="Human-readable locator: 'page 1', 'Recommendation Statement', etc.")
+    field_or_chunk_id: str = Field(min_length=1, description="Machine-readable locator within the source: form field name, RAG chunk ID, etc.")
+    quote_or_value: str = Field(min_length=1, description="The literal text or value being cited, for verifiability")
     bbox: BoundingBox | None = None
 
 
@@ -76,9 +81,12 @@ class Citation(BaseModel):
 # ──────────────────────────────────────────────────────────────────────────
 
 AbnormalFlag = Literal["H", "L", "N", "C"]
-"""HL7 v2 abnormal-flag conventions: H = high, L = low, N = normal,
-C = critical. Optional — many lab PDFs omit the flag and only print the
-reference range."""
+"""Abnormal-flag values seen on US lab PDFs: H = high, L = low, N = normal,
+C = critical. H/L/N follow HL7 v2 (where critical is `HH`/`LL`); we collapse
+critical-high and critical-low into a single `C` because the doctor-facing
+distinction is the criticality, not the direction. Extending to the full
+HL7 set (HH/LL/A/AA/W/B) is a future tightening if real lab PDFs use them.
+Optional — many lab PDFs omit the flag and only print the reference range."""
 
 
 class LabResult(BaseModel):
@@ -107,7 +115,7 @@ class LabReport(BaseModel):
 
     document_type: Literal["lab_pdf"] = "lab_pdf"
     results: list[LabResult] = Field(min_length=1, description="At least one extracted result; an empty lab PDF is a failed extraction")
-    source_document_id: str = Field(description="FHIR DocumentReference/{id} for the source PDF after persistence")
+    source_document_id: str = Field(min_length=1, description="FHIR DocumentReference/{id} for the source PDF after persistence")
     facility: str | None = Field(default=None, description="Lab facility name as printed on the report")
     ordering_provider: str | None = Field(default=None, description="Ordering clinician name as printed on the report")
 
@@ -190,14 +198,19 @@ class IntakeForm(BaseModel):
     current_medications: list[Medication] = Field(default_factory=list)
     allergies: list[Allergy] = Field(default_factory=list)
     family_history: list[FamilyHistoryItem] = Field(default_factory=list)
-    source_document_id: str = Field(description="FHIR DocumentReference/{id} for the source intake form after persistence")
+    source_document_id: str = Field(min_length=1, description="FHIR DocumentReference/{id} for the source intake form after persistence")
 
 
 # ──────────────────────────────────────────────────────────────────────────
 # Discriminated union — the public return type of `attach_and_extract`
 # ──────────────────────────────────────────────────────────────────────────
 
-ExtractedDocument = LabReport | IntakeForm
-"""Tagged union over the two MVP doc types. Discrimination key:
-`document_type` (a `Literal` on each shape). Future doc types
-(referral_fax, medication_list — Week 2 extension) extend this union."""
+ExtractedDocument = Annotated[
+    Union[LabReport, IntakeForm],
+    Field(discriminator="document_type"),
+]
+"""Discriminated union over the two MVP doc types. Pydantic uses
+`document_type` (a `Literal` on each member) to pick the correct model
+without having to try-validate-fail through the union. Future doc types
+(referral_fax, medication_list — Week 2 extension) extend this union by
+adding new literal-tagged shapes; the discriminator stays the same."""
