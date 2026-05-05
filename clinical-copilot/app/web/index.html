@@ -2903,11 +2903,33 @@
       $confirm.addEventListener('click', async () => {
         $confirm.disabled = true;
         setStatus($cstatus, 'Scheduling…', '');
+
+        // Time zone reconciliation:
+        // OpenEMR's appointment endpoint stores pc_startTime/pc_eventDate
+        // verbatim, and the Hetzner host runs in UTC. The user picks
+        // their local time (e.g. 2:00 PM Central) on the form. If we
+        // forwarded "14:00" + "2026-05-05" as-is, OpenEMR would store
+        // the appointment at 14:00 UTC and the calendar would render it
+        // back as 9 AM Central. Convert the user's local pick into a
+        // UTC date + time before posting so the round-trip lands at the
+        // intended wall-clock time on every display.
+        const localPick = new Date(
+          `${$date.value}T` +
+          `${String(Number($hour.value)).padStart(2, '0')}:` +
+          `${String(Number($minute.value)).padStart(2, '0')}:00`
+        );
+        const utcDateStr =
+          localPick.getUTCFullYear() + '-' +
+          String(localPick.getUTCMonth() + 1).padStart(2, '0') + '-' +
+          String(localPick.getUTCDate()).padStart(2, '0');
+        const utcHour   = localPick.getUTCHours();
+        const utcMinute = localPick.getUTCMinutes();
+
         const fd = new FormData();
         fd.append('patient_uuid', activePatientId);
-        fd.append('event_date', $date.value);
-        fd.append('hour', String(Number($hour.value)));
-        fd.append('minute', String(Number($minute.value)));
+        fd.append('event_date', utcDateStr);
+        fd.append('hour', String(utcHour));
+        fd.append('minute', String(utcMinute));
         fd.append('duration_minutes', String(Number($duration.value)));
         if ($comments.value.trim()) fd.append('comments', $comments.value.trim());
 
