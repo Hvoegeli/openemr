@@ -24,7 +24,6 @@ Run: `cd clinical-copilot && PYTHONPATH=. uv run python scripts/generate_demo_do
 
 from __future__ import annotations
 
-import json
 from datetime import date
 from pathlib import Path
 

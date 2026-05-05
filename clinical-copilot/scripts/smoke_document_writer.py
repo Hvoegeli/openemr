@@ -40,10 +40,17 @@ import os
 import sys
 from pathlib import Path
 
-from app.fhir.writer import OpenEMRWriteError, OpenEMRWriter
-
+from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# Load .env BEFORE app.fhir.writer imports app.config so anything read via
+# os.getenv (e.g. DEMO_PATIENT_PUUID below) sees the same values that
+# pydantic-settings loads into Settings. Without this, --puuid would be
+# the only working source even when DEMO_PATIENT_PUUID is in .env.
+load_dotenv(REPO_ROOT / ".env")
+
+from app.fhir.writer import OpenEMRWriteError, OpenEMRWriter  # noqa: E402
+
 DEMO_DIR = REPO_ROOT / "data" / "demo_documents" / "real"
 
 DEFAULT_LAB_PDF = DEMO_DIR / "p01-chen-lipid-panel.pdf"

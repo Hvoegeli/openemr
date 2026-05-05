@@ -391,6 +391,16 @@ class OpenEMRWriter:
             payload = r.json()
         except ValueError:
             payload = r.text
+        # Validation errors come back with HTTP 200 + a populated
+        # `validationErrors` field (same shape as the vitals POST). Surface
+        # them with the actual error message instead of falling through to
+        # the FHIR-GET-not-found path's much vaguer "couldn't locate" error.
+        if isinstance(payload, dict):
+            val = payload.get("validationErrors")
+            if val:  # truthy dict OR non-empty list
+                raise OpenEMRWriteError(
+                    f"document upload validation failed: {val}"
+                )
         if payload is False or payload is None or payload == "":
             raise OpenEMRWriteError(
                 f"document upload returned non-truthy response: "
