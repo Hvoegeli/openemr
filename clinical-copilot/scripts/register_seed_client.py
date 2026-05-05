@@ -72,6 +72,13 @@ SCOPES = " ".join(
         # forward-compat hint even though OpenEMR ignores it today.
         "user/DocumentReference.read",
         "user/DocumentReference.write",
+        # Calendar / scheduling — POST /api/patient/{pid}/appointment.
+        # Required by app/main.py:/api/schedule and the Today's Calendar
+        # tab's appointment-merge in app/fhir/extras.py.
+        "user/appointment.cruds",
+        # FHIR Appointment read — used by get_calendar_today to overlay
+        # scheduled appointments on the Today's Calendar tab.
+        "user/Appointment.read",
     ]
 )
 

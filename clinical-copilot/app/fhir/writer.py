@@ -53,15 +53,17 @@ from app.extraction.schemas import DocumentType
 log = logging.getLogger("agent.fhir.writer")
 
 # Seed-client scope set — must include user/encounter.cruds and
-# user/vital.cruds for the vitals POST, user/document.cruds for the new
-# Week 2 multipart document upload, and user/DocumentReference.read for
-# the FHIR search that resolves the uploaded doc's FHIR resource id.
+# user/vital.cruds for the vitals POST, user/document.cruds for the
+# Week 2 multipart document upload, user/DocumentReference.read for
+# the FHIR search that resolves the uploaded doc's FHIR resource id,
+# and user/appointment.cruds for the calendar / scheduling endpoint.
 _SCOPE = " ".join(
     [
         "openid", "fhirUser", "offline_access",
         "api:oemr", "api:fhir", "api:port",
         "user/patient.cruds", "user/encounter.cruds", "user/vital.cruds",
         "user/document.cruds", "user/DocumentReference.read",
+        "user/appointment.cruds",
     ]
 )
 
@@ -438,3 +440,119 @@ class OpenEMRWriter:
             patient_uuid, doc_type, sha_hex[:12], new_ref,
         )
         return {"reference_id": new_ref, "sha256": sha_hex, "created": True}
+
+    # ── Appointment (calendar / scheduling) ───────────────────────────
+
+    async def write_appointment(
+        self,
+        *,
+        patient_uuid: str,
+        provider_user_id: int,
+        event_date: str,
+        start_time: str,
+        duration_minutes: int = 30,
+        title: str = "Office Visit",
+        comments: str = "",
+        category_id: int = 5,
+        facility_id: int = 3,
+        billing_facility_id: int = 3,
+        status: str = "-",
+    ) -> dict[str, Any]:
+        """Create an appointment via the standard REST API.
+
+        POSTs to ``/api/patient/{pid}/appointment`` with the OpenEMR
+        ``pc_*`` field set documented in
+        ``src/RestControllers/AppointmentRestController.php::post``.
+
+        Args:
+            patient_uuid: FHIR Patient UUID (resolved internally to pid).
+            provider_user_id: Legacy ``users.id`` integer for the
+                appointment provider (NOT the FHIR Practitioner UUID —
+                the standard API expects the int row id).
+            event_date: ISO date ``YYYY-MM-DD``.
+            start_time: ``HH:MM`` 24-hour. Seconds optional but ignored.
+            duration_minutes: Appointment length in minutes. Sent to
+                OpenEMR in seconds via ``pc_duration``.
+            title: Display title for the appointment chip.
+            comments: Free-text note saved into ``pc_hometext``.
+            category_id: ``pc_catid`` from
+                ``openemr_postcalendar_categories``. Default 5 = Office
+                Visit, which exists in the dev-easy demo dataset and is
+                the most generic option.
+            facility_id / billing_facility_id: ``pc_facility`` and
+                ``pc_billing_location`` row ids from ``facility``.
+                Default 3 matches the only facility in dev-easy demo.
+            status: ``pc_apptstatus`` value — ``-`` is OpenEMR's code
+                for "scheduled, not yet seen."
+
+        Returns:
+            ``{"appointment_id": <int eid>, "patient_pid": <int>}``
+        """
+        token = await self._ensure_token()
+        pid = await self._patient_numeric_pid(token, patient_uuid)
+
+        # OpenEMR's pc_duration is seconds, despite the API docs spelling
+        # it as a string. Match the existing seed scripts' convention of
+        # passing it as a string for safety against PHP-side str/int casts.
+        duration_seconds = max(int(duration_minutes), 1) * 60
+
+        # Normalize start_time to "HH:MM" — strip seconds if a caller
+        # accidentally includes them.
+        st_parts = start_time.split(":")
+        if len(st_parts) >= 2:
+            normalized_start = f"{int(st_parts[0]):02d}:{int(st_parts[1]):02d}"
+        else:
+            raise OpenEMRWriteError(
+                f"start_time {start_time!r} must be HH:MM (24-hour)"
+            )
+
+        body = {
+            "pc_catid": str(category_id),
+            "pc_title": title,
+            "pc_duration": str(duration_seconds),
+            "pc_hometext": comments,
+            "pc_apptstatus": status,
+            "pc_eventDate": event_date,
+            "pc_startTime": normalized_start,
+            "pc_facility": str(facility_id),
+            "pc_billing_location": str(billing_facility_id),
+            "pc_aid": str(provider_user_id),
+        }
+
+        r = await self._http.post(
+            f"{self._api_base}/patient/{pid}/appointment",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        )
+        if r.status_code >= 400:
+            raise OpenEMRWriteError(
+                f"appointment POST failed ({r.status_code}): {r.text[:300]}"
+            )
+        try:
+            payload = r.json()
+        except ValueError as exc:
+            raise OpenEMRWriteError(
+                f"appointment POST returned non-JSON body: {r.text[:300]}"
+            ) from exc
+        val = payload.get("validationErrors") if isinstance(payload, dict) else None
+        if isinstance(val, dict) and val:
+            raise OpenEMRWriteError(f"appointment validation failed: {val}")
+        # Standard-API success shape: {"data": {"id": <int eid>}}.
+        # `id` here is the postcalendar event id (pc_eid), not a FHIR uuid.
+        data = payload.get("data") if isinstance(payload, dict) else None
+        flat = data if isinstance(data, dict) else payload
+        eid = None
+        if isinstance(flat, dict):
+            eid = flat.get("id") or flat.get("eid")
+        if eid is None:
+            raise OpenEMRWriteError(
+                f"appointment POST succeeded but response missing id: {payload}"
+            )
+        log.info(
+            "wrote appointment patient=%s provider=%s date=%s time=%s eid=%s",
+            patient_uuid, provider_user_id, event_date, normalized_start, eid,
+        )
+        return {"appointment_id": int(eid), "patient_pid": pid}

@@ -60,7 +60,16 @@ async def get_calendar_today(
     today_iso = date.today().isoformat()
     sources: list[str] = []
 
-    patients = await _safe_search(client, "Patient", {"_count": 50})
+    # One global Appointment search for today, plus the existing
+    # broad Patient + per-patient latest-Encounter fan-out. The
+    # appointment search is best-effort: if OpenEMR's FHIR layer
+    # rejects the date filter or has no appointments today,
+    # _safe_search returns [] and we transparently fall back to the
+    # encounter-based row (existing behavior).
+    patients, todays_appts = await asyncio.gather(
+        _safe_search(client, "Patient", {"_count": 50}),
+        _safe_search(client, "Appointment", {"date": today_iso, "_count": 200}),
+    )
     if panel is not None:
         patients = [p for p in patients if p.get("id") in panel]
     if not patients:
@@ -69,8 +78,23 @@ async def get_calendar_today(
     for p in patients:
         sources.append(_ref(p))
 
-    # Latest encounter per patient — gives "reason" + "time" without forcing
-    # encounters to be re-dated daily. One round-trip in wall-clock time.
+    # Index today's appointments by Patient/{id}. Multiple appointments per
+    # patient → keep the earliest one (the "next" slot they'll be seen in).
+    appts_by_patient: dict[str, dict] = {}
+    for a in todays_appts:
+        ref = _participant_patient_ref(a)
+        if not ref:
+            continue
+        existing = appts_by_patient.get(ref)
+        if existing is None or (a.get("start") or "") < (existing.get("start") or ""):
+            appts_by_patient[ref] = a
+    if todays_appts:
+        for a in todays_appts:
+            sources.append(_ref(a))
+
+    # Latest encounter per patient — gives "reason" + "time" fallback
+    # when no scheduled appointment exists for today. One round-trip in
+    # wall-clock time via gather.
     latest_encs = await asyncio.gather(*[
         _safe_search(
             client, "Encounter",
@@ -84,16 +108,39 @@ async def get_calendar_today(
         enc = enc_list[0] if enc_list else None
         if enc:
             sources.append(_ref(enc))
+        # Prefer today's scheduled Appointment over the latest encounter
+        # for `time` + `reason`. The encounter still wins as a fallback so
+        # the row is never blank for inpatients without today's slot.
+        appt = appts_by_patient.get(f"Patient/{p['id']}")
+        if appt:
+            time_iso = appt.get("start")
+            reason = (
+                _coded_display((appt.get("serviceType") or [{}])[0])
+                or _coded_display(appt.get("appointmentType") or {})
+                or appt.get("description")
+            )
+            appt_id = appt.get("id")
+        else:
+            time_iso = (enc.get("period") or {}).get("start") if enc else None
+            reason = (
+                _coded_display((enc.get("type") or [{}])[0]) if enc else None
+            )
+            appt_id = None
         entries.append({
-            "appointment_id": None,
+            "appointment_id": appt_id,
             "patient_id": p["id"],
             "name": _format_name(p),
             "age": _calc_age(p.get("birthDate")),
             "sex": p.get("gender"),
-            "time": (enc.get("period") or {}).get("start") if enc else None,
-            "reason": _coded_display((enc.get("type") or [{}])[0]) if enc else None,
+            "time": time_iso,
+            "reason": reason,
             "seeded": False,
         })
+
+    # Sort by time ascending so today's scheduled patients self-organize
+    # by slot (the user-visible behavior the calendar UX promises).
+    # Patients without a `time` value sink to the end deterministically.
+    entries.sort(key=lambda e: (e.get("time") is None, e.get("time") or ""))
 
     return {"data": {"date": today_iso, "patients": entries}, "sources": sources}
 

@@ -38,6 +38,17 @@ USERNAME_TO_PRACTITIONER: dict[str, str] = {
     "Smith": "a1afccd2-13c1-47e5-a1f0-a317272dcb12",
 }
 
+# Username -> OpenEMR legacy `users.id` integer. The appointment-write
+# endpoint (POST /api/patient/{pid}/appointment) takes the legacy
+# integer id in its `pc_aid` field, NOT the FHIR Practitioner UUID,
+# so we maintain a parallel map. Look up via:
+#   SELECT id, username FROM users WHERE authorized = 1;
+# inside docker compose exec -T mysql ... openemr.
+USERNAME_TO_USER_ID: dict[str, int] = {
+    "admin": 1,
+    "Smith": 5,
+}
+
 # In-memory cache: username -> (cached_at_epoch, panel_or_None). 5-minute TTL
 # matches the dashboard cache convention. Restarting the process drops this;
 # admin-driven assignment changes flush it via `invalidate_panel`.
@@ -50,6 +61,18 @@ def get_practitioner_id(username: str | None) -> str | None:
     if not username:
         return None
     return USERNAME_TO_PRACTITIONER.get(username)
+
+
+def get_user_id(username: str | None) -> int | None:
+    """Return the legacy `users.id` for `username`, or None if unmapped.
+
+    Used by the appointment-write path which targets the standard REST
+    API (POST /api/patient/{pid}/appointment) with `pc_aid` set to the
+    integer user id rather than the FHIR Practitioner UUID.
+    """
+    if not username:
+        return None
+    return USERNAME_TO_USER_ID.get(username)
 
 
 async def get_panel_for_user(

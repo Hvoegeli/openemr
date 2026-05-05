@@ -1067,6 +1067,98 @@ async def calendar_today(username: str = Depends(current_user)) -> dict:
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
 
 
+@app.post("/api/schedule")
+async def api_schedule(
+    request: Request,
+    patient_uuid: str = Form(...),
+    event_date: str = Form(...),
+    hour: int = Form(...),
+    minute: int = Form(...),
+    duration_minutes: int = Form(30),
+    comments: str = Form(""),
+    username: str = Depends(current_user),
+) -> dict:
+    """Schedule an appointment for `patient_uuid` on the logged-in user's
+    calendar. Form fields:
+
+      patient_uuid: FHIR Patient UUID the user has access to
+      event_date:   ISO date "YYYY-MM-DD"
+      hour:         0-23 (24h)
+      minute:       0-59, but the UI dropdown restricts to 5-min increments
+      duration_minutes: minutes (default 30)
+      comments:     optional free-text note saved to pc_hometext
+
+    Provider assignment: per Option A from the calendar design — the
+    appointment is created for the currently-logged-in user (their
+    `users.id`). Admins schedule on the admin calendar (id=1); mapped
+    practitioner users schedule on their own. Users not in
+    `USERNAME_TO_USER_ID` get HTTP 400.
+
+    Returns: {appointment_id, event_date, start_time, duration_minutes}.
+    Errors:
+      400 — invalid hour/minute, invalid date, user not provider-mapped
+      404 — patient not in caller's panel
+      502 — OpenEMR rejected the write
+    """
+    await _check_patient_access(request, username, patient_uuid)
+
+    if not (0 <= hour <= 23):
+        raise HTTPException(
+            status_code=400, detail=f"hour must be 0-23, got {hour}",
+        )
+    if not (0 <= minute <= 59):
+        raise HTTPException(
+            status_code=400, detail=f"minute must be 0-59, got {minute}",
+        )
+    if duration_minutes <= 0 or duration_minutes > 480:
+        raise HTTPException(
+            status_code=400,
+            detail=f"duration_minutes must be 1-480, got {duration_minutes}",
+        )
+
+    provider_user_id = access_control.get_user_id(username)
+    if provider_user_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"user {username!r} has no users.id mapping; add a row to "
+                f"USERNAME_TO_USER_ID in app/access_control.py"
+            ),
+        )
+
+    start_time = f"{hour:02d}:{minute:02d}"
+    try:
+        result = await app.state.openemr_writer.write_appointment(
+            patient_uuid=patient_uuid,
+            provider_user_id=provider_user_id,
+            event_date=event_date,
+            start_time=start_time,
+            duration_minutes=duration_minutes,
+            comments=comments,
+        )
+    except OpenEMRWriteError as e:
+        raise HTTPException(
+            status_code=502, detail=f"OpenEMR appointment write failed: {e}",
+        ) from e
+
+    # Drop ALL cached calendar entries — the new appointment is going to
+    # change every per-panel slice, and the cache is keyed on panel
+    # content, not on a date. Use the same prefix-invalidate pattern as
+    # the assignment-changed handler (line ~1390).
+    app.state.cache.invalidate_prefix("calendar:today:")
+
+    log.info(
+        "schedule: user=%s patient=%s date=%s time=%s eid=%s",
+        username, patient_uuid, event_date, start_time, result["appointment_id"],
+    )
+    return {
+        "appointment_id": result["appointment_id"],
+        "event_date": event_date,
+        "start_time": start_time,
+        "duration_minutes": duration_minutes,
+    }
+
+
 # ─── clinical notes ──────────────────────────────────────────────────────
 
 

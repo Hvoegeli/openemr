@@ -724,6 +724,40 @@
     }
     .modal-body .status.ok  { color: #15803d; }
     .modal-body .status.err { color: #b91c1c; }
+
+    /* ── Schedule Appointment modal (Patient Card tab) ─────────────── */
+    .patient-header {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 0.75rem;
+    }
+    .schedule-btn {
+      background: var(--accent); color: white; border: 0;
+      border-radius: 6px; padding: 0.35rem 0.75rem;
+      font: inherit; font-size: 0.78rem; font-weight: 500;
+      cursor: pointer; flex-shrink: 0;
+    }
+    .schedule-btn:hover { filter: brightness(1.1); }
+    .schedule-time-row { display: flex; gap: 0.5rem; }
+    .schedule-time-row > div { flex: 1; }
+    #schedule-patient-name {
+      font-weight: 500; margin-bottom: 0.85rem;
+      padding: 0.5rem 0.7rem; background: #f1f5f9; border-radius: 6px;
+    }
+    #schedule-summary {
+      padding: 0.85rem; background: #f1f5f9; border-radius: 6px;
+      margin: 0.85rem 0; font-size: 0.92rem;
+    }
+    #schedule-summary .summary-row {
+      display: flex; justify-content: space-between; padding: 0.15rem 0;
+    }
+    #schedule-summary .summary-row .label {
+      color: #64748b; font-size: 0.82rem;
+    }
+    #schedule-confirm-btn { background: #16a34a; color: white; font-weight: 500; }
+    #schedule-confirm-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    #schedule-back, #schedule-cancel { background: #e2e8f0; color: #0f172a; }
+    #schedule-continue { background: var(--accent); color: white; font-weight: 500; }
+    #schedule-continue:disabled { opacity: 0.55; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -774,6 +808,72 @@
         <button type="submit" id="upload-submit">Upload &amp; Extract</button>
       </footer>
     </form>
+  </div>
+</div>
+
+<!-- Schedule Appointment modal — opened from the Patient Card tab.
+     Two stages: (1) date + hour + minute + duration form, (2) confirmation
+     summary. Created on backdrop click, Cancel, or successful schedule. -->
+<div id="schedule-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="schedule-modal-title">
+  <div class="modal-dialog">
+    <header class="modal-head">
+      <h2 id="schedule-modal-title">Schedule appointment</h2>
+      <button type="button" class="modal-close" aria-label="Close">×</button>
+    </header>
+    <!-- Stage 1: form -->
+    <form id="schedule-form">
+      <div class="modal-body">
+        <div id="schedule-patient-name">—</div>
+        <div class="field">
+          <label for="schedule-date">Date</label>
+          <input type="date" id="schedule-date" required>
+        </div>
+        <div class="field">
+          <div class="schedule-time-row">
+            <div>
+              <label for="schedule-hour">Hour (24h)</label>
+              <select id="schedule-hour" required></select>
+            </div>
+            <div>
+              <label for="schedule-minute">Minute</label>
+              <select id="schedule-minute" required></select>
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <label for="schedule-duration">Duration</label>
+          <select id="schedule-duration">
+            <option value="15">15 minutes</option>
+            <option value="30" selected>30 minutes</option>
+            <option value="45">45 minutes</option>
+            <option value="60">60 minutes</option>
+            <option value="90">90 minutes</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="schedule-comments">Comments (optional)</label>
+          <input type="text" id="schedule-comments" placeholder="Reason for visit, special instructions, etc.">
+        </div>
+        <div id="schedule-status" class="status"></div>
+      </div>
+      <footer class="modal-foot">
+        <button type="button" id="schedule-cancel">Cancel</button>
+        <button type="submit" id="schedule-continue">Continue →</button>
+      </footer>
+    </form>
+    <!-- Stage 2: confirmation -->
+    <div id="schedule-confirm-stage" style="display:none">
+      <div class="modal-body">
+        <p style="margin:0 0 0.6rem; color:#334155;">Please confirm the appointment details:</p>
+        <div id="schedule-summary">—</div>
+        <p style="font-size:0.78rem; color:#64748b; margin:0;">Once confirmed, the appointment is added to OpenEMR's calendar and will appear in Today's Calendar.</p>
+        <div id="schedule-confirm-status" class="status"></div>
+      </div>
+      <footer class="modal-foot">
+        <button type="button" id="schedule-back">← Back</button>
+        <button type="button" id="schedule-confirm-btn">Confirm appointment</button>
+      </footer>
+    </div>
   </div>
 </div>
 
@@ -1239,11 +1339,16 @@
           : '<div class="empty">' + emptyText + '</div>';
 
       return [
-        '<h2 class="patient-name">' + escapeHtml(d.name || '(unknown)') + '</h2>',
-        '<div class="meta">',
-          (d.age != null ? d.age + 'y · ' : ''),
-          escapeHtml(d.sex || '?'),
-          ' · MRN <code>' + escapeHtml(d.mrn || '') + '</code>',
+        '<div class="patient-header">',
+          '<div>',
+            '<h2 class="patient-name">' + escapeHtml(d.name || '(unknown)') + '</h2>',
+            '<div class="meta">',
+              (d.age != null ? d.age + 'y · ' : ''),
+              escapeHtml(d.sex || '?'),
+              ' · MRN <code>' + escapeHtml(d.mrn || '') + '</code>',
+            '</div>',
+          '</div>',
+          '<button type="button" id="btn-schedule" class="schedule-btn">＋ Schedule</button>',
         '</div>',
         '<h3 data-section="AllergyIntolerance">Allergies</h3>',
         list(d.allergies, 'AllergyIntolerance', a =>
@@ -2659,6 +2764,198 @@
         }
         // Auto-close after a short success flash
         setTimeout(closeModal, 1200);
+      });
+    })();
+
+    /* ── Schedule Appointment modal ───────────────────────────────────
+       Two stages: form (date/hour/minute/duration/comments), then
+       confirmation summary. Opens from the +Schedule button on the
+       patient card. Submits to /api/schedule, then refreshes the
+       Today's Calendar tab so the new slot appears in place.
+    */
+    (() => {
+      const $modal     = document.getElementById('schedule-modal');
+      const $close     = $modal.querySelector('.modal-close');
+      const $cancel    = document.getElementById('schedule-cancel');
+      const $form      = document.getElementById('schedule-form');
+      const $continue  = document.getElementById('schedule-continue');
+      const $back      = document.getElementById('schedule-back');
+      const $confirm   = document.getElementById('schedule-confirm-btn');
+      const $stage1    = $form;
+      const $stage2    = document.getElementById('schedule-confirm-stage');
+      const $name      = document.getElementById('schedule-patient-name');
+      const $date      = document.getElementById('schedule-date');
+      const $hour      = document.getElementById('schedule-hour');
+      const $minute    = document.getElementById('schedule-minute');
+      const $duration  = document.getElementById('schedule-duration');
+      const $comments  = document.getElementById('schedule-comments');
+      const $status    = document.getElementById('schedule-status');
+      const $summary   = document.getElementById('schedule-summary');
+      const $cstatus   = document.getElementById('schedule-confirm-status');
+
+      // Populate hour (8-17 = 8 AM to 5 PM, sensible clinic hours) and
+      // minute (5-min increments) selects exactly once.
+      let dropdownsBuilt = false;
+      function buildDropdowns() {
+        if (dropdownsBuilt) return;
+        for (let h = 8; h <= 17; h++) {
+          const opt = document.createElement('option');
+          opt.value = String(h);
+          const ampm = h < 12 ? 'AM' : 'PM';
+          const display = (h === 12 ? 12 : h % 12);
+          opt.textContent = display + ' ' + ampm + ' (' + String(h).padStart(2, '0') + ':00)';
+          $hour.appendChild(opt);
+        }
+        $hour.value = '9';
+        for (let m = 0; m < 60; m += 5) {
+          const opt = document.createElement('option');
+          opt.value = String(m);
+          opt.textContent = ':' + String(m).padStart(2, '0');
+          $minute.appendChild(opt);
+        }
+        $minute.value = '0';
+        dropdownsBuilt = true;
+      }
+
+      function setStatus(el, msg, kind) {
+        el.textContent = msg || '';
+        el.className = 'status ' + (kind || '');
+      }
+
+      function resetForm() {
+        $stage1.style.display = '';
+        $stage2.style.display = 'none';
+        // Default date = today (local time)
+        const today = new Date();
+        const yyyy = today.getFullYear();
+        const mm = String(today.getMonth() + 1).padStart(2, '0');
+        const dd = String(today.getDate()).padStart(2, '0');
+        $date.value = yyyy + '-' + mm + '-' + dd;
+        $hour.value = '9';
+        $minute.value = '0';
+        $duration.value = '30';
+        $comments.value = '';
+        setStatus($status, '', '');
+        setStatus($cstatus, '', '');
+        $continue.disabled = false;
+        $confirm.disabled = false;
+      }
+
+      function openModal() {
+        if (!activePatientId) {
+          alert('Open a patient chart first, then click Schedule.');
+          return;
+        }
+        buildDropdowns();
+        resetForm();
+        // Patient name display — try to grab from the active card.
+        const h2 = tabCard.querySelector('h2.patient-name');
+        $name.textContent = h2 ? h2.textContent : 'Patient ' + activePatientId;
+        $modal.style.display = 'flex';
+      }
+      function closeModal() { $modal.style.display = 'none'; }
+
+      function fmtTime12(h, m) {
+        const ampm = h < 12 ? 'AM' : 'PM';
+        const display = (h === 12 || h === 0) ? 12 : h % 12;
+        return display + ':' + String(m).padStart(2, '0') + ' ' + ampm;
+      }
+      function fmtDate(iso) {
+        // "2026-05-05" -> "Tue, May 5, 2026"
+        const d = new Date(iso + 'T12:00:00');
+        if (isNaN(d.getTime())) return iso;
+        return d.toLocaleDateString(undefined, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
+      }
+
+      // Stage 1 -> Stage 2 transition: validate, render summary
+      $form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (!$date.value) { setStatus($status, 'Pick a date.', 'err'); return; }
+        const h = Number($hour.value);
+        const m = Number($minute.value);
+        const dur = Number($duration.value);
+        if (!Number.isFinite(h) || !Number.isFinite(m) || !Number.isFinite(dur)) {
+          setStatus($status, 'Invalid time selection.', 'err');
+          return;
+        }
+        // Render confirmation summary
+        const rows = [
+          ['Patient', $name.textContent],
+          ['Date',    fmtDate($date.value)],
+          ['Time',    fmtTime12(h, m)],
+          ['Duration', dur + ' minutes'],
+        ];
+        if ($comments.value.trim()) rows.push(['Comments', $comments.value.trim()]);
+        $summary.innerHTML = rows.map(([k, v]) =>
+          '<div class="summary-row"><span class="label">' + escapeHtml(k) + '</span><span>' + escapeHtml(v) + '</span></div>'
+        ).join('');
+        $stage1.style.display = 'none';
+        $stage2.style.display = '';
+        setStatus($cstatus, '', '');
+      });
+
+      $back.addEventListener('click', () => {
+        $stage2.style.display = 'none';
+        $stage1.style.display = '';
+        setStatus($cstatus, '', '');
+      });
+
+      $confirm.addEventListener('click', async () => {
+        $confirm.disabled = true;
+        setStatus($cstatus, 'Scheduling…', '');
+        const fd = new FormData();
+        fd.append('patient_uuid', activePatientId);
+        fd.append('event_date', $date.value);
+        fd.append('hour', String(Number($hour.value)));
+        fd.append('minute', String(Number($minute.value)));
+        fd.append('duration_minutes', String(Number($duration.value)));
+        if ($comments.value.trim()) fd.append('comments', $comments.value.trim());
+
+        let resp;
+        try {
+          resp = await fetch('/api/schedule', { method: 'POST', body: fd, credentials: 'same-origin' });
+        } catch (err) {
+          setStatus($cstatus, 'Network error: ' + err, 'err');
+          $confirm.disabled = false;
+          return;
+        }
+        let body;
+        try { body = await resp.json(); } catch { body = { detail: 'non-JSON response' }; }
+        if (!resp.ok) {
+          setStatus($cstatus, 'Schedule failed (HTTP ' + resp.status + '): ' + (body.detail || ''), 'err');
+          $confirm.disabled = false;
+          return;
+        }
+        setStatus($cstatus, 'Scheduled. Refreshing calendar…', 'ok');
+        // Refresh today's calendar so the new slot appears in the roster.
+        try {
+          const r = await fetch('/api/calendar/today', { credentials: 'same-origin' });
+          if (r.ok) {
+            const cal = await r.json();
+            if (typeof renderCalendar === 'function') {
+              renderCalendar(cal);
+            }
+          }
+        } catch {}
+        setTimeout(closeModal, 1100);
+      });
+
+      // Open: delegate from #tabCard so the dynamically-rendered
+      // #btn-schedule still triggers (the patient card re-renders on
+      // every patient switch, so we can't bind the listener once).
+      tabCard.addEventListener('click', (e) => {
+        const btn = e.target.closest('#btn-schedule');
+        if (btn) openModal();
+      });
+
+      // Close paths
+      $close.addEventListener('click', closeModal);
+      $cancel.addEventListener('click', closeModal);
+      $modal.addEventListener('click', (e) => {
+        if (e.target === $modal) closeModal();
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && $modal.style.display !== 'none') closeModal();
       });
     })();
   </script>
