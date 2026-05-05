@@ -889,7 +889,6 @@ async def patient_documents(
 
 @app.get("/api/upload/patients")
 async def api_upload_patients(
-    request: Request,
     username: str = Depends(current_user),
 ) -> dict:
     """Patient roster the upload form uses to populate its patient dropdown.

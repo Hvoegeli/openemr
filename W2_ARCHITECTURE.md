@@ -6,8 +6,12 @@
 > retrieval design, the eval gate, the risks, and the explicit reversals (or
 > non-reversals) of Week 1's deliberate scope choices.
 >
-> **Status:** stub — section skeleton in place; content fills in as decisions
-> land during the sprint. Updated continuously through Sunday 2026-05-10.
+> **Status:** MVP shipped on `copilot--branch-2` 2026-05-04 — extraction
+> pipeline + upload UI + BM25 RAG + agent tool wiring all live and verified
+> end-to-end against real OpenEMR + real Claude. Sections labeled
+> **MVP-shipped** below describe the as-built state; sections labeled
+> **deferred post-MVP** describe the PRD-faithful target shape we'll iterate
+> toward through Sunday 2026-05-10.
 
 ---
 
@@ -16,24 +20,89 @@
 Quick-reference table of choices already made (rationale in the relevant
 section below):
 
-| Area | Decision | Section |
-|---|---|---|
-| VLM | Claude Sonnet 4.6 vision, in-line bounding boxes | §1 |
-| Reranker | BGE (open-source, runs on Hetzner) | §3 |
-| Vector store | FAISS in-memory | §3 |
-| Guideline corpus | USPSTF + ADA (start) | §3 |
-| "Recommendation" tone | Level C with guardrails behind `recommendation_mode` toggle | §6 |
-| Branch | `copilot--branch-2`; no auto-merge to master | — |
-| Doc location | `W2_ARCHITECTURE.md` at repo root | — |
+| Area | MVP-shipped decision | PRD-faithful target | Section |
+|---|---|---|---|
+| VLM | Claude Sonnet 4.6 vision, tool-use forced JSON output | + bounding-box overlay UI (deferred) | §4 |
+| Retrieval | **BM25 only** (`rank-bm25`, in-process) | + FAISS dense + BGE reranker (deferred) | §3 |
+| Vector store | none (BM25 only) | FAISS in-memory | §3 |
+| Guideline corpus | hand-curated YAML, **12 chunks** USPSTF + ADA | + AHA cardiology corpus (deferred) | §3 |
+| Document persistence | OpenEMR multipart upload + FHIR-GET resolve; SHA-256 dedupe | (no change planned) | §4.5 |
+| Recommendation tone | guideline-grounded recs permitted under R2 carve-out (always-on; not toggle-gated) | per-conversation toggle (deferred) | §6 |
+| Upload UI | minimal HTML form at `/upload` with patient + doc-type dropdowns | wire into chat sidebar | §4.6 |
+| Patient-mismatch verification | **deferred** (PRD §5.4) | confirm-patient supervisor node | §5.4 |
+| Round-trip extraction → FHIR Observation/Condition/etc. | **deferred** (writer can do `DocumentReference` only today) | adapter layer over standard non-FHIR API | §4.5 |
+| Branch | `copilot--branch-2`; no auto-merge to master | — | — |
+| Preview deploy | Hetzner cloudflared tunnel on `:8001`, isolated from master `:8000` | — | — |
+| Doc location | `W2_ARCHITECTURE.md` at repo root | — | — |
 
 ---
 
-## 1. Executive summary (~500 words target)
+## 1. Executive summary
 
-**TODO** — written last, after all the decisions below have settled. Mirrors
-the shape of [`ARCHITECTURE.md`](ARCHITECTURE.md) §1: scenario, what's net-new
-vs. compounded from Week 1, the core architectural moves, where the
-verification line sits, what's deliberately out of scope.
+**Scenario.** A doctor in clinic uploads a paper lab report or a filled
+intake form to Co-pilot. Within ~10 seconds the document is persisted to
+OpenEMR (FHIR `DocumentReference`), its clinical contents are parsed into
+strict-typed JSON with per-field source citations, and the chat agent —
+already grounded in the patient's chart — can now also cite published
+guidelines (USPSTF + ADA) when the doctor asks "what should I screen for"
+or "what does the guideline say." Every clinical claim — chart fact OR
+guideline reference — carries an inline `[Type/ID]` citation that the
+existing Week 1 validator gate enforces.
+
+**What's net-new vs. Week 1.** Week 1 was a chart summarizer over
+structured FHIR data. Week 2 adds two capabilities the chart layer can't
+provide on its own:
+- **Multimodal document extraction.** The Phase 1 Pydantic schemas + the
+  Phase 2 `attach_and_extract` pipeline turn an arbitrary PDF or image
+  into typed, citation-bearing JSON via Claude Sonnet 4.6 vision +
+  forced tool-use. The persisted FHIR `DocumentReference` id flows into
+  every per-field citation so the chat can later trace any extracted
+  fact back to the page it came from.
+- **Evidence retrieval over published guidelines.** A 12-chunk
+  hand-curated corpus of USPSTF + ADA recommendations, indexed with
+  BM25 (`rank-bm25`, pure Python, ~3KB index). The agent's
+  `retrieve_guidelines` tool returns ranked chunks; cited inline as
+  `[Guideline/<chunk_id>]` alongside chart citations.
+
+**Core architectural moves.**
+1. **Pydantic-validated tool-use** for extraction. The vision call is
+   forced into a `record_lab_report` / `record_intake_form` tool whose
+   input schema is `LabReport.model_json_schema()` /
+   `IntakeForm.model_json_schema()`. The model can't smuggle extra
+   fields (`extra="forbid"`) and can't return free-text JSON the parser
+   would have to repair.
+2. **SHA-256 idempotency in the upload filename** — `sha256-<hex>__<orig>`
+   — so re-uploading the same file deduplicates via FHIR-GET without a
+   parallel local table. OpenEMR stays the single source of truth.
+3. **Two citation namespaces, one validator.** `[FHIRType/ID]` for
+   chart facts (Week 1) + `[Guideline/<chunk_id>]` for guideline
+   quotes (Week 2). The existing validator regex
+   `[A-Z][a-zA-Z]+/[a-zA-Z0-9._-]+` accepts both without modification —
+   guideline citations are additive, not a parallel surface.
+4. **No new agent.** The Phase 4.1 wiring adds `retrieve_guidelines` as
+   one more entry in the existing Week 1 `TOOLS` list. The same
+   LangGraph + the same validator + the same observability stack apply.
+   The "supervisor + worker" multi-agent shape from the PRD §5 is
+   deferred — for the MVP the chat agent calls retrieval directly
+   alongside its existing FHIR tools, and the live e2e smoke shows it
+   does so correctly with no orchestration code added.
+
+**Verification line.** Three layers, each independently fail-closed:
+schema validation at the extraction boundary (Pydantic with
+`extra="forbid"`), citation-id validation in the response gate
+(`find_invalid_citations` rejects fabricated `Guideline/<chunk_id>`s),
+and the live end-to-end smoke (`scripts/smoke_e2e_mvp.py`) which
+asserts both citation namespaces appear and refuses to fabricate when
+the corpus has no relevant chunk. Live verification on 2026-05-04 saw
+the agent correctly cite 3 guideline chunks + 1 FHIR ref and honestly
+admit corpus gaps rather than make up an HbA1c-target chunk.
+
+**Deliberately out of scope for the MVP** (deferred, not abandoned —
+documented per-section below): dense embeddings + reranker, AHA corpus,
+PDF bounding-box overlay UI, patient-mismatch confirmation flow,
+extraction → FHIR-Observation/Condition write-back, `recommendation_mode`
+toggle UI surface (the R2 prompt carve-out is always-on for guideline-
+backed recs; we kept the toggle out of the UI for time).
 
 ---
 
@@ -50,55 +119,120 @@ verification line sits, what's deliberately out of scope.
 
 ## 3. RAG design — the evidence layer
 
-### 3.1 Corpus
+### 3.1 Corpus — MVP-shipped
 
-**Decision:** USPSTF + ADA, two sources, start.
+**Decision:** USPSTF + ADA, hand-curated YAML at
+[`clinical-copilot/data/guidelines/corpus.yaml`](clinical-copilot/data/guidelines/corpus.yaml),
+**12 chunks** (6 USPSTF + 6 ADA), one chunk per recommendation/section.
+Each chunk is ≤200 words and carries `chunk_id` (snake_case stable
+slug, doubles as the citation id), `source`, `title`, `year`, `url`,
+`topic_tags`, and `text`.
 
-- **USPSTF** — US Preventive Services Task Force recommendations. Public
-  domain. Cleanest fit for the PRD's "what should I pay attention to"
-  preventive-care framing. ~100 recommendations after structuring.
-- **ADA** — American Diabetes Association annual care standards. Bread-and-
-  butter PCP work; the PRD's patient scenario likely involves a diabetic.
-  Freely distributable for educational use.
+- **USPSTF — 6 chunks** — statin / aspirin primary prevention 2022,
+  lipid screening 2016, diabetes screening 2021, colorectal cancer
+  screening 2021, blood pressure screening 2021. Public-domain
+  language paraphrased to ≤200 words to keep the prompt window cheap;
+  every chunk carries the canonical USPSTF URL for the doctor to read
+  the full source.
+- **ADA Standards of Care 2024 — 6 chunks** — glycemic targets,
+  pharmacotherapy first-line, lipid management in diabetes, hypertension
+  in diabetes, CKD in diabetes, aspirin in diabetes. Same paraphrase
+  policy.
 
-Two sources keeps the corpus small and inspectable. Per the PRD's pitfall
-list: *"trying to support five document types before two work reliably"* —
-same principle for guidelines.
+**Why 12, not 100.** Hand-curation makes the corpus small and
+inspectable for the demo. Every chunk has been read by a human, every
+chunk's BM25-tokenized form has been smoke-checked
+([`scripts/smoke_retrieve.py`](clinical-copilot/scripts/smoke_retrieve.py)),
+and a clinically-relevant top-1 is returned for every demo query
+(CRC scored 11.72 vs next-best 1.24 — wide margin). Per the PRD's
+pitfall list: *"trying to support five document types before two work
+reliably."*
 
-**TODO:** decide chunking strategy (per-recommendation vs. per-section vs.
-fixed-size with overlap). Hand-curate the source list before mass-indexing.
+**Chunking strategy: per-recommendation.** Each chunk corresponds to
+one self-contained guideline statement (the same shape USPSTF / ADA
+publish). No overlap, no sliding window, no semantic chunker — the
+guidelines themselves are already chunked the way a clinician thinks
+about them.
 
-**TODO (post-MVP fast-follow):** add **AHA** (American Heart Association)
-guidelines as a third corpus once USPSTF + ADA are working end-to-end and
-the eval gate is green. AHA fills the cardiology gap (lipid management,
-ASCVD risk, BP targets) that USPSTF only partially covers. Hold off until
-MVP ships — per the PRD's *"feel narrower than the original spec"*
-guidance, two corpora reliably indexed beats three corpora half-indexed.
+### 3.1.1 Corpus extension — deferred post-MVP
 
-### 3.2 Indexing pipeline
+- **AHA** (American Heart Association) cardiology guidelines (lipid
+  management, ASCVD risk calculator details, BP targets). Fills the
+  gap USPSTF only partially covers. Hold off until MVP grades green —
+  two corpora reliably indexed beats three corpora half-indexed.
+- **Move from hand-curated to PDF ingestion** of full USPSTF / ADA
+  publications. Requires a structured-extraction pipeline of its own
+  (which the Phase 2.1 `attach_and_extract` could service against
+  guideline PDFs — same shape as a lab report extraction).
 
-**Decision:** in-process, FAISS in-memory, rebuilt at startup.
+### 3.2 Indexing pipeline — MVP-shipped
 
-- Embedding model: **TODO** — likely OpenAI `text-embedding-3-small` or a
-  local sentence-transformer. Decision pending.
-- Vector store: **FAISS in-memory** (`faiss-cpu`). Index lives in the FastAPI
-  process; rebuild on startup is sub-second for the corpus size. Zero ops.
-- Sparse index: **TODO** — BM25 via `rank-bm25` (pure Python, in-process) or
-  Elasticsearch (overkill for this scale). Default to `rank-bm25`.
+**Decision:** in-process **BM25 only** (`rank-bm25` 0.2.x — pure Python,
+zero transitives), built eagerly at module import in
+[`clinical-copilot/app/guidelines/retrieve.py`](clinical-copilot/app/guidelines/retrieve.py).
 
-### 3.3 Retrieval + rerank
+- **Index:** `BM25Okapi` over the concatenated `text + title + topic_tags`
+  surface of each chunk. Including title and tags lets a query like
+  "aspirin primary prevention" surface a chunk even when the body uses
+  synonyms.
+- **Tokenization:** `re.findall(r"[a-z0-9]+", text.lower())`. Drops
+  punctuation, preserves alphanumerics. Locked in by tests
+  ([`tests/guidelines/test_retrieve.py::TestTokenize`](clinical-copilot/tests/guidelines/test_retrieve.py)).
+- **Module-level eager load** means a malformed YAML or duplicate
+  `chunk_id` fails loudly at import (not at first query). For 12 chunks
+  this is essentially free; for thousands it would move to lazy load.
+- **No vector store, no embedding model.** The PRD-faithful design (FAISS
+  + dense embeddings + BGE rerank, see §3.3 deferred) is post-MVP.
 
-**Decision:** Hybrid sparse+dense → BGE reranker → top 5–10 chunks to LLM.
+### 3.2.1 Indexing — deferred post-MVP (PRD-faithful target)
 
-- Stage 1 (retrieval): query against both BM25 and dense FAISS, merge top-50.
-- Stage 2 (rerank): **BGE reranker** (open-source, `BAAI/bge-reranker-base`)
-  scores each candidate against the query; keeps top 5–10.
+- **Embedding model:** local sentence-transformer
+  (`all-MiniLM-L6-v2`, ~80 MB) so we don't add a vendor dep / BAA.
+  Encode + index at startup, persist to disk.
+- **FAISS in-memory** (`faiss-cpu`) for dense vectors. Rebuild
+  on-startup is sub-second for corpus sizes well past 12 chunks.
+- **Hybrid retrieve** layered over the existing BM25 — see §3.3
+  deferred.
+
+### 3.3 Retrieval — MVP-shipped
+
+**Public surface:** `retrieve_guidelines(query: str, k: int = 3)
+-> list[RetrievalHit]`. Tokenize the query, score every chunk, return
+top-k by BM25 descending. Hits with score ≤ 0 are dropped (a query
+that shares no tokens with any chunk returns `[]` instead of noise).
+`k` clamped to `len(CORPUS)`; `k <= 0` and empty/whitespace queries
+return `[]`. Each `RetrievalHit` carries the full `GuidelineChunk` +
+the BM25 `score` + a 1-indexed `rank`.
+
+The agent's tool wrapper
+([`app/agent/tools.py::_retrieve_guidelines_impl`](clinical-copilot/app/agent/tools.py))
+emits `sources: ["Guideline/<chunk_id>", ...]` so the existing citation
+validator accepts inline `[Guideline/<chunk_id>]` references.
+
+### 3.3.1 Retrieval — deferred post-MVP (PRD-faithful target)
+
+The PRD specifies hybrid retrieve + BGE rerank. Both are deferred behind
+the same `retrieve_guidelines(query, k)` interface — when the dense
+index lands, the function body changes; no caller does.
+
+- Stage 1 (retrieval): query against BM25 ∪ dense FAISS, merge top-50.
+- Stage 2 (rerank): **BGE reranker** (`BAAI/bge-reranker-base`,
+  open-source, runs on Hetzner) scores each candidate against the query;
+  keeps top 5–10.
 - Stage 3: top chunks fed to the answer model with citation metadata
   attached.
 
-**Why BGE over Cohere Rerank** (which the PRD names): no new vendor BAA, no
-API key, runs locally on Hetzner, top-of-MTEB quality at its size, easy swap
-to Cohere later by changing one function.
+**Why BGE over Cohere Rerank** (which the PRD names): no new vendor BAA,
+no API key, runs locally, top-of-MTEB quality at its size, easy swap to
+Cohere later by changing one function.
+
+**Why deferred for MVP.** The 12-chunk hand-curated corpus is small enough
+that BM25 alone returns clinically-relevant top-1 for every demo query
+(CRC scored 11.72 vs next 1.24 — verified via
+[`scripts/smoke_retrieve.py`](clinical-copilot/scripts/smoke_retrieve.py)).
+Dense + rerank pays off when the corpus grows past ~100 chunks where
+keyword overlap stops dominating. We get the win without the dependency
+footprint until the corpus warrants it.
 
 ### 3.4 Citation contract for retrieved evidence
 
@@ -121,43 +255,98 @@ This lines up with the same citation shape the document-extraction tools use
 
 ## 4. Document ingestion + extraction
 
-### 4.1 Tool signature
+### 4.1 Tool signature — MVP-shipped
 
-**Decision:** new `attach_and_extract(patient_id, file_path, doc_type)` tool.
-
-- `patient_id` — gated by the existing patient-panel ACL ([app/access_control.py](clinical-copilot/app/access_control.py)).
-- `file_path` — uploaded file in a server-side temp location.
-- `doc_type` — enum: `lab_pdf` | `intake_form`. New types added later as
-  fast-follow.
-
-Returns: strict-schema JSON (per §4.2 below) plus the persisted
-`DocumentReference` ID for the source document.
-
-### 4.2 Schemas
-
-**Pydantic strict schemas.** Stub:
+**Decision:** [`app/extraction/extract.py::attach_and_extract`](clinical-copilot/app/extraction/extract.py).
 
 ```python
-class LabResult(BaseModel):
-    test_name: str
-    value: float | str
-    unit: str
-    reference_range: str | None
-    collection_date: date
-    abnormal_flag: Literal["H", "L", "N", "C", None]
-    source_citation: Citation
-
-class IntakeForm(BaseModel):
-    demographics: Demographics
-    chief_concern: str
-    current_medications: list[Medication]
-    allergies: list[Allergy]
-    family_history: list[FamilyHistoryItem]
-    source_citation: Citation
+async def attach_and_extract(
+    *,
+    file_bytes: bytes,                 # raw bytes (not file_path — works for HTTP uploads)
+    filename: str,                     # original name for the OpenEMR upload (gets SHA-256 prefix)
+    doc_type: DocumentType,            # Literal["lab_pdf", "intake_form"]
+    patient_uuid: str,                 # FHIR Patient UUID; ACL gate at /api/upload
+    mime_type: str = "application/pdf",
+    writer: OpenEMRWriter | None = None,        # optional injection for tests
+    anthropic_client: AsyncAnthropic | None = None,  # optional injection for tests
+    model: str = "claude-sonnet-4-6",
+) -> AttachAndExtractResult:           # bundles {extracted, write_result}
 ```
 
-**TODO:** finalize all sub-types; write Pydantic validation tests; decide on
-optionality vs. required for fields the VLM might miss.
+The file is read once (caller already has bytes from `UploadFile.read()`),
+persisted to OpenEMR (Phase 1.3 writer — multipart upload + SHA-256 dedupe
++ FHIR-GET resolve), then sent to Claude vision with the resolved
+`DocumentReference/{uuid}` id wired into every Citation as
+`source_document_id`. The persisted id is also exposed as
+`result.reference_id` for the UI.
+
+**ACL.** The `/api/upload` endpoint
+([`app/main.py::api_upload`](clinical-copilot/app/main.py)) gates
+`patient_uuid` via the same `_check_patient_access` helper the chat uses
+— off-panel patients get 404 (not 403, to avoid leaking existence). The
+`attach_and_extract` function itself is ACL-agnostic; the gate is at the
+HTTP boundary.
+
+**`doc_type` extension.** Adding a new type means three updates: append
+to `DocumentType` Literal in `app/extraction/schemas.py`, append to
+`DOC_TYPE_LABELS` (UI dropdown source), append to `DOC_CATEGORIES` in
+`app/fhir/writer.py` (OpenEMR category-path map), and add a new
+`record_<type>` tool entry to `_TOOL_BUILDERS` in
+`app/extraction/vision.py`. The drift test in
+`tests/extraction/test_schemas.py::TestDocTypeConstantAlignment` locks
+the first three in sync.
+
+### 4.2 Schemas — MVP-shipped
+
+Final shapes live at [`app/extraction/schemas.py`](clinical-copilot/app/extraction/schemas.py)
+(216 lines, 64 isolated tests at
+[`tests/extraction/test_schemas.py`](clinical-copilot/tests/extraction/test_schemas.py)).
+Top-level shape is a discriminated union:
+
+```python
+ExtractedDocument = Annotated[
+    Union[LabReport, IntakeForm],
+    Field(discriminator="document_type"),
+]
+```
+
+Every model uses `model_config = ConfigDict(extra="forbid")` so the VLM
+can't smuggle hallucinated fields. Every required string identifier
+uses `Field(min_length=1)` — empty strings are structurally
+indistinguishable from missing data and would silently pass downstream
+`citation_present` checks.
+
+Sub-types:
+- **`Citation`** — exactly the PRD §5 shape:
+  `{source_type, source_id, page_or_section, field_or_chunk_id,
+  quote_or_value, bbox?}`. `bbox: BoundingBox | None` — populated when
+  the source supports visual overlay (lab PDFs, intake forms), omitted
+  for sources that don't (guideline text, FHIR resources).
+- **`LabResult`** — `test_name`, `value: float | str` (qualitative
+  results like "positive" stay strings), `unit`, `reference_range`,
+  `collection_date: date`, `abnormal_flag: Literal["H","L","N","C"]
+  | None`, `source_citation: Citation`.
+- **`LabReport`** — `results: list[LabResult]` with `min_length=1`
+  (an empty lab PDF is a failed extraction, not a successful one);
+  `source_document_id`; optional `facility`, `ordering_provider`.
+- **`Demographics`**, **`Medication`**, **`Allergy`**,
+  **`FamilyHistoryItem`** — each carries its own `source_citation`.
+- **`IntakeForm`** — discriminator literal + `demographics`,
+  `chief_concern`, three list fields with `default_factory=list` (a
+  patient with no current meds is fine; the VLM returns `[]` rather
+  than omitting the key).
+
+**Optionality policy.** Required fields are required; optional fields
+are explicit. The VLM is steered not to invent fields it can't see;
+omitting an optional field is the right behavior, returning `""` is
+not (the latter would slip past `citation_present` checks).
+
+**Tests:** 64 isolated tests covering required-field-rejection
+(parametrized over every required field), empty-string rejection on
+every `min_length=1` field, discriminator dispatch + missing-discriminator
++ invalid-discriminator, BoundingBox boundary checks, and a fixture-
+validates-schema test that locks the Phase 1.2 generator output to the
+schemas.
 
 ### 4.3 Citation shape
 
@@ -187,18 +376,58 @@ system.
 The PRD requires source documents and derived facts to round-trip without
 duplicates or untraceable records.
 
-- **Source document** → FHIR `DocumentReference` (one of the 4 writable FHIR
-  resources per [ARCHITECTURE.md §4.1](ARCHITECTURE.md#41-data-layer--openemr)).
-  Reuses the existing write-capable OAuth client ([scripts/register_seed_client.py](clinical-copilot/scripts/register_seed_client.py)).
-- **Lab values** → FHIR `Observation` per result, linked to the source
-  `DocumentReference` via `derivedFrom`.
-- **Intake fields** → mapped to `Patient` updates, `Condition` (problem list),
-  `AllergyIntolerance`, `MedicationStatement`. **TODO:** these mostly require
-  the non-FHIR `/apis/default/api/` path documented in Week 1 §4.1; need to
-  confirm scope coverage and write an adapter layer.
-- **Idempotency:** every ingestion writes a content-hash key into a local
-  table; re-uploading the same file is a no-op (returns the existing
-  `DocumentReference` ID).
+**MVP-shipped:**
+
+- **Source document → FHIR `DocumentReference`.** Implemented in
+  [`app/fhir/writer.py::write_document_reference`](clinical-copilot/app/fhir/writer.py).
+  OpenEMR's FHIR layer doesn't actually route `POST /DocumentReference`
+  despite advertising `create` in its CapabilityStatement, so the write
+  path pivots to the standard non-FHIR multipart endpoint at
+  `POST /api/patient/{pid}/document?path={category}` and then
+  resolves the new resource id via FHIR `GET /DocumentReference?patient=...`
+  search on `attachment.title`.
+- **Idempotency = SHA-256 in the upload filename.** The writer prepends
+  the file's SHA-256 to the upload name (`sha256-<hex>__<original>`).
+  Re-uploading the same bytes finds the existing match in the FHIR
+  search and returns its id without re-POSTing —
+  `result["created"] = False` flags the dedupe path. **No parallel
+  local table** — OpenEMR stays the single source of truth for what's
+  been persisted. Verified via `scripts/smoke_document_writer.py`
+  against real OpenEMR (Chen lipid panel + intake produced distinct
+  ids; re-upload returned the same id).
+- **`DOC_CATEGORIES` pre-lowercased** — `lab_pdf → labreport`,
+  `intake_form → patientinformation`. OpenEMR's `getLastIdOfPath` does
+  case-sensitive equality against `replace(LOWER(name), ' ', '')`, so
+  anything else silently orphans the upload (no `categories_to_documents`
+  bridge row). Locked in by
+  `tests/fhir/test_writer_document_reference.py::test_doc_categories_constant_pre_normalized`.
+
+**Deferred post-MVP:**
+
+- **Extraction → FHIR `Observation` per lab result**, linked to the
+  source `DocumentReference` via `derivedFrom`. The schemas already
+  carry every field the FHIR mapping needs (LOINC test_name, value,
+  unit, reference_range, collection_date, abnormal_flag); a thin
+  adapter would materialize them into FHIR Observations during the
+  same `attach_and_extract` call.
+- **Intake fields → `Patient` updates / `Condition` / `AllergyIntolerance`
+  / `MedicationStatement`.** Most of these require the standard non-FHIR
+  `/apis/default/api/` path (the seed scripts at
+  `scripts/seed_demo_patients.py` already exercise the same endpoints
+  for create-patient, allergies, problems, meds); a Phase 4.x writer-
+  helper would consume an `IntakeForm` and emit the corresponding
+  REST POSTs.
+- **`derivedFrom` linking** — the FHIR R4 `Observation.derivedFrom`
+  reference is the canonical join from extracted lab values back to
+  their source `DocumentReference`. Persistence pipeline writes the
+  `DocumentReference` first (already done; we have the id), then
+  emits Observations with `derivedFrom = [{reference: DocumentReference/{id}}]`.
+
+**Why the round-trip matters for the demo.** Without `derivedFrom`,
+extracted Observations would float in the chart unmoored from their
+source PDF. With it, a doctor can click an extracted A1c, see its
+`derivedFrom` link, and pull up the original lab report — the
+audit-trail-by-construction guarantee the PRD wants.
 
 ### 4.6 PDF bounding-box overlay (UI)
 
@@ -216,26 +445,65 @@ final layout.
 
 ## 5. Multi-agent graph — supervisor + workers
 
-### 5.1 Workers
+### 5.1 Worker shape — MVP-shipped
 
-- **`intake_extractor`** — owns `attach_and_extract`. Receives a file +
-  patient context, returns strict-schema JSON + persisted IDs.
-- **`evidence_retriever`** — owns RAG. Receives a query + patient context,
-  returns top-N reranked guideline chunks with citations.
+**Decision:** no separate worker agents. The Phase 4.1 wiring adds
+`retrieve_guidelines` as one more entry in the existing Week 1 `TOOLS`
+list at [`app/agent/tools.py`](clinical-copilot/app/agent/tools.py).
+The chat agent calls retrieval directly alongside its existing FHIR
+tools (`resolve_patient`, `get_patient_card`, `get_vital_trends`,
+`clinical_flags`, etc.).
 
-### 5.2 Supervisor
+`attach_and_extract` is **not** in the agent's tool list — it's the
+backend of the `/api/upload` HTTP endpoint, called by the upload form
+(or any other client). The doctor uploads via the form; the chat
+agent sees the resulting `DocumentReference` naturally via the
+chart-summarizer's existing `get_notes_24h` and Supporting Documents
+flow. Wiring `attach_and_extract` as a chat-callable tool would
+require a way for the chat to attach a file mid-conversation — a Phase
+2.X UX problem the upload form already solves.
 
-**TODO** — design choice: LangGraph state-machine supervisor (consistent with
-Week 1's existing LangGraph) vs. dedicated Supervisor agent (separate LLM
-call). Default to LangGraph-as-supervisor for inspectability + lower latency.
+### 5.2 Supervisor — MVP-shipped
 
-The supervisor decides per turn:
-1. Is there a new document attached this turn? → route to `intake_extractor`.
-2. Does the question require external evidence? → route to `evidence_retriever`.
-3. Synthesize the final answer with all gathered context.
+**Decision:** the existing Week 1 LangGraph IS the supervisor. The
+graph routes between `agent` (LLM call) and `tools` (tool execution)
+exactly as before; adding one more tool to the list extended the
+graph's reach without adding a graph node or a routing layer.
 
-Every routing decision is **logged** to the existing `traces.db` audit log,
-with `routing_reason` as a structured field. No black-box supervisors.
+**Why no dedicated supervisor.** The PRD §5 gestures at a "supervisor +
+worker" multi-agent pattern. For the MVP the chat agent already
+chooses tools per turn (which is the supervisor's only real job); a
+dedicated supervisor LLM call would double per-turn latency for no
+visible improvement. If we add later workflows where the routing
+policy outgrows what a tool-aware system prompt can express (e.g.
+"pre-render the document, then summarize, then ask a follow-up"), a
+LangGraph supervisor node remains a low-cost addition behind the same
+public API.
+
+**Routing observability.** Per-tool execution remains traced through the
+existing observability path (`app/observability.py` + `traces.db`). Tool
+calls are visible in the trace timeline; the agent's reasoning for
+calling each tool is the assistant message that preceded it.
+
+### 5.2.1 Multi-agent shape — deferred post-MVP (PRD-faithful target)
+
+If/when the workflow grows past the single-graph shape, the natural
+split is:
+- **`intake_extractor`** worker owns `attach_and_extract`. Triggered by
+  upload events, runs out-of-band, posts results to a per-patient
+  inbox the chat agent reads from.
+- **`evidence_retriever`** worker owns retrieval. The chat agent
+  emits a query; the retriever returns ranked chunks. Lets the
+  retriever swap its ranker (BM25 → hybrid → BGE-reranked) without
+  touching the chat agent.
+- **Supervisor** node arbitrates: new document this turn? Question
+  requires external evidence? Synthesize.
+
+The interfaces above are designed so this split is reachable without
+rewriting the chat agent — both `attach_and_extract` and
+`retrieve_guidelines` are already standalone async functions; they
+just live behind a tool wrapper today instead of behind a worker
+process boundary.
 
 ### 5.3 Critic agent (extension, not core)
 
@@ -471,10 +739,17 @@ Initial entries:
 | Decision | Chose | Rejected | Why |
 |---|---|---|---|
 | VLM | Claude Sonnet 4.6 vision | GPT-4V, Gemini | Stack coherence with Week 1; same vendor BAA |
-| Reranker | BGE open-source | Cohere, Voyage | No new vendor BAA, no API key, runs on Hetzner |
-| Vector store | FAISS in-memory | Chroma, Qdrant, pgvector | Zero ops at MVP scale; corpus small; rebuild fast |
-| Guideline corpus | USPSTF + ADA | "everything" | Two-source rule from PRD pitfall list; matches PCP scope |
-| Recommendation tone | Level C with toggle | Level A always / Level C always | Refusing Level C fails the PRD scenario; unconditional Level C reverses Week 1 deliberately-deferred decision |
+| Structured output | Anthropic tool-use forced JSON | Free-text JSON + `json.loads` | Schema-validated input by construction; eliminates parse-then-repair |
+| PDF→image | `pypdfium2` (Google PDFium) | `pdf2image` (Poppler), Tesseract | Pure-Python, no system deps — works on Hetzner without an extra apt install |
+| Retrieval (MVP) | BM25 only via `rank-bm25` | FAISS+dense+BGE rerank (deferred) | 12-chunk hand-curated corpus → BM25 returns clinically-relevant top-1; deps stay tiny; PRD-faithful shape lives behind the same public API |
+| Reranker (deferred) | BGE open-source | Cohere, Voyage | No new vendor BAA, no API key, runs on Hetzner |
+| Vector store (deferred) | FAISS in-memory | Chroma, Qdrant, pgvector | Zero ops at MVP scale; corpus small; rebuild fast |
+| Guideline corpus | USPSTF + ADA, 12 hand-curated chunks | "everything", PDF ingestion at MVP | Two-source rule from PRD pitfall list; hand-curate while small + readable; AHA + PDF ingestion deferred |
+| DocumentReference write path | OpenEMR multipart `/api/patient/{pid}/document` | FHIR `POST /DocumentReference` | OpenEMR doesn't actually route the FHIR POST despite advertising `create` in CapabilityStatement — discovered live, pivoted same session |
+| Idempotency key | SHA-256 prepended to filename | Parallel local hash table | OpenEMR stays single source of truth; no consistency-with-DB bug class to manage |
+| Multi-agent shape | Single graph + new tool entry | Supervisor + workers (deferred) | One more LangGraph tool ≈ zero new code; the supervisor LLM call would double per-turn latency for no visible benefit at MVP scope |
+| Recommendation tone | R2 carve-out for guideline-cited recs (always-on; toggle UI deferred) | Level A always / unconditional Level C | Per-conversation toggle is post-MVP UX work; the carve-out is enforced by the validator (no `[Guideline/X]` citation = no claim that "USPSTF says…") |
+| Upload UI | Plain HTML + vanilla JS | Angular component in chat sidebar | Avoids pulling Angular into a new page just for a 250-line form; chat-sidebar wiring is post-MVP |
 
 ---
 

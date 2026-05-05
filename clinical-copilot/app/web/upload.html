@@ -231,10 +231,23 @@
     }
 
     setStatus('Done.', 'ok');
-    $resultMeta.innerHTML =
-      'DocumentReference: <strong>' + body.reference_id + '</strong><br>' +
-      'SHA-256: <strong>' + (body.sha256 || '').slice(0, 16) + '…</strong><br>' +
-      'Newly created: <strong>' + body.created + '</strong>';
+    // Build the meta panel via DOM nodes (textContent on each value) so an
+    // unexpected response field can't smuggle HTML into the page. Today
+    // every value comes from OpenEMR + the Pydantic-validated extraction,
+    // both trusted, but defense-in-depth costs nothing here.
+    function row(label, value) {
+      const wrap = document.createElement('div');
+      wrap.appendChild(document.createTextNode(label + ': '));
+      const v = document.createElement('strong');
+      v.textContent = String(value);
+      wrap.appendChild(v);
+      return wrap;
+    }
+    $resultMeta.replaceChildren(
+      row('DocumentReference', body.reference_id),
+      row('SHA-256', (body.sha256 || '').slice(0, 16) + '…'),
+      row('Newly created', body.created),
+    );
     $resultBody.textContent = JSON.stringify(body.extracted, null, 2);
     $resultCard.style.display = 'block';
     $submit.disabled = false;

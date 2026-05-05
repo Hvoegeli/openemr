@@ -22,10 +22,12 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from app.extraction.schemas import (
+    DOC_TYPE_LABELS,
     Allergy,
     BoundingBox,
     Citation,
     Demographics,
+    DocumentType,
     ExtractedDocument,
     FamilyHistoryItem,
     IntakeForm,
@@ -463,6 +465,30 @@ class TestIntakeForm:
 # ──────────────────────────────────────────────────────────────────────────
 # Discriminated union
 # ──────────────────────────────────────────────────────────────────────────
+
+
+class TestDocTypeConstantAlignment:
+    """Three constants describe the supported doc-type set:
+       - app.extraction.schemas.DocumentType        — the Literal type
+       - app.extraction.schemas.DOC_TYPE_LABELS     — UI dropdown labels
+       - app.fhir.writer.DOC_CATEGORIES             — OpenEMR category paths
+    Adding a new doc type requires updating ALL THREE; this test makes
+    silent drift between them loud."""
+
+    def test_keys_match_across_all_three_sources(self) -> None:
+        from typing import get_args
+
+        from app.fhir.writer import DOC_CATEGORIES
+
+        type_args = set(get_args(DocumentType))
+        labels_keys = set(DOC_TYPE_LABELS)
+        cats_keys = set(DOC_CATEGORIES)
+        assert type_args == labels_keys, (
+            f"DocumentType {type_args} != DOC_TYPE_LABELS keys {labels_keys}"
+        )
+        assert type_args == cats_keys, (
+            f"DocumentType {type_args} != DOC_CATEGORIES keys {cats_keys}"
+        )
 
 
 class TestExtractedDocument:

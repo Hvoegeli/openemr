@@ -7,11 +7,20 @@ itself is well-formed.
 
 from __future__ import annotations
 
+import re
+
 from app.guidelines.retrieve import (
     CORPUS,
     _tokenize,
     retrieve_guidelines,
 )
+
+
+# Mirror of `app/agent/validator.py::CITATION_RE` — the regex the response
+# validator uses to detect citations of the form `[Type/id]`. Tests below
+# assert every chunk_id in the corpus is shaped so the agent can cite it
+# as `[Guideline/<chunk_id>]` without the validator rejecting the bracket.
+_CITATION_ID_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 
 class TestCorpusLoad:
@@ -35,6 +44,19 @@ class TestCorpusLoad:
         sources = {c.source for c in CORPUS}
         assert "USPSTF" in sources
         assert "ADA" in sources
+
+    def test_every_chunk_id_passes_citation_regex(self) -> None:
+        """The agent cites guideline hits as `[Guideline/<chunk_id>]`. The
+        validator's regex (mirrored above as `_CITATION_ID_RE`) only
+        accepts `[a-zA-Z0-9._-]+` for the id portion. A chunk_id with a
+        space, slash, unicode, or other punctuation would silently make
+        the citation unparsable and fail validation, masking what the
+        agent actually retrieved."""
+        bad = [c.chunk_id for c in CORPUS if not _CITATION_ID_RE.match(c.chunk_id)]
+        assert bad == [], (
+            f"chunk_id(s) won't pass the citation regex: {bad}. "
+            f"Use only [a-zA-Z0-9._-]; prefer snake_case."
+        )
 
 
 class TestTokenize:
