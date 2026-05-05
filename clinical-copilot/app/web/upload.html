@@ -1,0 +1,245 @@
+<!doctype html>
+<!--
+  Phase 2.4 — minimal upload UI.
+
+  Plain HTML + vanilla JS (no framework, no build step) — the chat UI is
+  Angular and we deliberately don't pull that in here. This page is the
+  dev/demo surface for the multipart `/api/upload` endpoint until the
+  upload flow lands in the chat sidebar in a later phase.
+
+  Both dropdowns populate from server-side endpoints (so adding a new
+  doc_type or onboarding a new patient flows through to the dropdown
+  without any frontend edit). The patient list is filtered by the same
+  per-user ACL the chat uses — no leakage of off-panel patients.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Upload Clinical Document — Co-pilot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --border: #e2e8f0;
+    --ink: #0f172a;
+    --muted: #64748b;
+    --accent: #2563eb;
+    --ok: #15803d;
+    --err: #b91c1c;
+    --code: #0f172a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    padding: 24px;
+  }
+  header {
+    max-width: 820px;
+    margin: 0 auto 20px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  header a { color: var(--muted); text-decoration: none; font-size: 13px; }
+  header a:hover { text-decoration: underline; }
+  .card {
+    max-width: 820px;
+    margin: 0 auto 16px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+  }
+  .field { margin-bottom: 16px; }
+  label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  select, input[type="file"] {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 14px;
+    background: white;
+  }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 10px 18px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled {
+    background: #94a3b8;
+    cursor: not-allowed;
+  }
+  .hint {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  .status {
+    margin-top: 16px;
+    font-size: 13px;
+  }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--err); }
+  pre {
+    background: var(--code);
+    color: #e2e8f0;
+    padding: 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 0;
+  }
+  .meta {
+    margin-bottom: 12px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .meta strong { color: var(--ink); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Upload Clinical Document</h1>
+  <a href="/">← Back to chat</a>
+</header>
+
+<form id="f" class="card" autocomplete="off">
+  <div class="field">
+    <label for="patient">Patient</label>
+    <select id="patient" required>
+      <option value="">Loading…</option>
+    </select>
+    <div class="hint">Only patients you have access to are listed.</div>
+  </div>
+
+  <div class="field">
+    <label for="doc-type">Document type</label>
+    <select id="doc-type" required>
+      <option value="">Loading…</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="file">File (PDF, PNG, or JPEG)</label>
+    <input id="file" type="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" required />
+  </div>
+
+  <button id="submit" type="submit">Upload &amp; extract</button>
+  <div id="status" class="status"></div>
+</form>
+
+<div id="result-card" class="card" style="display:none">
+  <div class="meta" id="result-meta"></div>
+  <pre id="result-body"></pre>
+</div>
+
+<script>
+(async () => {
+  const $patient = document.getElementById('patient');
+  const $docType = document.getElementById('doc-type');
+  const $file = document.getElementById('file');
+  const $form = document.getElementById('f');
+  const $submit = document.getElementById('submit');
+  const $status = document.getElementById('status');
+  const $resultCard = document.getElementById('result-card');
+  const $resultMeta = document.getElementById('result-meta');
+  const $resultBody = document.getElementById('result-body');
+
+  // Render a {items: [{id,label}]} payload into a <select>
+  function fillSelect(el, items, placeholder) {
+    el.innerHTML = '';
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = placeholder;
+    el.appendChild(blank);
+    for (const it of items) {
+      const opt = document.createElement('option');
+      opt.value = it.id;
+      opt.textContent = it.label;
+      el.appendChild(opt);
+    }
+  }
+
+  function setStatus(msg, kind) {
+    $status.textContent = msg;
+    $status.className = 'status ' + (kind || '');
+  }
+
+  // Bootstrap both dropdowns in parallel; if either fails, the user still
+  // gets a usable error rather than an indefinite "Loading…"
+  try {
+    const [pr, dr] = await Promise.all([
+      fetch('/api/upload/patients').then(r => r.ok ? r.json() : Promise.reject('patients ' + r.status)),
+      fetch('/api/upload/doc-types').then(r => r.ok ? r.json() : Promise.reject('doc-types ' + r.status)),
+    ]);
+    fillSelect($patient, pr.items, '— Select patient —');
+    fillSelect($docType, dr.items, '— Select document type —');
+  } catch (err) {
+    setStatus('Failed to load form options: ' + err, 'err');
+    return;
+  }
+
+  $form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const file = $file.files[0];
+    if (!file) { setStatus('Pick a file first.', 'err'); return; }
+    if (!$patient.value) { setStatus('Pick a patient.', 'err'); return; }
+    if (!$docType.value) { setStatus('Pick a document type.', 'err'); return; }
+
+    $submit.disabled = true;
+    setStatus('Uploading + extracting (this can take ~10–30s on first run)…', '');
+    $resultCard.style.display = 'none';
+
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('doc_type', $docType.value);
+    fd.append('patient_uuid', $patient.value);
+
+    let resp;
+    try {
+      resp = await fetch('/api/upload', { method: 'POST', body: fd });
+    } catch (err) {
+      setStatus('Network error: ' + err, 'err');
+      $submit.disabled = false;
+      return;
+    }
+
+    let body;
+    try { body = await resp.json(); }
+    catch { body = { detail: 'non-JSON response' }; }
+
+    if (!resp.ok) {
+      setStatus('Upload failed (HTTP ' + resp.status + '): ' + (body.detail || ''), 'err');
+      $submit.disabled = false;
+      return;
+    }
+
+    setStatus('Done.', 'ok');
+    $resultMeta.innerHTML =
+      'DocumentReference: <strong>' + body.reference_id + '</strong><br>' +
+      'SHA-256: <strong>' + (body.sha256 || '').slice(0, 16) + '…</strong><br>' +
+      'Newly created: <strong>' + body.created + '</strong>';
+    $resultBody.textContent = JSON.stringify(body.extracted, null, 2);
+    $resultCard.style.display = 'block';
+    $submit.disabled = false;
+  });
+})();
+</script>
+</body>
+</html>

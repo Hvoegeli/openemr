@@ -35,6 +35,7 @@ dependencies = [
     "rich>=13.7",
     "pypdfium2>=4.30",
     "pillow>=11.0",
+    "python-multipart>=0.0.10",
 ]
 
 [dependency-groups]

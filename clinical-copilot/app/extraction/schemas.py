@@ -47,6 +47,15 @@ extractable-doc vocabulary — guideline / fhir_resource citations exist
 without ever being uploaded as documents)."""
 
 
+DOC_TYPE_LABELS: dict[str, str] = {
+    "lab_pdf":     "Lab Report (PDF)",
+    "intake_form": "Patient Intake Form",
+}
+"""Human-readable labels for each DocumentType, used by the upload-form
+dropdown. Single source of truth — adding a new DocumentType means adding
+one row here so the UI dropdown picks it up automatically."""
+
+
 class BoundingBox(BaseModel):
     """Where on the source page a cited value lives.
 
