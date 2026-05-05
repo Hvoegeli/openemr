@@ -34,6 +34,7 @@ SCOPES = " ".join(
         "system/MedicationRequest.read",
         "system/DocumentReference.read",
         "system/Binary.read",
+        "system/Appointment.read",
         "system/Practitioner.read",
     ]
 )
