@@ -60,16 +60,25 @@ async def get_calendar_today(
     today_iso = date.today().isoformat()
     sources: list[str] = []
 
-    # One global Appointment search for today, plus the existing
-    # broad Patient + per-patient latest-Encounter fan-out. The
-    # appointment search is best-effort: if OpenEMR's FHIR layer
-    # rejects the date filter or has no appointments today,
-    # _safe_search returns [] and we transparently fall back to the
-    # encounter-based row (existing behavior).
-    patients, todays_appts = await asyncio.gather(
-        _safe_search(client, "Patient", {"_count": 50}),
-        _safe_search(client, "Appointment", {"date": today_iso, "_count": 200}),
-    )
+    # Appointment overlay temporarily disabled pending the time-zone
+    # rework (see project memory "Time-zone permanent fix"). The
+    # FHIR-Appointment-merge code path is preserved verbatim below the
+    # `if APPOINTMENT_OVERLAY_ENABLED:` guard so flipping the flag back
+    # to True re-enables the scheduling UX without re-deriving the
+    # logic. The default-False branch is the original Week-1/Week-2
+    # encounter-based row, byte-identical to the pre-Calendar-Option-A
+    # behavior.
+    APPOINTMENT_OVERLAY_ENABLED = False
+
+    if APPOINTMENT_OVERLAY_ENABLED:
+        patients, todays_appts = await asyncio.gather(
+            _safe_search(client, "Patient", {"_count": 50}),
+            _safe_search(client, "Appointment", {"date": today_iso, "_count": 200}),
+        )
+    else:
+        patients = await _safe_search(client, "Patient", {"_count": 50})
+        todays_appts = []
+
     if panel is not None:
         patients = [p for p in patients if p.get("id") in panel]
     if not patients:
@@ -137,10 +146,11 @@ async def get_calendar_today(
             "seeded": False,
         })
 
-    # Sort by time ascending so today's scheduled patients self-organize
-    # by slot (the user-visible behavior the calendar UX promises).
-    # Patients without a `time` value sink to the end deterministically.
-    entries.sort(key=lambda e: (e.get("time") is None, e.get("time") or ""))
+    # Sort by time ascending when the appointment overlay is enabled so
+    # the day self-organizes by slot. With the overlay off, preserve
+    # the natural Patient-search order (matches pre-Option-A behavior).
+    if APPOINTMENT_OVERLAY_ENABLED:
+        entries.sort(key=lambda e: (e.get("time") is None, e.get("time") or ""))
 
     return {"data": {"date": today_iso, "patients": entries}, "sources": sources}
 

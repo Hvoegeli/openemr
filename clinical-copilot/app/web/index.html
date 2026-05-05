@@ -735,6 +735,11 @@
       border-radius: 6px; padding: 0.35rem 0.75rem;
       font: inherit; font-size: 0.78rem; font-weight: 500;
       cursor: pointer; flex-shrink: 0;
+      /* Hidden pending the TZ-correctness rework — see project memory
+         "Time-zone permanent fix". Backend (writer.write_appointment,
+         /api/schedule, modal HTML+JS) is intentionally left intact so
+         flipping this back to e.g. `inline-block` re-enables it. */
+      display: none;
     }
     .schedule-btn:hover { filter: brightness(1.1); }
     .schedule-time-row { display: flex; gap: 0.5rem; }
