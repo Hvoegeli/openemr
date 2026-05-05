@@ -100,7 +100,7 @@ _client: Anthropic | None = None
 
 def _get_client() -> Anthropic:
     """Lazy Anthropic client. Held in a module-global so each rerank
-    call re-uses the same TCP connection pool, but only created on first
+    call reuses the same TCP connection pool, but only created on first
     use so importing this module never blocks on network."""
     global _client
     if _client is None:

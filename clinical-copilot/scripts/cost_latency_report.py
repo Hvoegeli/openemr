@@ -67,7 +67,7 @@ log = logging.getLogger("cost_report")
 
 def _load_cases(case_ids: list[str]):
     """Return the matching Case objects from the eval suite, in the order
-    requested. Re-uses `evals.runner.load_cases` so we share its
+    requested. Reuses `evals.runner.load_cases` so we share its
     YAML-parsing + Case-construction logic and stay in sync if the
     suite shape evolves."""
     from evals.runner import load_cases
