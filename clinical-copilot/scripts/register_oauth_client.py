@@ -36,6 +36,7 @@ SCOPES = " ".join(
         "system/AllergyIntolerance.read",
         "system/MedicationRequest.read",
         "system/DocumentReference.read",
+        "system/Binary.read",
         "system/Practitioner.read",
     ]
 )

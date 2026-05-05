@@ -33,6 +33,7 @@ SCOPES = " ".join(
         "system/AllergyIntolerance.read",
         "system/MedicationRequest.read",
         "system/DocumentReference.read",
+        "system/Binary.read",
         "system/Practitioner.read",
     ]
 )
@@ -116,6 +117,24 @@ class FhirClient:
         """Search a FHIR resource. Returns the entries as a flat list of resources."""
         bundle = await self.get(resource, params=params)
         return [entry["resource"] for entry in bundle.get("entry", [])]
+
+    async def get_raw(self, path: str) -> tuple[bytes, str]:
+        """GET a FHIR resource as raw bytes + content-type.
+
+        For endpoints that return non-JSON payloads — primarily `Binary/{id}`,
+        which OpenEMR returns as the raw file bytes (not a FHIR-JSON envelope
+        with base64 `data`). Returns `(content, content_type)`. Caller is
+        responsible for streaming/serving the bytes.
+        """
+        token = await self._ensure_token()
+        url = f"{settings.openemr_fhir_base_url.rstrip('/')}/{path.lstrip('/')}"
+        resp = await self._http.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        resp.raise_for_status()
+        ctype = resp.headers.get("content-type", "application/octet-stream")
+        return resp.content, ctype
 
     async def aclose(self) -> None:
         await self._http.aclose()

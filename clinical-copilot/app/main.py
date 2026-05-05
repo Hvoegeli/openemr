@@ -24,7 +24,6 @@ sign-out workflow regardless.
 """
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -1203,17 +1202,16 @@ async def api_binary(
     Auth: any logged-in user. The endpoint does not yet ACL-walk back
     to the parent DocumentReference -> patient -> panel; tighten this
     before any non-demo deployment.
+
+    Implementation: OpenEMR's `GET /fhir/Binary/{id}` returns the raw
+    file bytes (PDF/PNG/etc.) with the original Content-Type header,
+    not a FHIR JSON envelope with base64 `data`. Use the dedicated
+    `FhirClient.get_raw` so we don't try to parse PNG bytes as JSON.
     """
     try:
-        binary = await app.state.fhir.get(f"Binary/{binary_id}")
+        body, content_type = await app.state.fhir.get_raw(f"Binary/{binary_id}")
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
-    data_b64 = binary.get("data") or ""
-    content_type = binary.get("contentType") or "application/octet-stream"
-    try:
-        body = base64.b64decode(data_b64)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"binary decode failed: {e!s}") from e
     return Response(content=body, media_type=content_type)
 
 
