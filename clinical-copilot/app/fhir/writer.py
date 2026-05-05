@@ -41,8 +41,10 @@ been persisted.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
+from datetime import date
 from typing import Any
 
 import httpx
@@ -573,3 +575,297 @@ class OpenEMRWriter:
             patient_uuid, provider_user_id, event_date, normalized_start, eid,
         )
         return {"appointment_id": int(eid), "patient_pid": pid}
+
+    # ── Extracted-fact persistence (intake form + lab PDF -> chart) ───
+    #
+    # Bridge from `attach_and_extract`'s structured Pydantic JSON into
+    # OpenEMR's native tables so the chat agent can read uploaded
+    # information back through the existing FHIR / chart-card path.
+    # Each method takes a `source_doc_id` (the FHIR
+    # DocumentReference/{id} the fact was extracted from) and embeds a
+    # back-reference into the row's `comments` field as a structured
+    # `[copilot-source: DocumentReference/{id}]` tag, plus optional
+    # bbox JSON. Two consumers later read this back:
+    #   1. The agent's chart tools surface the fact in chat answers; the
+    #      chat citation uses the new FHIR resource's id.
+    #   2. The PDF-overlay UI (Sunday work) parses the bbox JSON to
+    #      highlight the source region when the user clicks the citation.
+
+    @staticmethod
+    def _source_back_ref(source_doc_id: str | None, bbox: dict | None = None) -> str:
+        """Render the `[copilot-source: ...]` tag embedded in `comments`.
+
+        Empty string when there's no source — keeps the field clean for
+        manually-entered records that didn't come from extraction.
+        """
+        if not source_doc_id:
+            return ""
+        ref = source_doc_id if "/" in source_doc_id else f"DocumentReference/{source_doc_id}"
+        if bbox:
+            try:
+                bbox_str = json.dumps(bbox, separators=(",", ":"))
+            except (TypeError, ValueError):
+                bbox_str = ""
+            return f"[copilot-source: {ref}; bbox={bbox_str}]" if bbox_str else f"[copilot-source: {ref}]"
+        return f"[copilot-source: {ref}]"
+
+    async def _post_standard_api(
+        self, *, path: str, body: dict, label: str,
+    ) -> dict:
+        """POST a JSON body to the standard REST API and return the flat
+        response dict (id/uuid/eid as available). Centralizes the
+        validation-error handling used by every extracted-fact write so
+        the per-method code stays small.
+        """
+        token = await self._ensure_token()
+        r = await self._http.post(
+            f"{self._api_base}{path}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        )
+        if r.status_code >= 400:
+            raise OpenEMRWriteError(
+                f"{label} POST failed ({r.status_code}): {r.text[:300]}"
+            )
+        try:
+            payload = r.json()
+        except ValueError as exc:
+            raise OpenEMRWriteError(
+                f"{label} POST returned non-JSON body: {r.text[:300]}"
+            ) from exc
+        # Same two validation-error envelope shapes as write_appointment.
+        val = None
+        if isinstance(payload, dict):
+            val = payload.get("validationErrors")
+            if not val and not (payload.get("data") or payload.get("id")):
+                if all(isinstance(v, dict) for v in payload.values()) and payload:
+                    val = payload
+        if isinstance(val, dict) and val:
+            raise OpenEMRWriteError(f"{label} validation failed: {val}")
+        data = payload.get("data") if isinstance(payload, dict) else None
+        flat = data if isinstance(data, dict) else payload
+        if not isinstance(flat, dict):
+            raise OpenEMRWriteError(f"{label} response not a dict: {payload}")
+        return flat
+
+    async def write_allergy(
+        self,
+        *,
+        patient_uuid: str,
+        substance: str,
+        reaction: str | None = None,
+        severity: str | None = None,
+        source_doc_id: str | None = None,
+        bbox: dict | None = None,
+    ) -> dict:
+        """POST /api/patient/{uuid}/allergy. Returns {id, uuid}."""
+        comment_parts: list[str] = []
+        if reaction:
+            comment_parts.append(f"Reaction: {reaction}")
+        if severity:
+            comment_parts.append(f"Severity: {severity}")
+        back_ref = self._source_back_ref(source_doc_id, bbox)
+        if back_ref:
+            comment_parts.append(back_ref)
+        body = {"title": substance, "comments": " · ".join(comment_parts) or substance}
+        flat = await self._post_standard_api(
+            path=f"/patient/{patient_uuid}/allergy", body=body,
+            label=f"allergy[{substance}]",
+        )
+        log.info(
+            "wrote allergy patient=%s substance=%s id=%s src=%s",
+            patient_uuid, substance, flat.get("id") or flat.get("uuid"), source_doc_id,
+        )
+        return flat
+
+    async def write_medical_problem(
+        self,
+        *,
+        patient_uuid: str,
+        title: str,
+        begdate: str | None = None,
+        source_doc_id: str | None = None,
+        bbox: dict | None = None,
+    ) -> dict:
+        """POST /api/patient/{uuid}/medical_problem. `begdate` is ISO
+        YYYY-MM-DD; defaults to today when omitted."""
+        body: dict[str, str] = {"title": title}
+        body["begdate"] = begdate or date.today().isoformat()
+        back_ref = self._source_back_ref(source_doc_id, bbox)
+        if back_ref:
+            body["comments"] = back_ref
+        flat = await self._post_standard_api(
+            path=f"/patient/{patient_uuid}/medical_problem", body=body,
+            label=f"medical_problem[{title}]",
+        )
+        log.info(
+            "wrote medical_problem patient=%s title=%s id=%s src=%s",
+            patient_uuid, title, flat.get("id") or flat.get("uuid"), source_doc_id,
+        )
+        return flat
+
+    async def write_medication(
+        self,
+        *,
+        patient_uuid: str,
+        title: str,
+        begdate: str | None = None,
+        source_doc_id: str | None = None,
+        bbox: dict | None = None,
+    ) -> dict:
+        """POST /api/patient/{pid}/medication. `title` is the full prescription
+        line (e.g. "Metformin 500 mg PO BID"); `begdate` is the start
+        date in `YYYY-MM-DD HH:MM:SS` format expected by OpenEMR."""
+        token = await self._ensure_token()
+        pid = await self._patient_numeric_pid(token, patient_uuid)
+        body: dict[str, str] = {"title": title}
+        if begdate:
+            # OpenEMR's medication endpoint accepts both 'YYYY-MM-DD' and
+            # 'YYYY-MM-DD HH:MM:SS'. Normalize to the latter so the
+            # rendered "started on" date is unambiguous in the chart.
+            body["begdate"] = (
+                begdate if " " in begdate else f"{begdate} 00:00:00"
+            )
+        else:
+            body["begdate"] = f"{date.today().isoformat()} 00:00:00"
+        back_ref = self._source_back_ref(source_doc_id, bbox)
+        if back_ref:
+            body["comments"] = back_ref
+        flat = await self._post_standard_api(
+            path=f"/patient/{pid}/medication", body=body,
+            label=f"medication[{title}]",
+        )
+        log.info(
+            "wrote medication patient=%s title=%s id=%s src=%s",
+            patient_uuid, title, flat.get("id") or flat.get("uuid"), source_doc_id,
+        )
+        return flat
+
+    async def write_lab_encounter_with_results(
+        self,
+        *,
+        patient_uuid: str,
+        results: list[dict],
+        source_doc_id: str | None = None,
+        encounter_date: str | None = None,
+    ) -> dict:
+        """Create an encounter for a lab PDF + write the results into its
+        SOAP note's `objective` field.
+
+        Lab results live in `procedure_result` in OpenEMR's data model,
+        but the standard REST API doesn't expose a write endpoint for
+        that table. The pragmatic surface available to us is
+        encounter + SOAP note: the encounter shows up on the patient's
+        timeline, and the SOAP note's text is returned by the
+        `get_notes_24h` chat tool, which is how the agent will surface
+        the values in answers.
+
+        Each result is rendered as one objective-section line:
+            HbA1c: 7.4 % (ref 4.0-5.6 %, abnormal flag H)
+
+        `results` is a list of dicts with at minimum `test_name`,
+        `value`, `unit`, `reference_range`, `abnormal_flag` —
+        i.e. the LabResult schema flattened to a dict. Each result's
+        `source_citation` contributes its `bbox` to a single per-encounter
+        bbox manifest stored in the SOAP note's `subjective` section so
+        the PDF overlay UI can highlight every cited region from the
+        same encounter view.
+
+        Returns: {encounter_id, soap_note_id}.
+        """
+        token = await self._ensure_token()
+        pid = await self._patient_numeric_pid(token, patient_uuid)
+
+        enc_date = encounter_date or date.today().isoformat()
+        enc_body = {
+            "pc_catid": 5,             # 'Office Visit' — only category present in dev-easy seed
+            "facility_id": 3,          # 'Your Clinic Name Here' — only facility in dev-easy
+            "billing_facility": 3,
+            "sensitivity": "normal",
+            "reason": f"Lab results from uploaded document {source_doc_id or '(unknown)'}",
+            "date": f"{enc_date} 00:00:00",
+            "onset_date": f"{enc_date} 00:00:00",
+            "provider_id": 1,           # admin user — fallback when caller's id unknown
+            "class_code": "AMB",
+        }
+        enc_flat = await self._post_standard_api(
+            path=f"/patient/{patient_uuid}/encounter", body=enc_body,
+            label="encounter[lab]",
+        )
+        eid = enc_flat.get("eid") or enc_flat.get("id")
+        if not eid:
+            raise OpenEMRWriteError(
+                f"lab encounter response missing eid: {enc_flat}"
+            )
+
+        # Render each result as a fixed-shape line so a future regex /
+        # parser can extract values back if needed.
+        objective_lines = []
+        bbox_manifest: list[dict] = []
+        for r in results:
+            test_name = str(r.get("test_name") or "Unknown test")
+            value = r.get("value")
+            unit = str(r.get("unit") or "").strip()
+            ref = r.get("reference_range")
+            flag = r.get("abnormal_flag")
+            value_str = "" if value is None else str(value)
+            line_parts = [f"{test_name}: {value_str}"]
+            if unit:
+                line_parts.append(unit)
+            extras = []
+            if ref:
+                extras.append(f"ref {ref}")
+            if flag and flag != "N":
+                extras.append(f"flag {flag}")
+            line = " ".join(line_parts)
+            if extras:
+                line += " (" + ", ".join(extras) + ")"
+            objective_lines.append(line)
+
+            citation = r.get("source_citation") or {}
+            bbox = citation.get("bbox") if isinstance(citation, dict) else None
+            if isinstance(bbox, dict):
+                bbox_manifest.append({
+                    "test_name": test_name,
+                    "value": value_str,
+                    "bbox": bbox,
+                    "field_or_chunk_id": citation.get("field_or_chunk_id"),
+                })
+
+        # Subjective field carries the back-reference + bbox manifest so
+        # the PDF overlay UI can grep for the manifest later. The
+        # objective field is what the chat agent reads.
+        subjective_parts: list[str] = []
+        if source_doc_id:
+            subjective_parts.append(self._source_back_ref(source_doc_id))
+        if bbox_manifest:
+            try:
+                subjective_parts.append(
+                    "[copilot-bbox-manifest: " + json.dumps(bbox_manifest, separators=(",", ":")) + "]"
+                )
+            except (TypeError, ValueError):
+                pass
+        subjective = " ".join(subjective_parts) or "Lab results extracted from uploaded document."
+
+        soap_body = {
+            "subjective": subjective,
+            "objective": "\n".join(objective_lines) or "(no extracted results)",
+            "assessment": f"Lab values automatically extracted from {source_doc_id or 'uploaded document'}.",
+            "plan": "Review extracted values and confirm against the source document.",
+        }
+        soap_flat = await self._post_standard_api(
+            path=f"/patient/{pid}/encounter/{eid}/soap_note", body=soap_body,
+            label="soap_note[lab]",
+        )
+        log.info(
+            "wrote lab encounter patient=%s eid=%s results=%d src=%s",
+            patient_uuid, eid, len(results), source_doc_id,
+        )
+        return {
+            "encounter_id": int(eid),
+            "soap_note_id": soap_flat.get("id") or soap_flat.get("sid"),
+            "result_count": len(results),
+        }

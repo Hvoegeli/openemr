@@ -1007,22 +1007,35 @@ async def api_upload(
         raise HTTPException(
             status_code=502, detail=f"Document extraction failed: {e}",
         ) from e
-    # Invalidate the patient's cached documents list so the next
-    # /api/patient/{pid}/documents call (which the upload modal triggers
-    # immediately to refresh the Supporting Documents tab) returns the
-    # newly-uploaded DocumentReference instead of a 5-min-stale snapshot
-    # from the TTLCache.
+    # Invalidate every cache slice that could now hold stale data:
+    #   docs:{pid}    — Supporting Documents tab needs the new
+    #                   DocumentReference and the lab-encounter we
+    #                   created from extracted lab values.
+    #   card:{pid}    — patient card needs the newly-written
+    #                   allergies / medications / problems from intake.
+    #   trends:{pid}  — vital-trends panel can change after lab writes.
+    #   calendar:*    — the lab-encounter creates a new today-row in
+    #                   the calendar (bound to the patient's chart),
+    #                   and panels are keyed on patient ids so all
+    #                   slices are potentially affected.
     app.state.cache.invalidate(f"docs:{patient_uuid}")
+    app.state.cache.invalidate(f"card:{patient_uuid}")
+    app.state.cache.invalidate(f"trends:{patient_uuid}")
+    app.state.cache.invalidate_prefix("calendar:today:")
     log.info(
-        "upload: user=%s patient=%s doc_type=%s ref=%s created=%s",
+        "upload: user=%s patient=%s doc_type=%s ref=%s created=%s "
+        "facts_written=%d/%d",
         username, patient_uuid, doc_type,
         result.reference_id, result.created,
+        (result.persistence or {}).get("facts_written", 0),
+        (result.persistence or {}).get("facts_attempted", 0),
     )
     return {
         "reference_id": result.reference_id,
         "sha256": result.write_result["sha256"],
         "created": result.created,
         "extracted": result.extracted.model_dump(mode="json"),
+        "persistence": result.persistence,
     }
 
 

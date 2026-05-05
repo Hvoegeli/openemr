@@ -38,9 +38,14 @@ from typing import Any
 from anthropic import AsyncAnthropic
 
 from app.extraction.render import render_to_png_pages
-from app.extraction.schemas import DocumentType, ExtractedDocument
+from app.extraction.schemas import (
+    DocumentType,
+    ExtractedDocument,
+    IntakeForm,
+    LabReport,
+)
 from app.extraction.vision import DEFAULT_MODEL, ExtractionError, extract_via_claude
-from app.fhir.writer import OpenEMRWriter
+from app.fhir.writer import OpenEMRWriteError, OpenEMRWriter
 
 log = logging.getLogger("agent.extraction.extract")
 
@@ -53,15 +58,22 @@ class AttachAndExtractResult:
     is a real dict shape from the writer — not just `Any`.
     """
 
-    __slots__ = ("extracted", "write_result")
+    __slots__ = ("extracted", "write_result", "persistence")
 
     def __init__(
         self,
         extracted: ExtractedDocument,
         write_result: dict[str, Any],
+        persistence: dict[str, Any] | None = None,
     ) -> None:
         self.extracted = extracted
         self.write_result = write_result
+        # Persistence is the optional Phase-3 summary describing which
+        # extracted facts were written into OpenEMR's native tables (and
+        # which failed). `None` when Phase 3 was skipped (e.g. unit
+        # tests). Each per-fact entry is `{kind, ok, id, error}` so a
+        # caller can render a partial-success message in the UI.
+        self.persistence = persistence
 
     @property
     def reference_id(self) -> str:
@@ -149,8 +161,26 @@ async def attach_and_extract(
             client=anthropic_client,
             model=model,
         )
+
+        # Phase 3 — persist extracted facts into OpenEMR's native tables
+        # so the chat agent can read them back via the existing chart
+        # surface (allergies/meds/problems on the patient card; lab
+        # values via the latest-encounter SOAP note returned by
+        # get_notes_24h). Phase-3 failures DO NOT roll back Phase 1/2
+        # — the source document is already in OpenEMR and the structured
+        # JSON is valid; per-fact write failures are recorded in the
+        # `persistence` summary and surfaced in the API response. The
+        # alternative (raise on first failure) would leave the source
+        # document orphaned and force the user to re-upload.
+        persistence = await persist_extracted_facts(
+            writer=w,
+            patient_uuid=patient_uuid,
+            extracted=extracted,
+            source_document_id=source_document_id,
+        )
         return AttachAndExtractResult(
             extracted=extracted, write_result=write_result,
+            persistence=persistence,
         )
     finally:
         # Only close the writer if we created it — caller-supplied
@@ -159,8 +189,196 @@ async def attach_and_extract(
             await w.aclose()
 
 
+async def persist_extracted_facts(
+    *,
+    writer: OpenEMRWriter,
+    patient_uuid: str,
+    extracted: ExtractedDocument,
+    source_document_id: str,
+) -> dict[str, Any]:
+    """Push the structured Phase-2 output into OpenEMR's native tables.
+
+    Dispatches by document type:
+
+    - **LabReport** -> one encounter + one SOAP note (objective field
+      contains the rendered lab values; subjective field carries the
+      bbox manifest for the future PDF-overlay UI). All results land in
+      a single encounter so the chat agent's `get_notes_24h` returns
+      them as a single coherent block instead of N tiny encounters.
+
+    - **IntakeForm** -> one POST per allergy / medication /
+      family-history entry into the corresponding OpenEMR list. The
+      intake's `chief_concern` is also written as a medical_problem so
+      it appears in the chart's Active Problems section. Demographics
+      are NOT written: the patient already exists (we used their UUID
+      to upload), and re-writing demographics would risk overwriting
+      whatever is already on file with whatever the VLM read off the
+      paper form.
+
+    Returns a per-fact summary:
+        {
+            "doc_type": "lab_pdf" | "intake_form",
+            "facts_attempted": int,
+            "facts_written": int,
+            "items": [{kind, ok, id|error}, ...],
+        }
+
+    Failures are caught per-fact and reported in `items` rather than
+    raised. The caller can render a partial-success message; nothing
+    is rolled back.
+    """
+    items: list[dict[str, Any]] = []
+
+    if isinstance(extracted, LabReport):
+        # All lab results -> one encounter + SOAP note.
+        try:
+            results_payload = [
+                r.model_dump(mode="json") for r in extracted.results
+            ]
+            result = await writer.write_lab_encounter_with_results(
+                patient_uuid=patient_uuid,
+                results=results_payload,
+                source_doc_id=source_document_id,
+                encounter_date=(
+                    str(extracted.results[0].collection_date)
+                    if extracted.results else None
+                ),
+            )
+            items.append({
+                "kind": "lab_encounter",
+                "ok": True,
+                "id": result.get("encounter_id"),
+                "result_count": result.get("result_count"),
+            })
+        except (OpenEMRWriteError, Exception) as e:  # noqa: BLE001
+            log.exception("persist: lab encounter write failed")
+            items.append({"kind": "lab_encounter", "ok": False, "error": str(e)[:300]})
+
+        return {
+            "doc_type": "lab_pdf",
+            "facts_attempted": 1,
+            "facts_written": sum(1 for it in items if it["ok"]),
+            "items": items,
+        }
+
+    if isinstance(extracted, IntakeForm):
+        # Chief concern -> medical_problem so it shows in the chart's
+        # Active Problems list.
+        if extracted.chief_concern:
+            try:
+                r = await writer.write_medical_problem(
+                    patient_uuid=patient_uuid,
+                    title=extracted.chief_concern,
+                    source_doc_id=source_document_id,
+                    bbox=(extracted.demographics.source_citation.bbox.model_dump()
+                          if extracted.demographics.source_citation.bbox else None),
+                )
+                items.append({"kind": "chief_concern", "ok": True, "id": r.get("uuid") or r.get("id")})
+            except (OpenEMRWriteError, Exception) as e:  # noqa: BLE001
+                log.exception("persist: chief_concern write failed")
+                items.append({"kind": "chief_concern", "ok": False, "error": str(e)[:300]})
+
+        for allergy in extracted.allergies:
+            try:
+                r = await writer.write_allergy(
+                    patient_uuid=patient_uuid,
+                    substance=allergy.substance,
+                    reaction=allergy.reaction,
+                    severity=allergy.severity,
+                    source_doc_id=source_document_id,
+                    bbox=(allergy.source_citation.bbox.model_dump()
+                          if allergy.source_citation.bbox else None),
+                )
+                items.append({
+                    "kind": "allergy", "ok": True,
+                    "label": allergy.substance,
+                    "id": r.get("uuid") or r.get("id"),
+                })
+            except (OpenEMRWriteError, Exception) as e:  # noqa: BLE001
+                log.exception("persist: allergy[%s] write failed", allergy.substance)
+                items.append({
+                    "kind": "allergy", "ok": False,
+                    "label": allergy.substance, "error": str(e)[:300],
+                })
+
+        for med in extracted.current_medications:
+            # Render the prescription line in OpenEMR's expected
+            # free-text shape: "Drug 500 mg PO BID".
+            parts = [med.name]
+            if med.dose:
+                parts.append(med.dose)
+            if med.route:
+                parts.append(med.route)
+            if med.frequency:
+                parts.append(med.frequency)
+            title = " ".join(parts)
+            try:
+                r = await writer.write_medication(
+                    patient_uuid=patient_uuid,
+                    title=title,
+                    source_doc_id=source_document_id,
+                    bbox=(med.source_citation.bbox.model_dump()
+                          if med.source_citation.bbox else None),
+                )
+                items.append({
+                    "kind": "medication", "ok": True,
+                    "label": title,
+                    "id": r.get("uuid") or r.get("id"),
+                })
+            except (OpenEMRWriteError, Exception) as e:  # noqa: BLE001
+                log.exception("persist: medication[%s] write failed", title)
+                items.append({
+                    "kind": "medication", "ok": False,
+                    "label": title, "error": str(e)[:300],
+                })
+
+        for fh in extracted.family_history:
+            # Render as: "Family history: mother — type 2 diabetes (onset 45)"
+            label_parts = [f"Family history ({fh.relation}): {fh.condition}"]
+            if fh.age_at_onset is not None:
+                label_parts.append(f"onset age {fh.age_at_onset}")
+            title = " — ".join(label_parts)
+            try:
+                r = await writer.write_medical_problem(
+                    patient_uuid=patient_uuid,
+                    title=title,
+                    source_doc_id=source_document_id,
+                    bbox=(fh.source_citation.bbox.model_dump()
+                          if fh.source_citation.bbox else None),
+                )
+                items.append({
+                    "kind": "family_history", "ok": True,
+                    "label": title,
+                    "id": r.get("uuid") or r.get("id"),
+                })
+            except (OpenEMRWriteError, Exception) as e:  # noqa: BLE001
+                log.exception("persist: family_history[%s] write failed", title)
+                items.append({
+                    "kind": "family_history", "ok": False,
+                    "label": title, "error": str(e)[:300],
+                })
+
+        return {
+            "doc_type": "intake_form",
+            "facts_attempted": len(items),
+            "facts_written": sum(1 for it in items if it["ok"]),
+            "items": items,
+        }
+
+    # Unknown discriminator value — should be impossible under
+    # ExtractedDocument's discriminated union, but guard for forward-
+    # compat with new doc types.
+    return {
+        "doc_type": "unknown",
+        "facts_attempted": 0,
+        "facts_written": 0,
+        "items": [],
+    }
+
+
 __all__ = [
     "AttachAndExtractResult",
     "ExtractionError",
     "attach_and_extract",
+    "persist_extracted_facts",
 ]
