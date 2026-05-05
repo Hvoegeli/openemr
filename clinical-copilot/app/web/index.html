@@ -2428,12 +2428,14 @@
           flash(li);
           return;
         }
-        // Resource not on the current card — flash the section header.
-        const h = tabCard.querySelector('h3[data-section="' + type + '"]');
-        if (h) {
-          h.scrollIntoView({behavior: 'smooth', block: 'center'});
-          flash(h);
-        }
+        // Resource not on the current card. Prior behavior flashed the
+        // matching section header (e.g. h3[data-section="Condition"])
+        // even though that header belonged to a different patient — so
+        // a citation referring to PatientA's condition would visually
+        // light up PatientB's Conditions section after the user
+        // switched patients. Drop the misleading flash; tell the user
+        // the cited resource isn't in this chart instead.
+        append('system', 'This citation refers to a resource that is not on the current patient’s chart. Switch to the patient the chat answer was about to see it highlighted.');
         return;
       }
 
@@ -2639,8 +2641,10 @@
           return;
         }
 
-        const tag = body.created ? 'created' : 'deduped';
-        setStatus('Done — ' + body.reference_id + ' (' + tag + '). Refreshing list…', 'ok');
+        const tag = body.created
+          ? 'Uploaded'
+          : 'Already on this patient — kept the existing copy';
+        setStatus(tag + '. Refreshing list…', 'ok');
 
         // Refresh the docs list in the tab if the upload was for the current patient
         if ($selPatient.value === activePatientId) {

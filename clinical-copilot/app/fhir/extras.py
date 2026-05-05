@@ -178,11 +178,20 @@ async def get_supporting_documents(
                 "content_type": att.get("contentType"),
                 "url": _proxy_binary_url(att.get("url")),
             })
+        # OpenEMR sometimes encodes the document type as a Coding whose
+        # `display` is literally the string "unknown" (the seeded
+        # "Lab Pdf"/"Intake Form" docs have proper displays; older
+        # OpenEMR-native uploads tend to be the unknown ones). Treat
+        # that as "no useful label" so the UI shows "Document" instead
+        # of "Document unknown."
+        type_display = _coded_display(d.get("type") or {})
+        if not type_display or type_display.strip().lower() == "unknown":
+            type_display = "Document"
         items.append({
             "kind": "document",
             "id": d["id"],
             "ref": _ref(d),
-            "title": _coded_display(d.get("type") or {}) or "Document",
+            "title": type_display,
             "date": d.get("date"),
             "status": d.get("status"),
             "category": _coded_display((d.get("category") or [{}])[0]),
