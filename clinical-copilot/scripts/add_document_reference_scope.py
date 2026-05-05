@@ -19,7 +19,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEV_EASY_DIR = "/Users/harrisonvoegeli/openemr/docker/development-easy"
+# Resolve the OpenEMR docker-compose dir relative to the repo root so the
+# script runs unmodified on macOS (`/Users/.../openemr`), Hetzner
+# (`/root/openemr`), and any other clone location. Override with the
+# `OPENEMR_DOCKER_DIR` env var for unusual setups.
+DEV_EASY_DIR = os.environ.get(
+    "OPENEMR_DOCKER_DIR",
+    str(REPO_ROOT.parent / "docker" / "development-easy"),
+)
 
 NEW_SCOPES = [
     # Standard non-FHIR API (multipart upload) — required for the actual
