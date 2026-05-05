@@ -52,7 +52,7 @@ from langchain_core.messages import HumanMessage  # noqa: E402
 
 from app.agent.graph import build_graph  # noqa: E402
 from app.agent.state import AgentState  # noqa: E402
-from app.cache import TTLCache  # noqa: E402
+from app.clinical_notes import ClinicalNoteStore  # noqa: E402
 from app.extraction.extract import attach_and_extract  # noqa: E402
 from app.extraction.vision import ExtractionError  # noqa: E402
 from app.fhir.client import FhirClient  # noqa: E402
@@ -107,7 +107,10 @@ async def _run(args: argparse.Namespace) -> int:
 
     writer = OpenEMRWriter()
     fhir = FhirClient()
-    cache = TTLCache(ttl_seconds=300.0)
+    notes_path = Path(
+        os.environ.get("CLINICAL_NOTES_PATH", "data/clinical_notes.json")
+    )
+    notes_store = ClinicalNoteStore(notes_path)
     try:
         if not args.skip_upload:
             step += 1
@@ -134,7 +137,9 @@ async def _run(args: argparse.Namespace) -> int:
 
         step += 1
         _step(step, total_steps, "Drive the agent with a screening + targets question")
-        graph = build_graph()
+        # build_graph closes over fhir + notes_store; assignments_store=None
+        # tells the per-tool ACL gate to skip (smoke runs as admin).
+        graph = build_graph(fhir, notes_store, assignments_store=None)
         state: AgentState = {
             "messages": [HumanMessage(content=args.question)],
             "conversation_sources": [],
@@ -143,16 +148,8 @@ async def _run(args: argparse.Namespace) -> int:
             "username": "admin",  # smoke runs as admin (sees all patients)
             "advisor_mode": False,
         }
-        # Build the runtime config the graph needs
-        runtime = {
-            "configurable": {
-                "fhir_client": fhir,
-                "cache": cache,
-                "panel": None,  # admin
-            },
-        }
         try:
-            result = await graph.ainvoke(state, config=runtime)
+            result = await graph.ainvoke(state)
         except Exception as exc:  # noqa: BLE001
             _fail(f"agent invocation failed: {exc}")
             return 1
