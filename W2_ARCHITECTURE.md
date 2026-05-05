@@ -23,7 +23,7 @@ section below):
 | Area | MVP-shipped decision | PRD-faithful target | Section |
 |---|---|---|---|
 | VLM | Claude Sonnet 4.6 vision, tool-use forced JSON output | + bounding-box overlay UI (deferred) | §4 |
-| Retrieval | **BM25 only** (`rank-bm25`, in-process) | + FAISS dense + BGE reranker (deferred) | §3 |
+| Retrieval | **BM25 + LLM-rerank** (`rank-bm25` + Claude Haiku) | + FAISS dense (deferred) | §3 |
 | Vector store | none (BM25 only) | FAISS in-memory | §3 |
 | Guideline corpus | hand-curated YAML, **12 chunks** USPSTF + ADA | + AHA cardiology corpus (deferred) | §3 |
 | Document persistence | OpenEMR multipart upload + FHIR-GET resolve; SHA-256 dedupe | (no change planned) | §4.5 |
@@ -98,11 +98,12 @@ the agent correctly cite 3 guideline chunks + 1 FHIR ref and honestly
 admit corpus gaps rather than make up an HbA1c-target chunk.
 
 **Deliberately out of scope for the MVP** (deferred, not abandoned —
-documented per-section below): dense embeddings + reranker, AHA corpus,
-PDF bounding-box overlay UI, patient-mismatch confirmation flow,
-extraction → FHIR-Observation/Condition write-back, `recommendation_mode`
-toggle UI surface (the R2 prompt carve-out is always-on for guideline-
-backed recs; we kept the toggle out of the UI for time).
+documented per-section below): dense embeddings (BM25 + LLM-rerank
+shipped, see §3.3), AHA corpus, PDF bounding-box overlay UI,
+patient-mismatch confirmation flow, extraction → FHIR-Observation/
+Condition write-back, `recommendation_mode` toggle UI surface (the R2
+prompt carve-out is always-on for guideline-backed recs; we kept the
+toggle out of the UI for time).
 
 ---
 
@@ -197,42 +198,59 @@ zero transitives), built eagerly at module import in
 ### 3.3 Retrieval — MVP-shipped
 
 **Public surface:** `retrieve_guidelines(query: str, k: int = 3)
--> list[RetrievalHit]`. Tokenize the query, score every chunk, return
-top-k by BM25 descending. Hits with score ≤ 0 are dropped (a query
-that shares no tokens with any chunk returns `[]` instead of noise).
-`k` clamped to `len(CORPUS)`; `k <= 0` and empty/whitespace queries
-return `[]`. Each `RetrievalHit` carries the full `GuidelineChunk` +
-the BM25 `score` + a 1-indexed `rank`.
+-> list[RetrievalHit]`. Two-stage pipeline behind one function:
+
+- **Stage 1 (BM25 recall filter):** tokenize the query, score every
+  chunk, take the top `BM25_CANDIDATE_POOL = 8` with score > 0. This is
+  the cheap exhaustive pass that makes sure no relevant chunk gets
+  silently dropped before the rerank sees it.
+- **Stage 2 (LLM rerank):** Claude Haiku scores each candidate's
+  semantic relevance to the query 0.0–1.0. Top-`k` by rerank score is
+  returned. Implementation in [`app/guidelines/rerank.py`](clinical-copilot/app/guidelines/rerank.py).
+
+`RetrievalHit.score` is the rerank score (the authoritative ordering
+signal); `RetrievalHit.bm25_score` carries the stage-1 score for
+debugging. Empty/whitespace queries return `[]`. `k <= 0` returns `[]`.
+A test-only `enable_rerank=False` kwarg skips the API call and falls
+back to BM25 ordering — used by the corpus-shape tests.
 
 The agent's tool wrapper
 ([`app/agent/tools.py::_retrieve_guidelines_impl`](clinical-copilot/app/agent/tools.py))
 emits `sources: ["Guideline/<chunk_id>", ...]` so the existing citation
 validator accepts inline `[Guideline/<chunk_id>]` references.
 
+**Why LLM-as-reranker (Claude Haiku) instead of a cross-encoder
+(BGE / Cohere).** The PRD allows "Cohere Rerank or an equivalent
+reranker." We chose LLM-as-reranker for three reasons:
+
+1. **Dependency footprint.** A cross-encoder requires
+   `sentence-transformers` + `torch` + ~300MB of model weights.
+   PyPI has no torch wheel that is both CPython-3.14-compatible AND
+   macOS-x86\_64-compatible right now (the dev box's stack), so
+   committing to that path forces either a Python downgrade or a
+   Linux-only Hetzner-only retrieval stage. We already pay for a
+   Claude API key — adding a Haiku call costs nothing new in setup.
+2. **Cost.** Haiku rerank costs ~$0.001 per query (vs. Cohere's $2/1k).
+   The per-request budget allows it comfortably.
+3. **Latency.** ~500–800ms per rerank call, in the same order of
+   magnitude as a hosted cross-encoder API. Local cross-encoder is
+   faster but requires the model download and warm-up.
+
+A swap to BGE / Cohere Rerank is a single-module replacement (the
+`rerank()` function signature is the contract); the choice is reversible
+when corpus size or quality bar warrants it.
+
 ### 3.3.1 Retrieval — deferred post-MVP (PRD-faithful target)
 
-The PRD specifies hybrid retrieve + BGE rerank. Both are deferred behind
-the same `retrieve_guidelines(query, k)` interface — when the dense
-index lands, the function body changes; no caller does.
-
-- Stage 1 (retrieval): query against BM25 ∪ dense FAISS, merge top-50.
-- Stage 2 (rerank): **BGE reranker** (`BAAI/bge-reranker-base`,
-  open-source, runs on Hetzner) scores each candidate against the query;
-  keeps top 5–10.
-- Stage 3: top chunks fed to the answer model with citation metadata
-  attached.
-
-**Why BGE over Cohere Rerank** (which the PRD names): no new vendor BAA,
-no API key, runs locally, top-of-MTEB quality at its size, easy swap to
-Cohere later by changing one function.
-
-**Why deferred for MVP.** The 12-chunk hand-curated corpus is small enough
-that BM25 alone returns clinically-relevant top-1 for every demo query
-(CRC scored 11.72 vs next 1.24 — verified via
-[`scripts/smoke_retrieve.py`](clinical-copilot/scripts/smoke_retrieve.py)).
-Dense + rerank pays off when the corpus grows past ~100 chunks where
-keyword overlap stops dominating. We get the win without the dependency
-footprint until the corpus warrants it.
+Dense embeddings (BGE-small or text-embedding-3-small over the same
+corpus, cosine merged with BM25 before rerank) is the next iteration.
+For a 12-chunk corpus the recall benefit over BM25-alone is marginal
+because keyword overlap is essentially exhaustive — BM25 + rerank
+already covers 8/12 candidates per query. Dense pays off when the
+corpus grows past ~100 chunks where some clinically-relevant chunks
+share no keywords with the query. The retrieval-stage interface
+already accommodates a dense layer (we'd union BM25 candidates with
+dense candidates before passing to the existing rerank).
 
 ### 3.4 Citation contract for retrieved evidence
 

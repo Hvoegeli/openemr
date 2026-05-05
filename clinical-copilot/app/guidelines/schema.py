@@ -34,15 +34,29 @@ class GuidelineChunk(BaseModel):
 
 
 class RetrievalHit(BaseModel):
-    """One match returned by `retrieve_guidelines`.
+    """One match returned by `retrieve_guidelines` — after BM25 + rerank.
 
-    `score` is the raw BM25 score — caller-meaningful only for
-    relative comparison within a single result set. The agent should
-    use it to break ties or filter low-confidence hits, not to form
-    absolute confidence claims in the user-facing response."""
+    `score` is the rerank stage's relevance score (0.0-1.0). It is the
+    authoritative ordering signal and what the agent should use when
+    breaking ties or filtering low-confidence hits.
+
+    `bm25_score` is the BM25 score from the prior stage, kept for
+    debugging and for tools that want to inspect the recall filter's
+    ranking. It is NOT the field that determines `rank`.
+
+    Neither score is suitable for forming absolute confidence claims
+    in the user-facing response — both are calibrated only within a
+    single result set."""
 
     model_config = ConfigDict(extra="forbid")
 
     chunk: GuidelineChunk
-    score: float = Field(ge=0, description="BM25 relevance score; higher = better match")
+    score: float = Field(
+        ge=0,
+        description="Rerank relevance score (0.0-1.0); the field that determines ordering",
+    )
     rank: int = Field(ge=1, description="1-indexed position within the result set")
+    bm25_score: float = Field(
+        default=0.0, ge=0,
+        description="Stage-1 BM25 score (informational); not used for ordering",
+    )
