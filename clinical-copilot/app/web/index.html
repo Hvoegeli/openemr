@@ -338,7 +338,12 @@
     /* ── Calendar list ──────────────────────────────────────────────── */
     .cal-row {
       display: grid;
-      grid-template-columns: 56px minmax(0,1fr) auto;
+      /* Time column hidden pending the TZ-correctness rework — drop the
+         56px slot from the grid so the rest of the row reflows cleanly.
+         When scheduling is re-enabled, restore the original template:
+           grid-template-columns: 56px minmax(0,1fr) auto;
+         and remove the `display: none` rule on `.cal-row .time` below. */
+      grid-template-columns: minmax(0,1fr) auto;
       gap: 0.6rem;
       align-items: center;
       padding: 0.65rem 0.6rem;
@@ -355,6 +360,8 @@
       font-variant-numeric: tabular-nums;
       font-size: 0.78rem; color: var(--muted);
       text-align: center;
+      /* Hidden alongside the grid-template-columns change above. */
+      display: none;
     }
     .cal-row .name { font-weight: 500; }
     .cal-row .sub { font-size: 0.78rem; color: var(--muted); }
