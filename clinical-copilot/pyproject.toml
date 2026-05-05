@@ -33,10 +33,20 @@ dependencies = [
     # Eval suite
     "pyyaml>=6.0",
     "rich>=13.7",
+    "pypdfium2>=4.30",
+    "pillow>=11.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=0.24",
     "ruff>=0.6",
 ]
+
+[tool.pytest.ini_options]
+# `asyncio_mode = auto` lets us write `async def test_…` without
+# decorating each test with `@pytest.mark.asyncio`. Strict mode (the
+# default) requires the decorator on every test; this saves boilerplate
+# and keeps async/sync tests visually consistent.
+asyncio_mode = "auto"

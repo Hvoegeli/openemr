@@ -43,11 +43,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from typing import Any, Literal
+from typing import Any
 
 import httpx
 
 from app.config import settings
+from app.extraction.schemas import DocumentType
 
 log = logging.getLogger("agent.fhir.writer")
 
@@ -74,8 +75,6 @@ DOC_CATEGORIES: dict[str, str] = {
     "lab_pdf":     "labreport",          # → OpenEMR "Lab Report" (id=2)
     "intake_form": "patientinformation",  # → OpenEMR "Patient Information" (id=4)
 }
-
-DocumentType = Literal["lab_pdf", "intake_form"]
 
 
 def _idempotency_filename(sha_hex: str, original_filename: str) -> str:

@@ -40,6 +40,13 @@ SourceType = Literal["lab_pdf", "intake_form", "guideline", "fhir_resource"]
 existing chart-summarizer path (fhir_resource)."""
 
 
+DocumentType = Literal["lab_pdf", "intake_form"]
+"""Doc types the Phase 2 extractor + writer support. Strict subset of
+SourceType (the citation-source vocabulary is broader than the
+extractable-doc vocabulary — guideline / fhir_resource citations exist
+without ever being uploaded as documents)."""
+
+
 class BoundingBox(BaseModel):
     """Where on the source page a cited value lives.
 
