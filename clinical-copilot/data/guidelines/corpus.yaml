@@ -1,0 +1,215 @@
+# Hand-curated guideline corpus for the Phase 3 RAG MVP.
+#
+# 12 high-value chunks from USPSTF + ADA covering primary-care
+# scenarios the demo patients (Cohen, Reyes, Kowalski, Whitaker)
+# exercise. Each chunk is short (≤200 words) so the LLM can quote
+# verbatim without truncation in the response.
+#
+# Schema (one entry per chunk; mirrors `app/guidelines/schema.py`):
+#   chunk_id:    snake_case stable slug; never reuse across chunks
+#   source:      organization (e.g. "USPSTF", "ADA")
+#   title:       canonical title of the recommendation/section
+#   year:        publication year as a string
+#   url:         canonical URL for the citation footer
+#   topic_tags:  short labels for filtering / understanding
+#   text:        the quotable snippet (paraphrased / shortened from
+#                the source — verbatim quoting in MVP would risk
+#                copyright concerns; the URL is the source-of-truth
+#                pointer for clinicians who want the full text)
+
+- chunk_id: uspstf_statin_primary_prevention_2022
+  source: USPSTF
+  title: Statin Use for the Primary Prevention of Cardiovascular Disease in Adults
+  year: "2022"
+  url: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/statin-use-in-adults-preventive-medication
+  topic_tags: [statin, cvd_prevention, primary_prevention, lipid]
+  text: |
+    The USPSTF recommends that adults aged 40 to 75 years who have
+    1 or more cardiovascular disease (CVD) risk factors (i.e.,
+    dyslipidemia, diabetes, hypertension, or smoking) and an estimated
+    10-year CVD risk of 10% or greater initiate a statin for the
+    primary prevention of CVD events and mortality (B recommendation).
+    For adults in the same age range with the same risk factors and a
+    10-year CVD risk of 7.5% to less than 10%, clinicians may
+    selectively offer a statin (C recommendation). Evidence is
+    insufficient for adults aged 76 years or older.
+
+- chunk_id: uspstf_aspirin_primary_prevention_2022
+  source: USPSTF
+  title: Aspirin Use to Prevent Cardiovascular Disease — Primary Prevention
+  year: "2022"
+  url: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/aspirin-to-prevent-cardiovascular-disease-preventive-medication
+  topic_tags: [aspirin, cvd_prevention, primary_prevention, bleeding_risk]
+  text: |
+    The USPSTF recommends that the decision to initiate low-dose
+    aspirin use for the primary prevention of cardiovascular disease
+    in adults aged 40 to 59 years who have a 10% or greater 10-year
+    CVD risk should be an individual one. Evidence indicates the net
+    benefit of aspirin use in this group is small. Persons who are
+    not at increased risk for bleeding and are willing to take
+    low-dose aspirin daily are more likely to benefit (C). The USPSTF
+    recommends against initiating low-dose aspirin use for primary
+    prevention of CVD in adults 60 years or older (D recommendation).
+
+- chunk_id: uspstf_lipid_screening_2016
+  source: USPSTF
+  title: Statin Use for the Primary Prevention of CVD — Lipid Screening Component
+  year: "2016"
+  url: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/statin-use-in-adults-preventive-medication
+  topic_tags: [lipid, cholesterol, screening, ldl, hdl]
+  text: |
+    Lipid screening (total cholesterol, HDL-C, and calculated LDL-C
+    or non-HDL-C) is part of the cardiovascular risk assessment used
+    to determine statin eligibility under the 2022 statin
+    recommendation. The USPSTF endorses calculating 10-year ASCVD
+    risk using the ACC/AHA Pooled Cohort Equations as the basis for
+    the statin decision. Universal lipid screening intervals are not
+    specified by USPSTF; ACC/AHA suggest every 4–6 years in adults
+    20+ at low risk, and more often when risk factors are present.
+
+- chunk_id: uspstf_diabetes_screening_2021
+  source: USPSTF
+  title: Screening for Prediabetes and Type 2 Diabetes in Adults
+  year: "2021"
+  url: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/screening-for-prediabetes-and-type-2-diabetes
+  topic_tags: [diabetes, prediabetes, screening, t2dm, hba1c]
+  text: |
+    The USPSTF recommends screening for prediabetes and type 2
+    diabetes in adults aged 35 to 70 years who have overweight or
+    obesity. Clinicians should offer or refer patients with
+    prediabetes to effective preventive interventions (B
+    recommendation). Acceptable screening tests include fasting
+    plasma glucose, HbA1c, or a 2-hour oral glucose tolerance test.
+    Repeat screening every 3 years is reasonable for adults with
+    normal results; shorter intervals are appropriate for those
+    with risk factors.
+
+- chunk_id: uspstf_colorectal_cancer_screening_2021
+  source: USPSTF
+  title: Screening for Colorectal Cancer
+  year: "2021"
+  url: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/colorectal-cancer-screening
+  topic_tags: [colorectal_cancer, crc, screening, colonoscopy]
+  text: |
+    The USPSTF recommends screening for colorectal cancer in all
+    adults aged 50 to 75 years (A recommendation). The USPSTF
+    recommends that clinicians selectively offer screening for
+    colorectal cancer in adults aged 45 to 49 years (B
+    recommendation). Screening modalities include colonoscopy every
+    10 years, FIT annually, FIT-DNA every 1–3 years, CT colonography
+    every 5 years, or flexible sigmoidoscopy every 5 years (or every
+    10 years with annual FIT). Choice should reflect patient
+    preference, comorbidity, and prior screening history.
+
+- chunk_id: uspstf_blood_pressure_screening_2021
+  source: USPSTF
+  title: Screening for Hypertension in Adults
+  year: "2021"
+  url: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation/hypertension-in-adults-screening
+  topic_tags: [hypertension, blood_pressure, screening]
+  text: |
+    The USPSTF recommends screening for hypertension in adults aged
+    18 years or older with office blood pressure measurement (A
+    recommendation). The USPSTF recommends obtaining blood pressure
+    measurements outside of the clinical setting for diagnostic
+    confirmation before starting treatment. Adults aged 40 years or
+    older and those at increased risk should be screened annually;
+    adults aged 18 to 39 years at low risk should be screened every
+    3 to 5 years.
+
+- chunk_id: ada_glycemic_targets_2024
+  source: ADA
+  title: Glycemic Goals and Hypoglycemia (Standards of Care 2024)
+  year: "2024"
+  url: https://diabetesjournals.org/care/issue/47/Supplement_1
+  topic_tags: [t2dm, hba1c, glycemic_target, individualized]
+  text: |
+    A reasonable HbA1c goal for many nonpregnant adults with diabetes
+    is less than 7% without significant hypoglycemia. Less stringent
+    goals (e.g., <8%) may be appropriate for patients with limited
+    life expectancy, advanced complications, extensive comorbidities,
+    or those for whom the goal is difficult to attain despite intensive
+    self-management education and effective doses of multiple
+    glucose-lowering agents including insulin. More stringent targets
+    (e.g., <6.5%) may be appropriate for selected patients if
+    achievable without significant hypoglycemia.
+
+- chunk_id: ada_pharmacotherapy_first_line_2024
+  source: ADA
+  title: Pharmacologic Approaches to Glycemic Treatment — First-Line Therapy
+  year: "2024"
+  url: https://diabetesjournals.org/care/issue/47/Supplement_1
+  topic_tags: [t2dm, metformin, glp1, sglt2, pharmacotherapy]
+  text: |
+    Metformin is the preferred initial pharmacologic agent for type 2
+    diabetes. In adults with type 2 diabetes and established or high
+    risk for atherosclerotic cardiovascular disease, heart failure,
+    and/or chronic kidney disease, the treatment regimen should
+    include an agent with proven cardiovascular or kidney benefit
+    (GLP-1 receptor agonist or SGLT2 inhibitor) independent of HbA1c
+    and in consideration of patient-specific factors.
+
+- chunk_id: ada_lipid_management_diabetes_2024
+  source: ADA
+  title: Cardiovascular Disease and Risk Management — Statins in Diabetes
+  year: "2024"
+  url: https://diabetesjournals.org/care/issue/47/Supplement_1
+  topic_tags: [t2dm, statin, lipid, ldl, primary_prevention, secondary_prevention]
+  text: |
+    For adults with diabetes aged 40–75 years without atherosclerotic
+    cardiovascular disease, use moderate-intensity statin therapy in
+    addition to lifestyle therapy (A). For adults with diabetes aged
+    20–39 years with additional ASCVD risk factors, it may be
+    reasonable to initiate statin therapy in addition to lifestyle
+    therapy (C). In patients with diabetes and ASCVD, high-intensity
+    statin therapy should be added to lifestyle therapy (A). For
+    those with diabetes aged 40–75 years at higher cardiovascular
+    risk, including those with one or more ASCVD risk factors, it is
+    recommended to use high-intensity statin therapy.
+
+- chunk_id: ada_hypertension_diabetes_2024
+  source: ADA
+  title: Hypertension/Blood Pressure Control in People With Diabetes
+  year: "2024"
+  url: https://diabetesjournals.org/care/issue/47/Supplement_1
+  topic_tags: [t2dm, hypertension, blood_pressure, ace_inhibitor, arb]
+  text: |
+    For people with diabetes and hypertension, blood pressure should
+    be treated to a target of <130/80 mmHg if it can be safely
+    attained. Pharmacologic therapy for patients with diabetes and
+    hypertension should comprise drug classes demonstrated to reduce
+    cardiovascular events in patients with diabetes — ACE inhibitors,
+    angiotensin receptor blockers, thiazide-like diuretics, or
+    dihydropyridine calcium channel blockers. ACE inhibitors or ARBs
+    are recommended first-line for patients with diabetes and a
+    urinary albumin-to-creatinine ratio ≥300 mg/g.
+
+- chunk_id: ada_ckd_diabetes_2024
+  source: ADA
+  title: Chronic Kidney Disease and Risk Management in Diabetes
+  year: "2024"
+  url: https://diabetesjournals.org/care/issue/47/Supplement_1
+  topic_tags: [t2dm, ckd, egfr, albuminuria, sglt2, finerenone]
+  text: |
+    For people with type 2 diabetes and CKD, an SGLT2 inhibitor with
+    demonstrated kidney benefit is recommended for those with eGFR
+    ≥20 mL/min/1.73 m² and urinary albumin ≥200 mg/g of creatinine,
+    to reduce CKD progression and cardiovascular events. In patients
+    with type 2 diabetes and CKD with albuminuria treated with the
+    maximum tolerated dose of ACEi/ARB, addition of finerenone is
+    recommended to reduce cardiovascular events and CKD progression.
+
+- chunk_id: ada_aspirin_diabetes_2024
+  source: ADA
+  title: Aspirin Use in Diabetes for Cardiovascular Risk Reduction
+  year: "2024"
+  url: https://diabetesjournals.org/care/issue/47/Supplement_1
+  topic_tags: [t2dm, aspirin, primary_prevention, secondary_prevention, bleeding_risk]
+  text: |
+    Use aspirin therapy (75–162 mg/day) as a secondary prevention
+    strategy in patients with diabetes and a history of
+    atherosclerotic cardiovascular disease. Aspirin therapy
+    (75–162 mg/day) may be considered as a primary prevention
+    strategy in patients with diabetes who are at increased
+    cardiovascular risk after a discussion with the patient on the
+    benefits versus the comparable increased risk of bleeding.

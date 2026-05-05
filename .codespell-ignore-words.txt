@@ -10,6 +10,7 @@ ehr
 hsa
 inactivate
 inactivated
+infarction
 inh
 mor
 oint

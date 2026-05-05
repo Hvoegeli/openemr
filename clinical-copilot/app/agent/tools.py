@@ -153,6 +153,35 @@ async def get_med_changes_24h(patient_id: str, hours: int = 24) -> str:
 
 
 @tool
+async def retrieve_guidelines(query: str, k: int = 3) -> str:
+    """Search the published clinical-guideline corpus (USPSTF + ADA Standards
+    of Care) for snippets relevant to `query`. Use this when the doctor asks
+    a "what does the guideline say" question, when proposing a screening
+    decision (statin, aspirin, lipid panel, BP, T2DM, CRC), or when grounding
+    a recommendation in published evidence.
+
+    Returns JSON with `data.hits` (each with `chunk_id`, `source` like
+    'USPSTF' or 'ADA', `title`, `year`, `url`, `text`, `score`, `rank`)
+    plus `sources` listing every retrieved chunk as
+    `Guideline/<chunk_id>` so the citation validator accepts inline
+    `[Guideline/<chunk_id>]` references in the response.
+
+    Citation format the agent must use when quoting a returned chunk:
+    `[Guideline/<chunk_id>]` immediately after the quoted/paraphrased
+    statement. Empty result is the truthful answer when nothing relevant
+    is in the corpus — never make up a guideline.
+
+    Args:
+        query: Free-text query in the doctor's words. Concatenated with
+            chunk title + topic_tags during BM25 scoring, so domain terms
+            (e.g. "statin primary prevention", "HbA1c target") work well.
+        k: Maximum hits to return. Defaults to 3; raise to 5 for broader
+            survey questions.
+    """
+    raise NotImplementedError("Dispatched in agent.graph.execute_tools_node")
+
+
+@tool
 async def clinical_flags(patient_id: str) -> str:
     """Surface chart-internal fact pairs the doctor would want to see together.
 
@@ -190,6 +219,7 @@ TOOLS = [
     get_notes_24h,
     get_med_changes_24h,
     clinical_flags,
+    retrieve_guidelines,
 ]
 
 
@@ -315,6 +345,37 @@ async def _clinical_flags_impl(
     }
 
 
+async def _retrieve_guidelines_impl(query: str, k: int = 3) -> SourcedResult:
+    """Run BM25 retrieval over the guideline corpus + project sources.
+
+    Sources are emitted as `Guideline/<chunk_id>` so the existing citation
+    validator (`CITATION_RE = \\[([A-Z][a-zA-Z]+)/([a-zA-Z0-9._-]+)\\]`)
+    accepts inline `[Guideline/<chunk_id>]` references in the response.
+    No FHIR client is needed — the corpus is pre-loaded at module import."""
+    from app.guidelines.retrieve import retrieve_guidelines
+
+    hits = retrieve_guidelines(query, k=k)
+    data_hits = [
+        {
+            "chunk_id":   h.chunk.chunk_id,
+            "source":     h.chunk.source,
+            "title":      h.chunk.title,
+            "year":       h.chunk.year,
+            "url":        h.chunk.url,
+            "text":       h.chunk.text,
+            "topic_tags": h.chunk.topic_tags,
+            "score":      h.score,
+            "rank":       h.rank,
+        }
+        for h in hits
+    ]
+    sources = [f"Guideline/{h.chunk.chunk_id}" for h in hits]
+    return {
+        "data": {"query": query, "hits": data_hits, "hit_count": len(hits)},
+        "sources": sources,
+    }
+
+
 # Tools that take a `patient_id` directly. For these, dispatch verifies the
 # patient sits inside the caller's panel before running the FHIR fetch — a
 # user who knows another patient's UUID still gets a "not found" answer rather
@@ -395,4 +456,8 @@ async def dispatch(
         )
     if name == "clinical_flags":
         return await _clinical_flags_impl(client, patient_id=args["patient_id"])
+    if name == "retrieve_guidelines":
+        return await _retrieve_guidelines_impl(
+            query=args["query"], k=int(args.get("k", 3)),
+        )
     raise ValueError(f"Unknown tool: {name}")

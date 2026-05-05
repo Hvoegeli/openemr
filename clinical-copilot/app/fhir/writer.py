@@ -1,22 +1,46 @@
-"""Write-capable OpenEMR client for pushing finalized clinical-note vitals
-into the EHR's standard vitals table.
+"""Write-capable OpenEMR client.
 
-The agent's read FhirClient uses ``private_key_jwt`` + ``client_credentials``
-with ``system/*.read`` scopes — it cannot write. This module mirrors the
-seed scripts: ``client_secret_post`` + ``password`` grant + ``user/*.cruds``
-scopes hit OpenEMR's *standard* (non-FHIR) REST API which exposes the vitals
-write endpoint that OpenEMR's own UI uses. The FHIR layer reads from the
-same underlying ``form_vitals`` table, so a successful write here surfaces
-on the next FHIR Observation search — that's what makes the trend chart
-and the chart UI both reflect the doctor's input.
+Two write surfaces live behind this single class because they share the same
+``client_secret_post`` + ``password``-grant token:
 
-Best-effort by design: callers should treat any failure as "the local
-JSON-store note is still authoritative" and leave a log line behind. The
-clinical-note finalize flow must not fail just because the EHR write did.
+1. **Standard non-FHIR REST API** at ``/apis/default/api/`` — used for both
+   the Week 1 vitals round-trip AND the Week 2 source-document upload.
+   OpenEMR's FHIR layer does NOT route ``POST /fhir/DocumentReference``
+   (despite advertising ``create`` in its CapabilityStatement), so document
+   writes go through ``POST /apis/default/api/patient/{pid}/document`` with
+   a multipart-form upload. Reads still come back through the FHIR layer
+   (``GET /fhir/DocumentReference?patient=...``) — same Supporting
+   Documents tab the chart UI already uses, no parallel surface.
+
+2. **FHIR API** at ``/apis/default/fhir/`` — used by ``OpenEMRWriter`` only
+   for *reads* (DocumentReference search after a multipart upload, to
+   resolve the new resource's stable FHIR id). The agent's read
+   ``FhirClient`` separately handles all the chart-summarizer FHIR queries
+   with a different OAuth flow.
+
+The agent's read ``FhirClient`` uses ``private_key_jwt`` +
+``client_credentials`` with ``system/*.read`` scopes and cannot write — that
+client is intentionally read-only. All writes go through ``OpenEMRWriter``
+below.
+
+Best-effort by design for vitals: callers should treat any failure as "the
+local JSON-store note is still authoritative" and leave a log line behind.
+For Week 2 ``write_document_reference``, failures bubble up — Phase 2
+extraction depends on getting back a real DocumentReference id to use as
+the citation ``source_id``, so a silent failure here would corrupt the
+extraction-citation contract.
+
+Idempotency for ``write_document_reference`` rides in the upload filename:
+the SHA-256 of the file bytes is prepended (``sha256-<hex>__<original>``)
+so a re-upload is detected by FHIR-GET search on attachment title without
+needing a parallel dedupe table on the co-pilot side. Round-tripping
+through OpenEMR keeps OpenEMR as the single source of truth for what's
+been persisted.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from typing import Any
@@ -24,18 +48,53 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.extraction.schemas import DocumentType
 
 log = logging.getLogger("agent.fhir.writer")
 
 # Seed-client scope set — must include user/encounter.cruds and
-# user/vital.cruds for the encounter lookup + vitals POST below.
+# user/vital.cruds for the vitals POST, user/document.cruds for the new
+# Week 2 multipart document upload, and user/DocumentReference.read for
+# the FHIR search that resolves the uploaded doc's FHIR resource id.
 _SCOPE = " ".join(
     [
         "openid", "fhirUser", "offline_access",
         "api:oemr", "api:fhir", "api:port",
         "user/patient.cruds", "user/encounter.cruds", "user/vital.cruds",
+        "user/document.cruds", "user/DocumentReference.read",
     ]
 )
+
+# Map our doc_type vocabulary to OpenEMR's category-path convention.
+# OpenEMR's `getLastIdOfPath` looks up categories by `replace(LOWER(name),
+# ' ', '')` so we must pass the path pre-normalized — the standard category
+# names are "Lab Report" and "Patient Information" (top-level, parent=1).
+# (Spaces and case in the path query string would otherwise silently fail
+# to match, leaving the document unlinked from any category.)
+DOC_CATEGORIES: dict[str, str] = {
+    "lab_pdf":     "labreport",          # → OpenEMR "Lab Report" (id=2)
+    "intake_form": "patientinformation",  # → OpenEMR "Patient Information" (id=4)
+}
+
+
+def _idempotency_filename(sha_hex: str, original_filename: str) -> str:
+    """Prepend the SHA-256 to the filename so re-uploads of the same bytes
+    are detectable via FHIR DocumentReference search on attachment.title.
+
+    Example: ``sha256-7c4a8d09…__p01-chen-lipid-panel.pdf``.
+    """
+    return f"sha256-{sha_hex}__{original_filename}"
+
+
+class DocumentAlreadyExists(Exception):
+    """Raised when a write would create a duplicate. Currently informational
+    only — `write_document_reference` returns ``created=False`` on dedupe
+    rather than raising. Exposed so future callers can opt into raise-style
+    handling if useful."""
+
+    def __init__(self, reference_id: str) -> None:
+        super().__init__(f"DocumentReference already exists with id={reference_id}")
+        self.reference_id = reference_id
 
 # Map our canonical-key vitals onto OpenEMR's vitals-form column names.
 # OpenEMR stores temperature in °F by default; the seed script confirms.
@@ -67,6 +126,11 @@ class OpenEMRWriter:
         #   https://localhost:9300/apis/default/fhir  →
         #   https://localhost:9300/apis/default/api
         return settings.openemr_fhir_base_url.rstrip("/").rsplit("/", 1)[0] + "/api"
+
+    @property
+    def _fhir_base(self) -> str:
+        """The FHIR R4 base URL — same as the read flow uses."""
+        return settings.openemr_fhir_base_url.rstrip("/")
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -196,3 +260,181 @@ class OpenEMRWriter:
             patient_uuid, eid, vid,
         )
         return {"vital_id": vid, "encounter_eid": eid, "patient_pid": pid}
+
+    # ── DocumentReference (multipart upload + FHIR read) ──────────────
+
+    @staticmethod
+    def _sha256_hex(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    @staticmethod
+    def resolve_doc_category(doc_type: DocumentType) -> str:
+        """Return the OpenEMR category-path string for a doc type.
+
+        The path string is what the standard upload endpoint expects in its
+        ``?path=`` query parameter. Pre-normalized (lowercased, no spaces)
+        because OpenEMR's `getLastIdOfPath` does a case-sensitive comparison
+        against `replace(LOWER(name), ' ', '')`."""
+        try:
+            return DOC_CATEGORIES[doc_type]
+        except KeyError as exc:
+            raise OpenEMRWriteError(
+                f"unsupported doc_type {doc_type!r}; expected one of {list(DOC_CATEGORIES)}"
+            ) from exc
+
+    async def find_document_reference_by_sha(
+        self, patient_uuid: str, sha_hex: str,
+    ) -> str | None:
+        """Search FHIR DocumentReference for an attachment.title that starts
+        with our SHA-256 prefix.
+
+        Same SHA = same file bytes = same logical document, regardless of
+        the human-readable suffix the user chose for the attachment.title.
+        Matching by `startswith("sha256-<hex>__")` correctly dedupes a
+        re-upload of identical bytes that the user renamed in the upload
+        form. Matching by full filename equality (the prior behavior)
+        missed those because a typed display name on each upload changed
+        the suffix.
+
+        Returns ``DocumentReference/{uuid}`` if found, ``None`` otherwise.
+        The OpenEMR FHIR read flow is paginated by default (50 entries);
+        for MVP we accept that very-many-document patients (>50) might
+        miss a dedupe hit on a doc deeper in the bundle. Tracked as a
+        post-MVP concern in W2_ARCHITECTURE.md §4.5.
+        """
+        prefix = f"sha256-{sha_hex}__"
+        token = await self._ensure_token()
+        r = await self._http.get(
+            f"{self._fhir_base}/DocumentReference",
+            params={"patient": patient_uuid},
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/fhir+json"},
+        )
+        if r.status_code != 200:
+            raise OpenEMRWriteError(
+                f"DocumentReference search failed ({r.status_code}): {r.text[:300]}"
+            )
+        bundle = r.json()
+        entries = bundle.get("entry") if isinstance(bundle, dict) else None
+        if not entries:
+            return None
+        for entry in entries:
+            resource = entry.get("resource") if isinstance(entry, dict) else None
+            if not isinstance(resource, dict):
+                continue
+            for content in resource.get("content") or []:
+                if not isinstance(content, dict):
+                    continue
+                attach = content.get("attachment") or {}
+                if not isinstance(attach, dict):
+                    continue
+                title = attach.get("title") or ""
+                if isinstance(title, str) and title.startswith(prefix):
+                    rid = resource.get("id")
+                    if rid:
+                        return f"DocumentReference/{rid}"
+        return None
+
+    async def write_document_reference(
+        self,
+        *,
+        patient_uuid: str,
+        doc_type: DocumentType,
+        file_bytes: bytes,
+        filename: str,
+        mime_type: str = "application/pdf",
+    ) -> dict[str, Any]:
+        """Persist a source document to OpenEMR via the standard upload API
+        and resolve the resulting FHIR DocumentReference id.
+
+        Two phases:
+
+        1. **Idempotency check** — compute SHA-256, prepend to the filename
+           (``sha256-<hex>__<original>``), and search FHIR DocumentReference
+           for an existing match by attachment.title. A hit returns the
+           existing id without re-POSTing.
+
+        2. **Upload + resolve** — multipart POST to
+           ``/api/patient/{pid}/document?path={category}`` with the
+           hash-prefixed filename. Then FHIR-GET the patient's
+           DocumentReferences to find the just-uploaded resource by title
+           and return its FHIR id.
+
+        Returns:
+            dict with keys:
+              - ``reference_id``: ``DocumentReference/{fhir_uuid}``
+              - ``sha256``: hex SHA-256 of the file
+              - ``created``: True if newly uploaded, False if dedupe hit
+        """
+        category = self.resolve_doc_category(doc_type)
+        sha_hex = self._sha256_hex(file_bytes)
+        idem_filename = _idempotency_filename(sha_hex, filename)
+
+        # Phase 1 — dedupe by SHA prefix. We match the SHA prefix only (not
+        # the full hash-prefixed filename) because the user-supplied display
+        # name in the upload form can vary across uploads of the same file
+        # bytes. Same bytes = same SHA = same logical document.
+        existing = await self.find_document_reference_by_sha(
+            patient_uuid, sha_hex,
+        )
+        if existing:
+            log.info(
+                "DocumentReference dedupe hit patient=%s sha256=%s -> %s",
+                patient_uuid, sha_hex[:12], existing,
+            )
+            return {"reference_id": existing, "sha256": sha_hex, "created": False}
+
+        # Phase 2 — upload via standard non-FHIR API, then resolve via FHIR
+        token = await self._ensure_token()
+        pid = await self._patient_numeric_pid(token, patient_uuid)
+        # NOTE: do NOT set Content-Type — httpx generates the multipart
+        # boundary header automatically when `files=` is supplied. Setting
+        # Content-Type manually breaks multipart parsing on the server.
+        r = await self._http.post(
+            f"{self._api_base}/patient/{pid}/document",
+            params={"path": category},
+            headers={"Authorization": f"Bearer {token}"},
+            files={"document": (idem_filename, file_bytes, mime_type)},
+        )
+        if r.status_code >= 400:
+            raise OpenEMRWriteError(
+                f"document upload failed ({r.status_code}): {r.text[:300]}"
+            )
+        # OpenEMR's standard API returns boolean `true` on success and
+        # `false`/error JSON on failure. Anything other than truthy means
+        # the document service rejected the file.
+        try:
+            payload = r.json()
+        except ValueError:
+            payload = r.text
+        # Validation errors come back with HTTP 200 + a populated
+        # `validationErrors` field (same shape as the vitals POST). Surface
+        # them with the actual error message instead of falling through to
+        # the FHIR-GET-not-found path's much vaguer "couldn't locate" error.
+        if isinstance(payload, dict):
+            val = payload.get("validationErrors")
+            if val:  # truthy dict OR non-empty list
+                raise OpenEMRWriteError(
+                    f"document upload validation failed: {val}"
+                )
+        if payload is False or payload is None or payload == "":
+            raise OpenEMRWriteError(
+                f"document upload returned non-truthy response: "
+                f"status={r.status_code} body={r.text[:200]!r}"
+            )
+
+        # Resolve the new resource's FHIR id. Look up by SHA prefix —
+        # we just verified above that no doc with this SHA existed
+        # before the upload, so the only match is the one we just made.
+        new_ref = await self.find_document_reference_by_sha(
+            patient_uuid, sha_hex,
+        )
+        if not new_ref:
+            raise OpenEMRWriteError(
+                f"upload reported success but FHIR GET could not locate the "
+                f"document (patient={patient_uuid}, sha256={sha_hex[:12]}...)"
+            )
+        log.info(
+            "wrote DocumentReference patient=%s doc_type=%s sha256=%s -> %s",
+            patient_uuid, doc_type, sha_hex[:12], new_ref,
+        )
+        return {"reference_id": new_ref, "sha256": sha_hex, "created": True}

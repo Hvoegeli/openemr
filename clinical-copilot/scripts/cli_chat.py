@@ -37,6 +37,9 @@ def fresh_state() -> AgentState:
         # gate in `app.access_control` treats us as the no-filter caller
         # and the CLI keeps its prior "see every patient" behavior.
         "username": "admin",
+        # CLI defaults to chart-summarizer mode; advisor mode is a UI-only
+        # toggle for now (the doctor opts in per-conversation in the web UI).
+        "advisor_mode": False,
     }
 
 

@@ -61,6 +61,17 @@ SCOPES = " ".join(
         "user/Encounter.write",
         "user/Observation.read",
         "user/Observation.write",
+        # Week 2 — source-document persistence path.
+        # Standard non-FHIR API (multipart upload) — what the writer
+        # actually POSTs to. OpenEMR's FHIR layer does not route
+        # POST /DocumentReference despite the CapabilityStatement's claim.
+        "user/document.cruds",
+        # FHIR DocumentReference *read* — used after upload to resolve the
+        # new doc's FHIR resource id, and by the agent's chart-summarizer
+        # for the Supporting Documents tab. Write scope kept here as a
+        # forward-compat hint even though OpenEMR ignores it today.
+        "user/DocumentReference.read",
+        "user/DocumentReference.write",
     ]
 )
 

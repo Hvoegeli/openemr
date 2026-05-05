@@ -1,0 +1,148 @@
+{
+  "document_type": "intake_form",
+  "demographics": {
+    "given_name": "Nora",
+    "family_name": "Cohen",
+    "date_of_birth": "1958-06-22",
+    "sex": "female",
+    "address": "1234 Maple Street, Austin, TX 78701",
+    "phone": "(512) 555-0142",
+    "source_citation": {
+      "source_type": "intake_form",
+      "source_id": "DocumentReference/cohen_intake_2026-04-30",
+      "page_or_section": "page 1",
+      "field_or_chunk_id": "demographics",
+      "quote_or_value": "Nora Cohen / 1958-06-22",
+      "bbox": null
+    }
+  },
+  "chief_concern": "Annual follow-up for diabetes, hypertension, and kidney function. Patient reports increased fatigue over past month.",
+  "current_medications": [
+    {
+      "name": "Metformin",
+      "dose": "1000 mg",
+      "frequency": "BID",
+      "route": "PO",
+      "source_citation": {
+        "source_type": "intake_form",
+        "source_id": "DocumentReference/cohen_intake_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "medications.0",
+        "quote_or_value": "Metformin 1000 mg PO BID",
+        "bbox": null
+      }
+    },
+    {
+      "name": "Lisinopril",
+      "dose": "20 mg",
+      "frequency": "daily",
+      "route": "PO",
+      "source_citation": {
+        "source_type": "intake_form",
+        "source_id": "DocumentReference/cohen_intake_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "medications.1",
+        "quote_or_value": "Lisinopril 20 mg PO daily",
+        "bbox": null
+      }
+    },
+    {
+      "name": "Apixaban",
+      "dose": "5 mg",
+      "frequency": "BID",
+      "route": "PO",
+      "source_citation": {
+        "source_type": "intake_form",
+        "source_id": "DocumentReference/cohen_intake_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "medications.2",
+        "quote_or_value": "Apixaban 5 mg PO BID",
+        "bbox": null
+      }
+    },
+    {
+      "name": "Atorvastatin",
+      "dose": "40 mg",
+      "frequency": "QHS",
+      "route": "PO",
+      "source_citation": {
+        "source_type": "intake_form",
+        "source_id": "DocumentReference/cohen_intake_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "medications.3",
+        "quote_or_value": "Atorvastatin 40 mg PO QHS",
+        "bbox": null
+      }
+    }
+  ],
+  "allergies": [
+    {
+      "substance": "Penicillin",
+      "reaction": "Hives",
+      "severity": "moderate",
+      "source_citation": {
+        "source_type": "intake_form",
+        "source_id": "DocumentReference/cohen_intake_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "allergies.0",
+        "quote_or_value": "Penicillin - Hives",
+        "bbox": null
+      }
+    },
+    {
+      "substance": "Sulfa drugs",
+      "reaction": "Rash",
+      "severity": "mild",
+      "source_citation": {
+        "source_type": "intake_form",
+        "source_id": "DocumentReference/cohen_intake_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "allergies.1",
+        "quote_or_value": "Sulfa drugs - Rash",
+        "bbox": null
+      }
+    }
+  ],
+  "family_history": [
+    {
+      "relation": "Mother",
+      "condition": "Type 2 diabetes mellitus",
+      "age_at_onset": 55,
+      "source_citation": {
+        "source_type": "intake_form",
+        "source_id": "DocumentReference/cohen_intake_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "family_history.0",
+        "quote_or_value": "Mother: Type 2 diabetes mellitus",
+        "bbox": null
+      }
+    },
+    {
+      "relation": "Father",
+      "condition": "Myocardial infarction",
+      "age_at_onset": 62,
+      "source_citation": {
+        "source_type": "intake_form",
+        "source_id": "DocumentReference/cohen_intake_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "family_history.1",
+        "quote_or_value": "Father: Myocardial infarction",
+        "bbox": null
+      }
+    },
+    {
+      "relation": "Sister",
+      "condition": "Hypertension",
+      "age_at_onset": null,
+      "source_citation": {
+        "source_type": "intake_form",
+        "source_id": "DocumentReference/cohen_intake_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "family_history.2",
+        "quote_or_value": "Sister: Hypertension",
+        "bbox": null
+      }
+    }
+  ],
+  "source_document_id": "DocumentReference/cohen_intake_2026-04-30"
+}

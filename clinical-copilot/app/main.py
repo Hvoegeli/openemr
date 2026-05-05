@@ -35,7 +35,7 @@ from typing import AsyncIterator
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
@@ -65,6 +65,9 @@ from app.fhir import adapter  # noqa: E402
 from app.fhir.client import FhirClient  # noqa: E402
 from app.fhir.extras import get_calendar_today, get_supporting_documents  # noqa: E402
 from app.fhir.writer import OpenEMRWriter, OpenEMRWriteError  # noqa: E402
+from app.extraction.extract import attach_and_extract  # noqa: E402
+from app.extraction.schemas import DOC_TYPE_LABELS  # noqa: E402
+from app.extraction.vision import ExtractionError  # noqa: E402
 from app.observability import (  # noqa: E402
     TokenUsageCallback,
     init_langsmith,
@@ -100,6 +103,7 @@ def _fresh_state() -> AgentState:
         "patient_id": None,
         "validation_attempts": 0,
         "username": None,
+        "advisor_mode": False,
     }
 
 
@@ -223,6 +227,12 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     session_id: str | None = None
     message: str
+    # Per-turn medication-safety advisor toggle (default off). When True the
+    # graph swaps in the R2-relaxed system prompt for this turn (and only
+    # this turn — the value is re-sent by the client on every request, so
+    # turning the UI switch off mid-conversation immediately drops the
+    # agent back into chart-summarizer-only mode).
+    advisor_mode: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -384,6 +394,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
     state["username"] = _user
+    state["advisor_mode"] = req.advisor_mode
 
     trace = new_request_trace(
         session_id=session_id,
@@ -410,6 +421,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
         "patient_id": result.get("patient_id"),
         "validation_attempts": result.get("validation_attempts", 0),
         "username": _user,
+        "advisor_mode": req.advisor_mode,
     }
     SESSIONS[session_id] = new_state
 
@@ -531,6 +543,7 @@ async def chat_stream(
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
     state["username"] = _user
+    state["advisor_mode"] = req.advisor_mode
 
     trace = new_request_trace(
         session_id=session_id,
@@ -575,6 +588,7 @@ async def chat_stream(
                                 "patient_id": output.get("patient_id"),
                                 "validation_attempts": output.get("validation_attempts", 0),
                                 "username": _user,
+                                "advisor_mode": req.advisor_mode,
                             }
                             SESSIONS[session_id] = new_state
 
@@ -868,6 +882,161 @@ async def patient_documents(
     items = list(data.get("items") or []) + cn_items
     items.sort(key=lambda x: x.get("date") or "", reverse=True)
     return {"items": items}
+
+
+# ─── document upload (Phase 2.4 — minimum viable user-facing surface) ──
+
+
+@app.get("/api/upload/patients")
+async def api_upload_patients(
+    username: str = Depends(current_user),
+) -> dict:
+    """Patient roster the upload form uses to populate its patient dropdown.
+
+    Returns only patients the current user is allowed to write to (via the
+    same panel ACL the chat uses). Admins see every patient. Output shape
+    is `{items: [{id, label}]}` sorted by label so the dropdown renders
+    in a stable order across requests.
+    """
+    panel = await access_control.get_panel_for_user(
+        app.state.fhir, username, app.state.assignments,
+    )
+    try:
+        # 200 covers every demo / dev OpenEMR; production deploys would
+        # paginate the dropdown, but for MVP a single page is fine.
+        patients = await app.state.fhir.search("Patient", {"_count": "200"})
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    items: list[dict] = []
+    for p in patients:
+        pid = p.get("id")
+        if not pid:
+            continue
+        if not access_control.is_in_panel(panel, pid):
+            continue
+        names = p.get("name") or []
+        family = ""
+        given = ""
+        if isinstance(names, list) and names:
+            n0 = names[0] if isinstance(names[0], dict) else {}
+            family = str(n0.get("family") or "")
+            given_list = n0.get("given") or []
+            if isinstance(given_list, list) and given_list:
+                given = str(given_list[0] or "")
+        label = (
+            f"{family}, {given}" if family and given
+            else family or given or pid
+        )
+        items.append({"id": pid, "label": label})
+    items.sort(key=lambda i: i["label"].lower())
+    return {"items": items}
+
+
+@app.get("/api/upload/doc-types")
+async def api_upload_doc_types(
+    _user: str = Depends(current_user),
+) -> dict:
+    """Doc-type values the upload form uses to populate its type dropdown.
+
+    Output shape mirrors `/api/upload/patients` so the form's dropdown
+    JS can use one rendering function for both selects.
+    """
+    return {
+        "items": [
+            {"id": value, "label": label}
+            for value, label in DOC_TYPE_LABELS.items()
+        ],
+    }
+
+
+@app.post("/api/upload")
+async def api_upload(
+    request: Request,
+    file: UploadFile,
+    doc_type: str = Form(...),
+    patient_uuid: str = Form(...),
+    username: str = Depends(current_user),
+) -> dict:
+    """Multipart upload endpoint: persist a clinical document to OpenEMR
+    and return its structured-typed extraction.
+
+    Form fields:
+      file: the upload (PDF, PNG, or JPEG)
+      doc_type: one of the DOC_TYPE_LABELS keys (lab_pdf, intake_form)
+      patient_uuid: a FHIR Patient UUID the user has write access to
+
+    Returns:
+      {reference_id, sha256, created, extracted}
+
+    Errors:
+      400 — empty file, missing fields, unsupported doc_type
+      404 — patient not in user's panel (prefer 404 over 403 to avoid
+            leaking that the patient exists)
+      502 — OpenEMR write failure or extractor failure
+    """
+    await _check_patient_access(request, username, patient_uuid)
+    if doc_type not in DOC_TYPE_LABELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported doc_type {doc_type!r}; "
+                   f"expected one of {list(DOC_TYPE_LABELS)}",
+        )
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="empty file upload")
+    mime_type = file.content_type or "application/octet-stream"
+    filename = file.filename or "upload.bin"
+
+    try:
+        result = await attach_and_extract(
+            file_bytes=file_bytes,
+            filename=filename,
+            doc_type=doc_type,  # type: ignore[arg-type]
+            patient_uuid=patient_uuid,
+            mime_type=mime_type,
+            writer=app.state.openemr_writer,
+        )
+    except ValueError as e:
+        # Render-side errors (unsupported MIME, empty file inside renderer)
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except OpenEMRWriteError as e:
+        raise HTTPException(
+            status_code=502, detail=f"OpenEMR write failed: {e}",
+        ) from e
+    except ExtractionError as e:
+        raise HTTPException(
+            status_code=502, detail=f"Document extraction failed: {e}",
+        ) from e
+    # Invalidate the patient's cached documents list so the next
+    # /api/patient/{pid}/documents call (which the upload modal triggers
+    # immediately to refresh the Supporting Documents tab) returns the
+    # newly-uploaded DocumentReference instead of a 5-min-stale snapshot
+    # from the TTLCache.
+    app.state.cache.invalidate(f"docs:{patient_uuid}")
+    log.info(
+        "upload: user=%s patient=%s doc_type=%s ref=%s created=%s",
+        username, patient_uuid, doc_type,
+        result.reference_id, result.created,
+    )
+    return {
+        "reference_id": result.reference_id,
+        "sha256": result.write_result["sha256"],
+        "created": result.created,
+        "extracted": result.extracted.model_dump(mode="json"),
+    }
+
+
+@app.get("/upload", response_model=None)
+async def upload_page(request: Request) -> FileResponse | RedirectResponse:
+    """Minimal HTML form for uploading a clinical document.
+
+    Mounted at `/upload` rather than under `/api/*` because it returns
+    HTML (not JSON). Login-gated like the rest of the UI — anonymous
+    visitors get bounced to `/login`.
+    """
+    if current_session(request) is None:
+        return RedirectResponse(url="/login", status_code=302)
+    return FileResponse(WEB_DIR / "upload.html", headers=_NO_CACHE_HEADERS)
 
 
 def _calendar_cache_key(panel: frozenset[str] | None) -> str:

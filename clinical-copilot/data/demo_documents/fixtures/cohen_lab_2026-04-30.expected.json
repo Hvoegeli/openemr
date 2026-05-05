@@ -1,0 +1,168 @@
+{
+  "document_type": "lab_pdf",
+  "results": [
+    {
+      "test_name": "Hemoglobin A1c",
+      "value": 7.4,
+      "unit": "%",
+      "reference_range": "4.0-5.6 %",
+      "collection_date": "2026-04-29",
+      "abnormal_flag": "H",
+      "source_citation": {
+        "source_type": "lab_pdf",
+        "source_id": "DocumentReference/cohen_lab_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "results_table.hemoglobin_a1c",
+        "quote_or_value": "7.4",
+        "bbox": null
+      }
+    },
+    {
+      "test_name": "Fasting Glucose",
+      "value": 145.0,
+      "unit": "mg/dL",
+      "reference_range": "70-99 mg/dL",
+      "collection_date": "2026-04-29",
+      "abnormal_flag": "H",
+      "source_citation": {
+        "source_type": "lab_pdf",
+        "source_id": "DocumentReference/cohen_lab_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "results_table.fasting_glucose",
+        "quote_or_value": "145",
+        "bbox": null
+      }
+    },
+    {
+      "test_name": "Creatinine",
+      "value": 1.4,
+      "unit": "mg/dL",
+      "reference_range": "0.6-1.1 mg/dL",
+      "collection_date": "2026-04-29",
+      "abnormal_flag": "H",
+      "source_citation": {
+        "source_type": "lab_pdf",
+        "source_id": "DocumentReference/cohen_lab_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "results_table.creatinine",
+        "quote_or_value": "1.4",
+        "bbox": null
+      }
+    },
+    {
+      "test_name": "eGFR",
+      "value": 52.0,
+      "unit": "mL/min/1.73m^2",
+      "reference_range": ">60 mL/min/1.73m^2",
+      "collection_date": "2026-04-29",
+      "abnormal_flag": "L",
+      "source_citation": {
+        "source_type": "lab_pdf",
+        "source_id": "DocumentReference/cohen_lab_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "results_table.egfr",
+        "quote_or_value": "52",
+        "bbox": null
+      }
+    },
+    {
+      "test_name": "BUN",
+      "value": 28.0,
+      "unit": "mg/dL",
+      "reference_range": "7-20 mg/dL",
+      "collection_date": "2026-04-29",
+      "abnormal_flag": "H",
+      "source_citation": {
+        "source_type": "lab_pdf",
+        "source_id": "DocumentReference/cohen_lab_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "results_table.bun",
+        "quote_or_value": "28",
+        "bbox": null
+      }
+    },
+    {
+      "test_name": "Sodium",
+      "value": 138.0,
+      "unit": "mEq/L",
+      "reference_range": "135-145 mEq/L",
+      "collection_date": "2026-04-29",
+      "abnormal_flag": "N",
+      "source_citation": {
+        "source_type": "lab_pdf",
+        "source_id": "DocumentReference/cohen_lab_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "results_table.sodium",
+        "quote_or_value": "138",
+        "bbox": null
+      }
+    },
+    {
+      "test_name": "Potassium",
+      "value": 5.2,
+      "unit": "mEq/L",
+      "reference_range": "3.5-5.0 mEq/L",
+      "collection_date": "2026-04-29",
+      "abnormal_flag": "H",
+      "source_citation": {
+        "source_type": "lab_pdf",
+        "source_id": "DocumentReference/cohen_lab_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "results_table.potassium",
+        "quote_or_value": "5.2",
+        "bbox": null
+      }
+    },
+    {
+      "test_name": "LDL Cholesterol",
+      "value": 95.0,
+      "unit": "mg/dL",
+      "reference_range": "<100 mg/dL",
+      "collection_date": "2026-04-29",
+      "abnormal_flag": "N",
+      "source_citation": {
+        "source_type": "lab_pdf",
+        "source_id": "DocumentReference/cohen_lab_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "results_table.ldl_cholesterol",
+        "quote_or_value": "95",
+        "bbox": null
+      }
+    },
+    {
+      "test_name": "HDL Cholesterol",
+      "value": 38.0,
+      "unit": "mg/dL",
+      "reference_range": ">40 mg/dL",
+      "collection_date": "2026-04-29",
+      "abnormal_flag": "L",
+      "source_citation": {
+        "source_type": "lab_pdf",
+        "source_id": "DocumentReference/cohen_lab_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "results_table.hdl_cholesterol",
+        "quote_or_value": "38",
+        "bbox": null
+      }
+    },
+    {
+      "test_name": "Total Cholesterol",
+      "value": 175.0,
+      "unit": "mg/dL",
+      "reference_range": "<200 mg/dL",
+      "collection_date": "2026-04-29",
+      "abnormal_flag": "N",
+      "source_citation": {
+        "source_type": "lab_pdf",
+        "source_id": "DocumentReference/cohen_lab_2026-04-30",
+        "page_or_section": "page 1",
+        "field_or_chunk_id": "results_table.total_cholesterol",
+        "quote_or_value": "175",
+        "bbox": null
+      }
+    }
+  ],
+  "source_document_id": "DocumentReference/cohen_lab_2026-04-30",
+  "facility": "Acme Diagnostic Laboratories",
+  "ordering_provider": "Sarah Martinez, MD"
+}
