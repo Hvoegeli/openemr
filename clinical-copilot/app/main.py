@@ -1007,6 +1007,12 @@ async def api_upload(
         raise HTTPException(
             status_code=502, detail=f"Document extraction failed: {e}",
         ) from e
+    # Invalidate the patient's cached documents list so the next
+    # /api/patient/{pid}/documents call (which the upload modal triggers
+    # immediately to refresh the Supporting Documents tab) returns the
+    # newly-uploaded DocumentReference instead of a 5-min-stale snapshot
+    # from the TTLCache.
+    app.state.cache.invalidate(f"docs:{patient_uuid}")
     log.info(
         "upload: user=%s patient=%s doc_type=%s ref=%s created=%s",
         username, patient_uuid, doc_type,

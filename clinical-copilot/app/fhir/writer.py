@@ -282,10 +282,19 @@ class OpenEMRWriter:
                 f"unsupported doc_type {doc_type!r}; expected one of {list(DOC_CATEGORIES)}"
             ) from exc
 
-    async def find_document_reference_by_filename(
-        self, patient_uuid: str, filename: str,
+    async def find_document_reference_by_sha(
+        self, patient_uuid: str, sha_hex: str,
     ) -> str | None:
-        """Search FHIR DocumentReference for an attachment.title match.
+        """Search FHIR DocumentReference for an attachment.title that starts
+        with our SHA-256 prefix.
+
+        Same SHA = same file bytes = same logical document, regardless of
+        the human-readable suffix the user chose for the attachment.title.
+        Matching by `startswith("sha256-<hex>__")` correctly dedupes a
+        re-upload of identical bytes that the user renamed in the upload
+        form. Matching by full filename equality (the prior behavior)
+        missed those because a typed display name on each upload changed
+        the suffix.
 
         Returns ``DocumentReference/{uuid}`` if found, ``None`` otherwise.
         The OpenEMR FHIR read flow is paginated by default (50 entries);
@@ -293,6 +302,7 @@ class OpenEMRWriter:
         miss a dedupe hit on a doc deeper in the bundle. Tracked as a
         post-MVP concern in W2_ARCHITECTURE.md §4.5.
         """
+        prefix = f"sha256-{sha_hex}__"
         token = await self._ensure_token()
         r = await self._http.get(
             f"{self._fhir_base}/DocumentReference",
@@ -315,7 +325,10 @@ class OpenEMRWriter:
                 if not isinstance(content, dict):
                     continue
                 attach = content.get("attachment") or {}
-                if isinstance(attach, dict) and attach.get("title") == filename:
+                if not isinstance(attach, dict):
+                    continue
+                title = attach.get("title") or ""
+                if isinstance(title, str) and title.startswith(prefix):
                     rid = resource.get("id")
                     if rid:
                         return f"DocumentReference/{rid}"
@@ -356,9 +369,12 @@ class OpenEMRWriter:
         sha_hex = self._sha256_hex(file_bytes)
         idem_filename = _idempotency_filename(sha_hex, filename)
 
-        # Phase 1 — dedupe check
-        existing = await self.find_document_reference_by_filename(
-            patient_uuid, idem_filename,
+        # Phase 1 — dedupe by SHA prefix. We match the SHA prefix only (not
+        # the full hash-prefixed filename) because the user-supplied display
+        # name in the upload form can vary across uploads of the same file
+        # bytes. Same bytes = same SHA = same logical document.
+        existing = await self.find_document_reference_by_sha(
+            patient_uuid, sha_hex,
         )
         if existing:
             log.info(
@@ -406,14 +422,16 @@ class OpenEMRWriter:
                 f"status={r.status_code} body={r.text[:200]!r}"
             )
 
-        # Resolve the new resource's FHIR id by listing + matching.
-        new_ref = await self.find_document_reference_by_filename(
-            patient_uuid, idem_filename,
+        # Resolve the new resource's FHIR id. Look up by SHA prefix —
+        # we just verified above that no doc with this SHA existed
+        # before the upload, so the only match is the one we just made.
+        new_ref = await self.find_document_reference_by_sha(
+            patient_uuid, sha_hex,
         )
         if not new_ref:
             raise OpenEMRWriteError(
                 f"upload reported success but FHIR GET could not locate the "
-                f"document (patient={patient_uuid}, filename={idem_filename!r})"
+                f"document (patient={patient_uuid}, sha256={sha_hex[:12]}...)"
             )
         log.info(
             "wrote DocumentReference patient=%s doc_type=%s sha256=%s -> %s",
