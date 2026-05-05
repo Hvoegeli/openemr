@@ -263,15 +263,21 @@ async def persist_extracted_facts(
 
     if isinstance(extracted, IntakeForm):
         # Chief concern -> medical_problem so it shows in the chart's
-        # Active Problems list.
+        # Active Problems list. Note: the IntakeForm schema does NOT
+        # carry a per-field citation for `chief_concern` (it's a bare
+        # str). Reusing demographics.source_citation.bbox would point
+        # Sunday's PDF-overlay UI at the wrong region (the top-of-form
+        # name field, not the chief-concern line). Pass bbox=None — the
+        # back-reference still links the row to the source document, the
+        # UI just won't have a precise rectangle for this field. Honest
+        # > misleading.
         if extracted.chief_concern:
             try:
                 r = await writer.write_medical_problem(
                     patient_uuid=patient_uuid,
                     title=extracted.chief_concern,
                     source_doc_id=source_document_id,
-                    bbox=(extracted.demographics.source_citation.bbox.model_dump()
-                          if extracted.demographics.source_citation.bbox else None),
+                    bbox=None,
                 )
                 items.append({"kind": "chief_concern", "ok": True, "id": r.get("uuid") or r.get("id")})
             except (OpenEMRWriteError, Exception) as e:  # noqa: BLE001
