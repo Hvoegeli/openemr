@@ -608,9 +608,174 @@
       background: var(--accent); color: white; cursor: pointer; font: inherit; font-weight: 500;
     }
     #send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ── Upload Document modal (Supporting Documents tab) ─────────── */
+    .docs-toolbar {
+      display: flex;
+      justify-content: flex-end;
+      padding: 0.5rem 0.75rem 0.25rem;
+    }
+    .upload-btn {
+      background: var(--accent);
+      color: white;
+      border: 0;
+      border-radius: 6px;
+      padding: 0.4rem 0.85rem;
+      font: inherit;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .upload-btn:hover { filter: brightness(1.1); }
+
+    /* full-screen overlay; flex-centers the dialog */
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000;
+    }
+    .modal-dialog {
+      background: white;
+      border-radius: 10px;
+      width: min(560px, calc(100vw - 32px));
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+      display: flex; flex-direction: column;
+    }
+    .modal-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .modal-head h2 { margin: 0; font-size: 1rem; }
+    .modal-close {
+      background: none; border: 0; font-size: 1.5rem; line-height: 1;
+      cursor: pointer; color: #64748b; padding: 0 0.25rem;
+    }
+    .modal-body { padding: 1rem 1.25rem; }
+    .modal-foot {
+      display: flex; gap: 0.5rem; justify-content: flex-end;
+      padding: 0.75rem 1.25rem 1rem;
+      border-top: 1px solid #e2e8f0;
+      background: #f8fafc;
+      border-radius: 0 0 10px 10px;
+    }
+    .modal-foot button {
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      border: 0;
+      font: inherit;
+      cursor: pointer;
+    }
+    #upload-cancel { background: #e2e8f0; color: #0f172a; }
+    #upload-submit { background: var(--accent); color: white; font-weight: 500; }
+    #upload-submit:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .modal-body .field { margin-bottom: 0.85rem; }
+    .modal-body label {
+      display: block; font-size: 0.8rem; font-weight: 600;
+      margin-bottom: 0.25rem; color: #334155;
+    }
+    .modal-body select,
+    .modal-body input[type="text"] {
+      width: 100%;
+      padding: 0.45rem 0.55rem;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font: inherit;
+      font-size: 0.9rem;
+      background: white;
+    }
+    .modal-body .hint {
+      font-size: 0.72rem; color: #64748b; margin-top: 0.2rem;
+    }
+
+    /* Drop zone */
+    #drop-zone {
+      border: 2px dashed #cbd5e1;
+      border-radius: 8px;
+      padding: 1.25rem;
+      text-align: center;
+      margin-bottom: 1rem;
+      transition: border-color 0.15s, background 0.15s;
+      background: #f8fafc;
+    }
+    #drop-zone.drag-over {
+      border-color: var(--accent);
+      background: #eff6ff;
+    }
+    #drop-zone p { margin: 0.25rem 0; color: #475569; font-size: 0.9rem; }
+    #drop-zone p.or { font-size: 0.75rem; color: #94a3b8; }
+    #browse-btn {
+      background: white; color: #0f172a;
+      border: 1px solid #cbd5e1; border-radius: 6px;
+      padding: 0.4rem 0.85rem; cursor: pointer; font: inherit; font-size: 0.85rem;
+    }
+    #browse-btn:hover { background: #f1f5f9; }
+    .picked-file {
+      margin-top: 0.6rem; padding: 0.45rem 0.6rem;
+      background: white; border: 1px solid #cbd5e1; border-radius: 6px;
+      font-size: 0.82rem; color: #0f172a;
+    }
+    .modal-body .status {
+      margin-top: 0.4rem; font-size: 0.82rem; min-height: 1em;
+    }
+    .modal-body .status.ok  { color: #15803d; }
+    .modal-body .status.err { color: #b91c1c; }
   </style>
 </head>
 <body>
+
+<!-- Upload Document modal — opened from the Supporting Documents tab.
+     Hidden until the user clicks the +Upload button; closes on backdrop
+     click, Cancel, or successful upload. -->
+<div id="upload-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="upload-modal-title">
+  <div class="modal-dialog">
+    <header class="modal-head">
+      <h2 id="upload-modal-title">Upload Clinical Document</h2>
+      <button type="button" class="modal-close" aria-label="Close">×</button>
+    </header>
+    <form id="upload-form">
+      <div class="modal-body">
+        <div id="drop-zone">
+          <p><strong>Drag &amp; drop a file</strong> here</p>
+          <p class="or">or</p>
+          <button type="button" id="browse-btn">Browse computer…</button>
+          <input type="file" id="upload-file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" hidden />
+          <div id="picked-file" class="picked-file" style="display:none"></div>
+        </div>
+
+        <div class="field">
+          <label for="upload-doc-type">Document type</label>
+          <select id="upload-doc-type" required>
+            <option value="">Loading…</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="upload-patient">Patient</label>
+          <select id="upload-patient" required>
+            <option value="">Loading…</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="upload-name">Document name</label>
+          <input id="upload-name" type="text" placeholder="(uses original filename if blank)" />
+          <div class="hint">Saved as the OpenEMR DocumentReference title; extension auto-appended if you omit one.</div>
+        </div>
+
+        <div id="upload-status" class="status"></div>
+      </div>
+      <footer class="modal-foot">
+        <button type="button" id="upload-cancel">Cancel</button>
+        <button type="submit" id="upload-submit">Upload &amp; Extract</button>
+      </footer>
+    </form>
+  </div>
+</div>
 
   <!-- ── top bar ───────────────────────────────────────────────────── -->
   <header id="topbar">
@@ -650,7 +815,13 @@
       <div class="empty">Select a patient first.</div>
     </div>
     <div class="tab-body hidden" id="tab-docs" role="tabpanel">
-      <div class="empty">Select a patient first.</div>
+      <!-- Upload-doc toolbar; visible only once a patient is selected -->
+      <div id="docs-toolbar" class="docs-toolbar" style="display:none">
+        <button type="button" id="btn-upload-doc" class="upload-btn">＋ Upload Document</button>
+      </div>
+      <div id="docs-list">
+        <div class="empty">Select a patient first.</div>
+      </div>
     </div>
 
     <!-- Document viewer overlay (occupies the full left/expanded pane) -->
@@ -713,6 +884,8 @@
 
     const tabCard  = document.getElementById('tab-card');
     const tabDocs  = document.getElementById('tab-docs');
+    const docsList    = document.getElementById('docs-list');
+    const docsToolbar = document.getElementById('docs-toolbar');
     const tabCal   = document.getElementById('tab-cal');
     const tabNotes = document.getElementById('tab-notes');
     const docsCount = document.getElementById('docs-count');
@@ -859,7 +1032,7 @@
       if (name === 'docs' && activePatientId) {
         const e = buffer.get(activePatientId) || {};
         if (e.docs) {
-          tabDocs.innerHTML = renderDocs(e.docs);
+          docsList.innerHTML = renderDocs(e.docs);
           docsCount.textContent = (e.docs.items || []).length || '·';
         }
       }
@@ -973,7 +1146,7 @@
         e.docs = docs;
         buffer.set(pid, e);
         if (activePatientId === pid) {
-          tabDocs.innerHTML = renderDocs(docs);
+          docsList.innerHTML = renderDocs(docs);
           docsCount.textContent = (docs.items || []).length || '·';
         }
       } catch {}
@@ -983,6 +1156,9 @@
     async function selectPatient(pid, opts = {}) {
       if (!pid) return;
       activePatientId = pid;
+      // Reveal the upload-doc toolbar — the upload modal needs a patient
+      // context (the docs tab is per-patient, so the button is too).
+      docsToolbar.style.display = 'flex';
       tabCal.querySelectorAll('.cal-row').forEach(r => {
         r.classList.toggle('active', r.dataset.pid === pid);
       });
@@ -1005,16 +1181,16 @@
 
       const e2 = buffer.get(pid) || {};
       if (e2.docs) {
-        tabDocs.innerHTML = renderDocs(e2.docs);
+        docsList.innerHTML = renderDocs(e2.docs);
         docsCount.textContent = (e2.docs.items || []).length || '·';
       } else {
-        tabDocs.innerHTML = '<div class="empty">Loading documents…</div>';
+        docsList.innerHTML = '<div class="empty">Loading documents…</div>';
         const wait = await waitForBuffer(pid, 'docs');
         if (wait) {
-          tabDocs.innerHTML = renderDocs(wait);
+          docsList.innerHTML = renderDocs(wait);
           docsCount.textContent = (wait.items || []).length || '·';
         } else {
-          tabDocs.innerHTML = '<div class="empty">Failed to load documents.</div>';
+          docsList.innerHTML = '<div class="empty">Failed to load documents.</div>';
         }
       }
 
@@ -2285,6 +2461,202 @@
     if (_calBootPromise) {
       _calBootPromise.then(() => restoreUiState()).catch(() => {});
     }
+
+    /* ── Upload Document modal ────────────────────────────────────── */
+    /* Sourced from the Supporting Documents tab toolbar (+Upload button).
+       Provides drag-drop OR browse, a doc-type select, a patient select
+       (defaulting to the active patient), and an optional rename field.
+       On success it refreshes the docs list inline, then closes the
+       modal so the user sees their new DocumentReference appear. */
+    (() => {
+      const $modal       = document.getElementById('upload-modal');
+      const $btnOpen     = document.getElementById('btn-upload-doc');
+      const $close       = $modal.querySelector('.modal-close');
+      const $cancel      = document.getElementById('upload-cancel');
+      const $form        = document.getElementById('upload-form');
+      const $submit      = document.getElementById('upload-submit');
+      const $dropZone    = document.getElementById('drop-zone');
+      const $browseBtn   = document.getElementById('browse-btn');
+      const $fileInput   = document.getElementById('upload-file');
+      const $picked      = document.getElementById('picked-file');
+      const $selDocType  = document.getElementById('upload-doc-type');
+      const $selPatient  = document.getElementById('upload-patient');
+      const $nameInput   = document.getElementById('upload-name');
+      const $status      = document.getElementById('upload-status');
+
+      let pickedFile = null;
+      let dropdownsLoaded = false;
+
+      function setStatus(msg, kind) {
+        $status.textContent = msg;
+        $status.className = 'status ' + (kind || '');
+      }
+
+      function fillSelect(el, items, placeholder) {
+        el.innerHTML = '';
+        const blank = document.createElement('option');
+        blank.value = '';
+        blank.textContent = placeholder;
+        el.appendChild(blank);
+        for (const it of items) {
+          const opt = document.createElement('option');
+          opt.value = it.id;
+          opt.textContent = it.label;
+          el.appendChild(opt);
+        }
+      }
+
+      async function ensureDropdownsLoaded() {
+        if (dropdownsLoaded) return;
+        try {
+          const [pr, dr] = await Promise.all([
+            fetch('/api/upload/patients').then(r => r.ok ? r.json() : Promise.reject('patients ' + r.status)),
+            fetch('/api/upload/doc-types').then(r => r.ok ? r.json() : Promise.reject('doc-types ' + r.status)),
+          ]);
+          fillSelect($selPatient, pr.items, '— Select patient —');
+          fillSelect($selDocType, dr.items, '— Select document type —');
+          dropdownsLoaded = true;
+        } catch (err) {
+          setStatus('Failed to load form options: ' + err, 'err');
+        }
+      }
+
+      function setPickedFile(file) {
+        pickedFile = file;
+        const sizeKb = Math.max(1, Math.round(file.size / 1024));
+        $picked.textContent = '✓ ' + file.name + ' (' + sizeKb + ' KB)';
+        $picked.style.display = 'block';
+        // Pre-fill the rename placeholder with the filename's stem so the
+        // user sees what's used by default (an empty field still works).
+        const dot = file.name.lastIndexOf('.');
+        const stem = dot > 0 ? file.name.slice(0, dot) : file.name;
+        $nameInput.placeholder = stem;
+      }
+
+      function resetForm() {
+        pickedFile = null;
+        $fileInput.value = '';
+        $picked.style.display = 'none';
+        $picked.textContent = '';
+        $nameInput.value = '';
+        $nameInput.placeholder = '(uses original filename if blank)';
+        setStatus('', '');
+        $submit.disabled = false;
+      }
+
+      async function openModal() {
+        resetForm();
+        $modal.style.display = 'flex';
+        await ensureDropdownsLoaded();
+        // Default the patient select to the currently-active chart, if any.
+        if (typeof activePatientId !== 'undefined' && activePatientId) {
+          $selPatient.value = activePatientId;
+        }
+      }
+      function closeModal() { $modal.style.display = 'none'; }
+
+      // Open
+      $btnOpen.addEventListener('click', openModal);
+
+      // Close paths: × button, Cancel button, backdrop click, Escape key
+      $close.addEventListener('click', closeModal);
+      $cancel.addEventListener('click', closeModal);
+      $modal.addEventListener('click', (e) => {
+        if (e.target === $modal) closeModal();
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && $modal.style.display !== 'none') closeModal();
+      });
+
+      // Browse + file input
+      $browseBtn.addEventListener('click', () => $fileInput.click());
+      $fileInput.addEventListener('change', (e) => {
+        const f = e.target.files && e.target.files[0];
+        if (f) setPickedFile(f);
+      });
+
+      // Drag-and-drop
+      ;['dragenter', 'dragover'].forEach(ev => {
+        $dropZone.addEventListener(ev, (e) => {
+          e.preventDefault();
+          $dropZone.classList.add('drag-over');
+        });
+      });
+      ;['dragleave', 'drop'].forEach(ev => {
+        $dropZone.addEventListener(ev, (e) => {
+          e.preventDefault();
+          $dropZone.classList.remove('drag-over');
+        });
+      });
+      $dropZone.addEventListener('drop', (e) => {
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) setPickedFile(f);
+      });
+
+      // Submit
+      $form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!pickedFile)         { setStatus('Pick a file first.', 'err'); return; }
+        if (!$selPatient.value)  { setStatus('Pick a patient.', 'err'); return; }
+        if (!$selDocType.value)  { setStatus('Pick a document type.', 'err'); return; }
+
+        // Compute the upload filename: user-supplied if filled in, else the
+        // file's original name. If the user typed a name without an extension,
+        // append the original file's extension so OpenEMR stores it correctly.
+        let outName = ($nameInput.value || '').trim();
+        if (outName) {
+          const userHasExt = /\.[A-Za-z0-9]{1,5}$/.test(outName);
+          if (!userHasExt) {
+            const dot = pickedFile.name.lastIndexOf('.');
+            const ext = dot > 0 ? pickedFile.name.slice(dot) : '';
+            outName += ext;
+          }
+        } else {
+          outName = pickedFile.name;
+        }
+
+        $submit.disabled = true;
+        setStatus('Uploading + extracting (10–30s on first run)…', '');
+
+        const fd = new FormData();
+        fd.append('file', pickedFile, outName);   // 3rd arg overrides the filename
+        fd.append('doc_type', $selDocType.value);
+        fd.append('patient_uuid', $selPatient.value);
+
+        let resp;
+        try {
+          resp = await fetch('/api/upload', { method: 'POST', body: fd });
+        } catch (err) {
+          setStatus('Network error: ' + err, 'err');
+          $submit.disabled = false;
+          return;
+        }
+        let body;
+        try { body = await resp.json(); } catch { body = { detail: 'non-JSON response' }; }
+        if (!resp.ok) {
+          setStatus('Upload failed (HTTP ' + resp.status + '): ' + (body.detail || ''), 'err');
+          $submit.disabled = false;
+          return;
+        }
+
+        const tag = body.created ? 'created' : 'deduped';
+        setStatus('Done — ' + body.reference_id + ' (' + tag + '). Refreshing list…', 'ok');
+
+        // Refresh the docs list in the tab if the upload was for the current patient
+        if ($selPatient.value === activePatientId) {
+          try {
+            const r = await fetch('/api/patient/' + encodeURIComponent(activePatientId) + '/documents', { credentials: 'same-origin' });
+            if (r.ok) {
+              const data = await r.json();
+              docsList.innerHTML = renderDocs(data);
+              docsCount.textContent = (data.items || []).length || '·';
+            }
+          } catch {}
+        }
+        // Auto-close after a short success flash
+        setTimeout(closeModal, 1200);
+      });
+    })();
   </script>
 </body>
 </html>
