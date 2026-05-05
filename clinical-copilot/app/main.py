@@ -24,6 +24,7 @@ sign-out workflow regardless.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -35,7 +36,7 @@ from typing import AsyncIterator
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
@@ -1182,6 +1183,38 @@ async def latest_prior_shift_note(
     await _check_patient_access(request, username, patient_id)
     note = app.state.clinical_notes.latest_prior_shift(patient_id, now=now_utc())
     return {"note": note.to_doc_item() if note else None}
+
+
+@app.get("/api/binary/{binary_id}")
+async def api_binary(
+    binary_id: str,
+    _user: str = Depends(current_user),
+):
+    """Proxy a FHIR Binary resource to the browser as raw bytes.
+
+    OpenEMR returns DocumentReference.content[].attachment.url as
+    `https://localhost:9300/.../Binary/{id}` — that points at the
+    OpenEMR container behind cloudflared and requires an OAuth bearer
+    the browser can't see. This endpoint fetches the Binary server-side
+    using the agent's existing OAuth client and streams the decoded
+    bytes back, so the front-end can use a normal `<a href>` to open
+    the document.
+
+    Auth: any logged-in user. The endpoint does not yet ACL-walk back
+    to the parent DocumentReference -> patient -> panel; tighten this
+    before any non-demo deployment.
+    """
+    try:
+        binary = await app.state.fhir.get(f"Binary/{binary_id}")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    data_b64 = binary.get("data") or ""
+    content_type = binary.get("contentType") or "application/octet-stream"
+    try:
+        body = base64.b64decode(data_b64)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"binary decode failed: {e!s}") from e
+    return Response(content=body, media_type=content_type)
 
 
 @app.get("/healthz")

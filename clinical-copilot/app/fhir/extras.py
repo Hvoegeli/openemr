@@ -176,7 +176,7 @@ async def get_supporting_documents(
             attachments.append({
                 "title": att.get("title"),
                 "content_type": att.get("contentType"),
-                "url": att.get("url"),
+                "url": _proxy_binary_url(att.get("url")),
             })
         items.append({
             "kind": "document",
@@ -217,3 +217,17 @@ def _participant_patient_ref(appt: dict) -> str | None:
         if ref.startswith("Patient/"):
             return ref
     return None
+
+
+def _proxy_binary_url(url: str | None) -> str | None:
+    """Rewrite an OpenEMR `Binary/{id}` URL to our `/api/binary/{id}` proxy.
+
+    OpenEMR's attachment URL points at the container's localhost host,
+    which the browser can't reach and which requires an OAuth bearer.
+    Pass-through if the URL doesn't contain `/Binary/` so non-binary
+    attachments (e.g. external links) keep their original href.
+    """
+    if not url or "/Binary/" not in url:
+        return url
+    binary_id = url.rsplit("/Binary/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
+    return f"/api/binary/{binary_id}"
