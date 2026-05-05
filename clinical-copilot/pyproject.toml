@@ -36,6 +36,7 @@ dependencies = [
     "pypdfium2>=4.30",
     "pillow>=11.0",
     "python-multipart>=0.0.10",
+    "rank-bm25>=0.2.2",
 ]
 
 [dependency-groups]
