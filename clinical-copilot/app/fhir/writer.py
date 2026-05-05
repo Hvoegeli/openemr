@@ -506,11 +506,14 @@ class OpenEMRWriter:
                 f"start_time {start_time!r} must be HH:MM (24-hour)"
             )
 
+        # OpenEMR validates pc_hometext as NotEmpty (despite the API docs
+        # implying it's optional). Default to the appointment title when
+        # the caller didn't supply comments so the write doesn't 502.
         body = {
             "pc_catid": str(category_id),
             "pc_title": title,
             "pc_duration": str(duration_seconds),
-            "pc_hometext": comments,
+            "pc_hometext": comments.strip() or title,
             "pc_apptstatus": status,
             "pc_eventDate": event_date,
             "pc_startTime": normalized_start,
@@ -537,7 +540,21 @@ class OpenEMRWriter:
             raise OpenEMRWriteError(
                 f"appointment POST returned non-JSON body: {r.text[:300]}"
             ) from exc
-        val = payload.get("validationErrors") if isinstance(payload, dict) else None
+        # OpenEMR returns validation errors via two shapes depending on
+        # which layer rejected the write:
+        #   1. {"validationErrors": {<field>: {<rule>: <msg>}}}
+        #   2. {<field>: {<rule>: <msg>}}  (some fields validate at the
+        #       top level — pc_hometext does this).
+        # Normalize both before deciding the call failed.
+        val = None
+        if isinstance(payload, dict):
+            val = payload.get("validationErrors")
+            if not val and not (payload.get("data") or payload.get("id")):
+                # Top-level dict with no `data`/`id` and at least one
+                # field-shaped value (dict of rule -> message) — treat
+                # the whole payload as a validation-error envelope.
+                if all(isinstance(v, dict) for v in payload.values()) and payload:
+                    val = payload
         if isinstance(val, dict) and val:
             raise OpenEMRWriteError(f"appointment validation failed: {val}")
         # Standard-API success shape: {"data": {"id": <int eid>}}.
