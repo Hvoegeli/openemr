@@ -16,8 +16,8 @@ Everything a reviewer needs is in this section. Each link below is at the **top 
 
 | | URL | What it is |
 |---|---|---|
-| **OpenEMR fork** (system of record) | https://alberta-expansion-pittsburgh-vitamin.trycloudflare.com/ | Our forked OpenEMR. Login: `admin` / `pass` (default — flagged in [AUDIT.md §1.2](AUDIT.md#12-default-credentials-and-secrets)). |
-| **Clinical Co-Pilot** (the AI agent) | https://deutschland-air-spreading-wants.trycloudflare.com/ | The agent UI. Sign in with the same `admin` / `pass`. Type *"Catch me up on Cohen."* — the demo patient is seeded. |
+| **OpenEMR fork** (system of record) | https://ways-needs-beats-assistance.trycloudflare.com/ | Our forked OpenEMR. Login: `admin` / `pass` (default — flagged in [AUDIT.md §1.2](AUDIT.md#12-default-credentials-and-secrets)). |
+| **Clinical Co-Pilot** (the AI agent) | https://hansen-rat-ages-rim.trycloudflare.com/ | The agent UI. Sign in with the same `admin` / `pass`. Type *"Catch me up on Cohen."* — the demo patient is seeded. |
 
 ### Required documents
 

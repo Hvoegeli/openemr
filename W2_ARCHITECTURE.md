@@ -8,10 +8,14 @@
 >
 > **Status:** MVP shipped on `copilot--branch-2` 2026-05-04 — extraction
 > pipeline + upload UI + BM25 RAG + agent tool wiring all live and verified
-> end-to-end against real OpenEMR + real Claude. Sections labeled
-> **MVP-shipped** below describe the as-built state; sections labeled
-> **deferred post-MVP** describe the PRD-faithful target shape we'll iterate
-> toward through Sunday 2026-05-10.
+> end-to-end against real OpenEMR + real Claude. **Phase-3 fact persistence
+> shipped 2026-05-05** (commits `a83b7bc0f`..`ede70a26b`): `attach_and_extract`
+> now writes extracted allergies, chief concerns, family history, medications,
+> and lab encounter+SOAP-note rows directly into OpenEMR's native tables, each
+> carrying a `[copilot-source: DocumentReference/{id}; bbox=...]` back-reference
+> in its `comments` field. Sections labeled **MVP-shipped** below describe the
+> as-built state; sections labeled **deferred post-MVP** describe the
+> PRD-faithful target shape we'll iterate toward through Sunday 2026-05-10.
 
 ---
 
@@ -30,7 +34,7 @@ section below):
 | Recommendation tone | guideline-grounded recs permitted under R2 carve-out (always-on; not toggle-gated) | per-conversation toggle (deferred) | §6 |
 | Upload UI | minimal HTML form at `/upload` with patient + doc-type dropdowns | wire into chat sidebar | §4.6 |
 | Patient-mismatch verification | **deferred** (PRD §5.4) | confirm-patient supervisor node | §5.4 |
-| Round-trip extraction → FHIR Observation/Condition/etc. | **deferred** (writer can do `DocumentReference` only today) | adapter layer over standard non-FHIR API | §4.5 |
+| Round-trip extraction → OpenEMR native tables (allergy, medical_problem, medication, lab encounter+SOAP) | **MVP-shipped 2026-05-05** via standard REST API | + FHIR `Observation.derivedFrom` for lab values (deferred) | §4.5 |
 | Branch | `copilot--branch-2`; no auto-merge to master | — | — |
 | Preview deploy | Hetzner cloudflared tunnel on `:8001`, isolated from master `:8000` | — | — |
 | Doc location | `W2_ARCHITECTURE.md` at repo root | — | — |
@@ -420,26 +424,46 @@ duplicates or untraceable records.
   bridge row). Locked in by
   `tests/fhir/test_writer_document_reference.py::test_doc_categories_constant_pre_normalized`.
 
+**MVP-shipped 2026-05-05** (commits `a83b7bc0f`..`ede70a26b`):
+
+- **Intake fields → OpenEMR native tables.** `attach_and_extract` calls
+  `persist_extracted_facts` after a successful Phase-2 VLM extraction.
+  Allergies → `POST /api/patient/{uuid}/allergy`, chief concern + family
+  history → `POST /api/patient/{uuid}/medical_problem`, current medications
+  → `POST /api/patient/{pid}/medication` — same standard REST surface the
+  seed scripts at `scripts/seed_demo_patients.py` already use. Per-fact
+  failures DO NOT roll back Phase 1/2; the `persistence` summary on
+  `AttachAndExtractResult` records `{kind, ok, id|error}` per row.
+- **Lab results → encounter + SOAP note.** `write_lab_encounter_with_results`
+  creates one encounter per uploaded lab PDF and writes all extracted values
+  into the SOAP note's `objective` field as `Test: value unit (ref X, flag Y)`
+  lines. The agent's existing `get_notes_24h` tool surfaces them in chat
+  answers. The `subjective` field carries a `[copilot-bbox-manifest: ...]`
+  JSON manifest of every cited region for the future PDF-overlay UI.
+- **Citation back-reference.** Every persisted row's `comments` field
+  carries `[copilot-source: DocumentReference/{id}; bbox=...]`. Required
+  controller/service changes shipped in the same merge:
+  `ConditionRestController::WHITELISTED_FIELDS` now includes `comments`,
+  and `ListService::insert` now writes the `comments` column.
+- **OAuth scopes.** Writer's password-grant scope set requests
+  `user/{allergy,medical_problem,medication}.cruds` so the access token
+  carries the permissions the routes' authorization check requires.
+
 **Deferred post-MVP:**
 
 - **Extraction → FHIR `Observation` per lab result**, linked to the
-  source `DocumentReference` via `derivedFrom`. The schemas already
-  carry every field the FHIR mapping needs (LOINC test_name, value,
-  unit, reference_range, collection_date, abnormal_flag); a thin
-  adapter would materialize them into FHIR Observations during the
-  same `attach_and_extract` call.
-- **Intake fields → `Patient` updates / `Condition` / `AllergyIntolerance`
-  / `MedicationStatement`.** Most of these require the standard non-FHIR
-  `/apis/default/api/` path (the seed scripts at
-  `scripts/seed_demo_patients.py` already exercise the same endpoints
-  for create-patient, allergies, problems, meds); a Phase 4.x writer-
-  helper would consume an `IntakeForm` and emit the corresponding
-  REST POSTs.
-- **`derivedFrom` linking** — the FHIR R4 `Observation.derivedFrom`
-  reference is the canonical join from extracted lab values back to
-  their source `DocumentReference`. Persistence pipeline writes the
-  `DocumentReference` first (already done; we have the id), then
-  emits Observations with `derivedFrom = [{reference: DocumentReference/{id}}]`.
+  source `DocumentReference` via `derivedFrom`. Today's MVP writes lab
+  values to a SOAP note's `objective` field (chosen because OpenEMR's
+  standard REST API has no POST endpoint for `procedure_result` and FHIR
+  `Observation` is GET-only). A future thin adapter would emit
+  Observations with `derivedFrom = [{reference: DocumentReference/{id}}]`
+  for the canonical FHIR round-trip.
+- **Patient demographics writes from intake.** Demographics are
+  intentionally NOT written today — the patient already exists (we used
+  their UUID to upload), and re-writing demographics would risk
+  overwriting whatever is on file with whatever the VLM read off the
+  paper form. A future verify-then-update flow could compare extracted
+  demographics against the existing record and surface diffs.
 
 **Why the round-trip matters for the demo.** Without `derivedFrom`,
 extracted Observations would float in the chart unmoored from their
