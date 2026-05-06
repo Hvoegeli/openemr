@@ -498,6 +498,18 @@
       background: rgba(255, 200, 0, 0.45);
       border-color: rgba(190, 130, 0, 1);
     }
+    /* Bbox v1: when a chat citation deep-links into the doc viewer
+       with a focus target, every NON-focus overlay gets dimmed so the
+       grader's eye is drawn to the cited region. The focus overlay
+       still gets `.bbox-active` styling above. */
+    #doc-viewer-body .doc-page .bbox-overlay.bbox-dimmed {
+      background: transparent;
+      border-color: rgba(214, 160, 0, 0.25);
+      box-shadow: none;
+    }
+    #doc-viewer-body .doc-page .bbox-overlay.bbox-dimmed .bbox-label {
+      display: none;
+    }
     #doc-viewer-body .doc-page .bbox-label {
       position: absolute;
       top: -1.2rem;
@@ -1925,7 +1937,13 @@
       }
     });
 
-    function openDoc(item) {
+    function openDoc(item, options) {
+      // `options.focusResourceRef` (Bbox v1): when a chat citation for an
+      // extracted chart resource (Allergy/Medication/Condition) opens
+      // the doc viewer, dim every overlay except the one for that
+      // resource so the grader's eye lands on the cited region. None →
+      // every overlay rendered with default styling.
+      const focusResourceRef = options && options.focusResourceRef;
       // Header
       docTitle.textContent = displayTitle(item) || '(untitled)';
       const dateStr = item.date
@@ -2029,11 +2047,11 @@
         // for an already-closed-or-replaced doc can no-op instead of
         // racing pages into the wrong view.
         window.__docViewerActiveId = docId;
-        loadDocumentSourcePages(docId, docViewerBody);
+        loadDocumentSourcePages(docId, docViewerBody, focusResourceRef || null);
       }
     }
 
-    async function loadDocumentSourcePages(docId, container) {
+    async function loadDocumentSourcePages(docId, container, focusResourceRef) {
       const stub = document.createElement('div');
       stub.className = 'doc-page-stub';
       stub.textContent = 'Loading source pages…';
@@ -2118,6 +2136,29 @@
             pageDiv.appendChild(overlay);
           }
           container.appendChild(pageDiv);
+        }
+
+        // Bbox v1: apply per-citation focus. `bbox-active` highlights
+        // the matching overlay; `bbox-dimmed` mutes everything else.
+        // Scroll the first focus match into view so the grader doesn't
+        // hunt for it on a multi-page document.
+        if (focusResourceRef) {
+          const overlays = container.querySelectorAll('.bbox-overlay');
+          let firstMatch = null;
+          overlays.forEach((ov) => {
+            if (ov.dataset.resourceRef === focusResourceRef) {
+              ov.classList.add('bbox-active');
+              if (firstMatch === null) firstMatch = ov;
+            } else {
+              ov.classList.add('bbox-dimmed');
+            }
+          });
+          if (firstMatch !== null) {
+            // `block: 'center'` puts the highlighted box near the
+            // middle of the viewport instead of jamming it against
+            // the header.
+            firstMatch.scrollIntoView({behavior: 'smooth', block: 'center'});
+          }
         }
       } catch (err) {
         if (stub.parentNode) stub.textContent = 'Failed to load source pages.';
@@ -2694,31 +2735,63 @@
         return;
       }
 
-      // The four list-resource types live on the Patient Card.
-      const sectionTypes = new Set(['AllergyIntolerance', 'Condition', 'MedicationRequest', 'Observation']);
-      if (sectionTypes.has(type)) {
-        switchTab('card');
-        const li = tabCard.querySelector(
-          'li[data-fhir-ref="' + cssEscape(ref) + '"]'
-        );
-        if (li) {
-          li.scrollIntoView({behavior: 'smooth', block: 'center'});
-          flash(li);
-          return;
-        }
-        // Resource not on the current card. Prior behavior flashed the
-        // matching section header (e.g. h3[data-section="Condition"])
-        // even though that header belonged to a different patient — so
-        // a citation referring to PatientA's condition would visually
-        // light up PatientB's Conditions section after the user
-        // switched patients. Drop the misleading flash; tell the user
-        // the cited resource isn't in this chart instead.
-        append('system', 'This citation refers to a resource that is not on the current patient’s chart. Switch to the patient the chat answer was about to see it highlighted.');
+      // Bbox v1 — when a chart resource was extracted from a document
+      // upload, prefer to deep-link the click into the source PDF with
+      // its bbox highlighted. Falls back to the chart-card scroll
+      // (`_chartCardScroll`) when the resource has no source tag, when
+      // the source document isn't in the current patient's docs
+      // roster, or when the lookup fails.
+      const sourcedTypes = new Set(['AllergyIntolerance', 'MedicationRequest', 'Condition']);
+      if (sourcedTypes.has(type)) {
+        const id = ref.split('/')[1];
+        fetch('/api/document-source/' + encodeURIComponent(type) + '/' + encodeURIComponent(id))
+          .then(r => r.ok ? r.json() : null)
+          .then(data => {
+            if (data && data.document_ref) {
+              const items = window.__currentDocs || [];
+              const docIdx = items.findIndex(it => it.ref === data.document_ref);
+              if (docIdx >= 0) {
+                switchTab('docs');
+                openDoc(items[docIdx], {focusResourceRef: ref});
+                return;
+              }
+              // Source doc isn't in this patient's currently-loaded
+              // docs (different patient context, or list filter). Tell
+              // the user instead of silently doing nothing.
+              append('system', 'This citation’s source document is not loaded for the current patient.');
+              return;
+            }
+            _chartCardScroll(ref);
+          })
+          .catch(() => _chartCardScroll(ref));
+        return;
+      }
+
+      // Observation still uses the chart-card scroll path — vital
+      // observations live on the card, not the document viewer.
+      if (type === 'Observation') {
+        _chartCardScroll(ref);
         return;
       }
 
       // Unknown type — just hop to the card tab.
       switchTab('card');
+    }
+
+    function _chartCardScroll(ref) {
+      switchTab('card');
+      const li = tabCard.querySelector(
+        'li[data-fhir-ref="' + cssEscape(ref) + '"]'
+      );
+      if (li) {
+        li.scrollIntoView({behavior: 'smooth', block: 'center'});
+        flash(li);
+        return;
+      }
+      // Resource not on the current card — say so plainly. The prior
+      // header-flash behavior could light up the wrong patient's
+      // section header after a chat-context switch.
+      append('system', 'This citation refers to a resource that is not on the current patient’s chart. Switch to the patient the chat answer was about to see it highlighted.');
     }
 
     function flash(el) {

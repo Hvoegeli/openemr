@@ -611,6 +611,104 @@ def _parse_source_tag(text: str | None, document_id: str) -> dict | None:
     return None
 
 
+def _find_any_source_tag(text: str | None) -> dict | None:
+    """Pull the first `[copilot-source: ...]` tag out of a comments/note
+    string, regardless of which DocumentReference it points at.
+
+    Companion to `_parse_source_tag`, which filters by a known target
+    document. This variant is used by the per-citation source lookup
+    endpoint where we have a chart resource id and need to discover which
+    document it was extracted from. Returns None when no tag is present;
+    otherwise `{ref, bbox}` where `bbox` may be None on parse failure.
+    """
+    if not text:
+        return None
+    m = _SOURCE_TAG_RE.search(text)
+    if m is None:
+        return None
+    ref = m.group("ref").strip()
+    target = ref if "/" in ref else f"DocumentReference/{ref}"
+    bbox_dict: dict | None = None
+    bbox_raw = m.group("bbox")
+    if bbox_raw:
+        import json as _json  # noqa: PLC0415
+        try:
+            parsed = _json.loads(bbox_raw)
+            if isinstance(parsed, dict):
+                bbox_dict = parsed
+        except (ValueError, TypeError):
+            bbox_dict = None
+    return {"ref": target, "bbox": bbox_dict}
+
+
+async def get_resource_source_document(
+    client: FhirClient,
+    *,
+    resource_type: str,
+    resource_id: str,
+    panel: frozenset[str] | None = None,
+) -> SourcedResult:
+    """Look up the DocumentReference + bbox a chart resource was extracted
+    from, by parsing the `[copilot-source: ...]` tag off its note field.
+
+    Returns `data.document_ref = None` when the resource exists but has no
+    source tag (e.g. it was hand-entered, not extracted). The frontend
+    treats that as "no source view available" and falls back to the
+    chart-card scroll behavior.
+
+    ACL gates on the resource's patient subject — same fail-closed shape
+    as `get_document_bbox_manifest`.
+    """
+    from app.access_control import PatientAccessDenied  # noqa: PLC0415
+
+    if resource_type not in {"AllergyIntolerance", "MedicationRequest", "Condition"}:
+        # Not a writer-managed resource type — no source tag will ever
+        # be present. Return an empty result rather than 404 so the
+        # frontend can branch on `document_ref is None` uniformly.
+        return {
+            "data": {
+                "resource_ref": f"{resource_type}/{resource_id}",
+                "document_ref": None,
+                "bbox": None,
+            },
+            "sources": [],
+        }
+
+    resource = await client.get(f"{resource_type}/{resource_id}")
+    # AllergyIntolerance uses `patient`; MedicationRequest + Condition
+    # use `subject`. Try both. (FHIR R4: AllergyIntolerance.patient is
+    # required; the others use subject.reference.)
+    pat_ref = (resource.get("patient") or {}).get("reference") or ""
+    subj_ref = (resource.get("subject") or {}).get("reference") or ""
+    ref_val = pat_ref or subj_ref
+    patient_id: str | None = None
+    if ref_val.startswith("Patient/"):
+        patient_id = ref_val.removeprefix("Patient/")
+    if panel is not None and (patient_id is None or patient_id not in panel):
+        raise PatientAccessDenied(patient_id or "")
+
+    tag = _find_any_source_tag(_collect_note_text(resource))
+    if tag is None:
+        return {
+            "data": {
+                "resource_ref": f"{resource_type}/{resource_id}",
+                "document_ref": None,
+                "bbox": None,
+                "patient_id": patient_id,
+            },
+            "sources": [_ref(resource)],
+        }
+    return {
+        "data": {
+            "resource_ref": f"{resource_type}/{resource_id}",
+            "document_ref": tag["ref"],
+            "bbox": tag.get("bbox"),
+            "patient_id": patient_id,
+        },
+        "sources": [_ref(resource), tag["ref"]],
+    }
+
+
 def _collect_note_text(resource: dict) -> str:
     """Concatenate every `note.text` (FHIR Annotation) on a resource into
     a single string. The writer stores its source tag on `note[0].text`

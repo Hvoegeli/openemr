@@ -1216,6 +1216,48 @@ async def api_document_pages(
     return result["data"]
 
 
+@app.get("/api/document-source/{resource_type}/{resource_id}")
+async def api_document_source(
+    resource_type: str,
+    resource_id: str,
+    request: Request,
+    username: str = Depends(current_user),
+) -> dict:
+    """Look up the DocumentReference a chart resource was extracted from,
+    so a chat citation click can deep-link into the source PDF with the
+    matching bbox highlighted (PRD W2 §5 — bbox v1 per-citation).
+
+    Returns 200 with `document_ref=null` when the resource exists but
+    has no `[copilot-source: ...]` tag (hand-entered, not extracted).
+    The frontend uses that signal to decide between "open source doc"
+    and the existing patient-card scroll behavior. 404 only on ACL
+    denial / missing resource.
+    """
+    panel = await access_control.get_panel_for_user(
+        request.app.state.fhir, username, request.app.state.assignments,
+    )
+    try:
+        result = await adapter.get_resource_source_document(
+            request.app.state.fhir,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            panel=panel,
+        )
+    except access_control.PatientAccessDenied as e:
+        request.app.state.auth_store.log_event(
+            event_type="patient_access_denied",
+            username=username,
+            sid=request.session.get("sid"),
+            user_agent=request.headers.get("user-agent"),
+            ip=request.client.host if request.client else None,
+            detail=f"resource={resource_type}/{resource_id} patient={e.patient_id}",
+        )
+        raise HTTPException(status_code=404, detail="Resource not found") from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    return result["data"]
+
+
 @app.get("/api/document/{document_id}/bbox-manifest")
 async def api_document_bbox_manifest(
     document_id: str,
