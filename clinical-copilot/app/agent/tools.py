@@ -246,6 +246,33 @@ TOOLS = [
     retrieve_guidelines,
 ]
 
+# Worker-scoped tool subsets per PRD W2 §4 (supervisor + 2 workers). Each
+# worker LLM is bound only to its subset so the supervisor's routing
+# decision is enforced at the model layer — not just by prompt asks. The
+# answerer node has no tools at all.
+#
+# `INTAKE_TOOLS`: chart + uploaded-document reading. Owns time anchoring,
+# patient resolution, structured chart pulls, recent-diff lookups, and the
+# clinical_flags rule surface. Anything that touches OpenEMR's FHIR layer
+# or the extracted-document pipeline lives here.
+INTAKE_TOOLS = [
+    current_time,
+    resolve_patient,
+    get_patient_card,
+    get_vital_trends,
+    get_observations_24h,
+    get_notes_24h,
+    get_document_content,
+    get_med_changes_24h,
+    clinical_flags,
+]
+# `EVIDENCE_TOOLS`: published-guideline retrieval. Stays narrow on purpose
+# — adding chart tools here would re-merge the worker boundary the
+# supervisor exists to make explicit.
+EVIDENCE_TOOLS = [
+    retrieve_guidelines,
+]
+
 
 async def _current_time_impl() -> SourcedResult:
     # Use the clinical TZ explicitly — astimezone() with no arg returns the

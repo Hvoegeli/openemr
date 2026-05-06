@@ -28,3 +28,13 @@ class AgentState(TypedDict):
     # the end of any response containing safety reasoning. Default False
     # preserves the chart-summarizer-only behavior the eval suite asserts.
     advisor_mode: bool
+    # Supervisor topology fields (PRD W2 §4 — supervisor + 2 workers).
+    # `worker_route` is the supervisor's most-recent routing decision and is
+    # read by the conditional edge after the supervisor node. Values:
+    # `"intake_extractor"`, `"evidence_retriever"`, or `"answer"`.
+    # `route_count` bounds supervisor invocations per turn so a confused
+    # supervisor cannot loop indefinitely between workers; the chat handler
+    # resets it to 0 on every fresh user turn (same shape as
+    # `validation_attempts`).
+    worker_route: str | None
+    route_count: int

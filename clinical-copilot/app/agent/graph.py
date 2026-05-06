@@ -1,16 +1,29 @@
 """LangGraph state machine for the clinical co-pilot.
 
-Flow:
-  START -> call_llm
-    call_llm -[tool_calls present]-> execute_tools -> call_llm  (tool loop)
-    call_llm -[no tool_calls]-> validate_citations
-  validate_citations -[invalid + attempts<MAX]-> call_llm  (retry)
-  validate_citations -[valid OR attempts>=MAX]-> END
+PRD W2 §4 — supervisor + 2 workers topology.
 
-The tool loop and validator together give the architecture's "tool output is
-the source of truth" guarantee: the LLM can't reach FHIR directly, every
-tool result's `sources` get appended to state.conversation_sources, and the
-validator rejects the final response if it cites anything outside that set.
+Flow:
+  START -> supervisor
+    supervisor -[worker_route=intake_extractor]-> intake_extractor
+    supervisor -[worker_route=evidence_retriever]-> evidence_retriever
+    supervisor -[worker_route=answer]-> answerer
+  intake_extractor -[tool_calls present]-> tools -> intake_extractor (loop)
+  intake_extractor -[no tool_calls]-> supervisor (yield)
+  evidence_retriever -[tool_calls present]-> tools -> evidence_retriever (loop)
+  evidence_retriever -[no tool_calls]-> supervisor (yield)
+  answerer -> validate
+    validate -[invalid + attempts<MAX]-> answerer (retry)
+    validate -[valid OR attempts>=MAX]-> END
+
+Loop guard: the supervisor stops routing after `MAX_SUPERVISOR_ROUTES`
+hops per turn and forces `answer`. Keeps a confused supervisor from
+ping-ponging between workers indefinitely.
+
+The validator is unchanged from the single-LLM topology — it still owns
+"every clinical claim cites a source returned by a tool in this
+conversation." Workers keep accumulating `conversation_sources`, so by
+the time the answerer runs the source set already covers everything
+either worker pulled.
 """
 
 import json
@@ -21,12 +34,20 @@ from typing import Any, Literal
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, Field
 
 from app import access_control
 from app.access_control import PatientAccessDenied
 from app.agent.state import AgentState
-from app.agent.system_prompt import ADVISOR_MODE_ADDENDUM, SYSTEM_PROMPT
-from app.agent.tools import TOOLS, dispatch
+from app.agent.system_prompt import (
+    ADVISOR_MODE_ADDENDUM,
+    ANSWERER_ADDENDUM,
+    EVIDENCE_RETRIEVER_ADDENDUM,
+    INTAKE_EXTRACTOR_ADDENDUM,
+    SUPERVISOR_PROMPT,
+    SYSTEM_PROMPT,
+)
+from app.agent.tools import EVIDENCE_TOOLS, INTAKE_TOOLS, dispatch
 from app.agent.input_guard import detect_jailbreak, quarantine_marker
 from app.agent.validator import find_invalid_citations, find_uncited_clinical_claims
 from app.config import settings
@@ -36,8 +57,33 @@ from app.observability import record_tool_event
 log = logging.getLogger("agent")
 
 MAX_VALIDATION_ATTEMPTS = 2
+MAX_SUPERVISOR_ROUTES = 4
 
 VALIDATION_FAILURE_PREFIX = "VALIDATION FAILED:"
+
+
+class SupervisorDecision(BaseModel):
+    """Structured output for the supervisor node.
+
+    Bound as a forced tool on the supervisor LLM so every supervisor
+    invocation produces a routing decision in a typed, inspectable shape
+    (PRD W2 §4 — "logged handoffs").
+    """
+
+    next_worker: Literal["intake_extractor", "evidence_retriever", "answer"] = Field(
+        description=(
+            "Which graph node should run next. `intake_extractor` for "
+            "patient-chart and uploaded-document data; "
+            "`evidence_retriever` for published-guideline retrieval; "
+            "`answer` to compose the final user-facing reply."
+        ),
+    )
+    reason: str = Field(
+        description=(
+            "One-sentence rationale for the routing choice. Logged in "
+            "the trace store and the supervisor.route observability event."
+        ),
+    )
 
 
 def _format_tool_result(name: str, result: dict) -> str | list[dict]:
@@ -130,18 +176,15 @@ def message_text(message: BaseMessage) -> str:
     return ""
 
 
-def _build_llm(model_name: str):
-    """Construct the LangChain chat model based on `settings.llm_provider`.
+def _build_llm_base(model_name: str):
+    """Construct the LangChain chat model for the active provider, without
+    binding tools yet. Tool binding is per-worker; the supervisor uses
+    structured output instead of free tools.
 
-    Default is `anthropic` (direct API to api.anthropic.com). Production
-    HIPAA-grade deployments flip to `bedrock` for the BAA-covered path
-    via AWS Bedrock. The `langchain_aws` import is lazy so installs that
-    haven't pulled it in keep working on the default path.
-
-    Both clients return a model that supports `.bind_tools(TOOLS)`,
-    streaming via `astream_events`, and Anthropic's prompt-cache
-    `cache_control` blocks on the system message — so call_llm /
-    execute_tools / validate_citations don't need to know the difference.
+    Default is `anthropic` (direct API to api.anthropic.com); flip
+    `settings.llm_provider=bedrock` for a BAA-covered AWS Bedrock path.
+    The `langchain_aws` import is lazy so installs that haven't pulled
+    it in keep working on the default path.
     """
     provider = (settings.llm_provider or "anthropic").lower()
     if provider == "bedrock":
@@ -159,9 +202,33 @@ def _build_llm(model_name: str):
         return ChatBedrockConverse(
             model=settings.bedrock_model_id,
             region_name=settings.aws_region,
-        ).bind_tools(TOOLS)
+        )
     log.info("llm: routing through Anthropic direct (model=%s)", model_name)
-    return ChatAnthropic(model_name=model_name, timeout=60, stop=None).bind_tools(TOOLS)
+    return ChatAnthropic(model_name=model_name, timeout=60, stop=None)
+
+
+def _build_worker_llm(model_name: str, tools: list):
+    """Return a chat model bound to a worker-scoped tool subset.
+
+    The supervisor decides which worker runs; this binding makes that
+    decision enforceable at the model layer — the worker physically
+    cannot call a tool outside its subset.
+    """
+    base = _build_llm_base(model_name)
+    if not tools:
+        return base
+    return base.bind_tools(tools)
+
+
+def _build_supervisor_chain(model_name: str):
+    """Return a chain that emits a `SupervisorDecision` per invocation.
+
+    Uses LangChain's `with_structured_output` so the supervisor's only
+    output shape is the typed routing decision — no free text, no
+    accidental tool calls, no parsing.
+    """
+    base = _build_llm_base(model_name)
+    return base.with_structured_output(SupervisorDecision)
 
 
 def active_model_label(model_name: str) -> str:
@@ -182,8 +249,8 @@ def build_graph(
     """Construct the compiled LangGraph for one or more conversation turns.
 
     The returned graph is reusable across turns — pass cumulative state in,
-    get cumulative state back. Reset `validation_attempts` to 0 each new
-    user turn (the CLI/driver layer does this).
+    get cumulative state back. Reset `validation_attempts` AND `route_count`
+    to 0 each new user turn (the CLI/driver layer does this).
 
     `notes_store` is the `ClinicalNoteStore` instance the dispatch needs to
     serve `get_vital_trends`. `assignments_store` is the `AssignmentStore`
@@ -192,33 +259,89 @@ def build_graph(
     Both typed loosely as `Any` so this module doesn't depend on the
     app-level dataclass / circular-import chain.
     """
-    model = _build_llm(model_name)
+    intake_model = _build_worker_llm(model_name, INTAKE_TOOLS)
+    evidence_model = _build_worker_llm(model_name, EVIDENCE_TOOLS)
+    answerer_model = _build_worker_llm(model_name, [])
+    supervisor_chain = _build_supervisor_chain(model_name)
 
-    # Mark the system prompt as cacheable. The prompt is ~1200-1500 tokens
-    # (above Sonnet 4.6's 1024-token minimum) and identical on every turn,
-    # so Anthropic's prompt-cache returns it at ~10% of input cost. Cache
-    # is `ephemeral` (~5-min TTL), which fits a doctor's working session.
-    #
-    # Two cached variants: the default chart-summarizer prompt, and an
-    # advisor-mode prompt that appends ADVISOR_MODE_ADDENDUM (relaxes R2
-    # for med-safety reasoning + mandates the disclaimer block). The graph
-    # picks per-turn based on `state["advisor_mode"]`. Each variant gets
-    # its own cache entry; both stay warm during a working session.
-    system_msg_default = SystemMessage(content=[{
+    # Cached system messages per role. The supervisor prompt is small and
+    # stable so it benefits less from caching than the worker prompts —
+    # but the prompt-cache TTL is generous and the cost is uniform, so
+    # everything goes through `cache_control: ephemeral`.
+    sys_supervisor = SystemMessage(content=[{
         "type": "text",
-        "text": SYSTEM_PROMPT,
+        "text": SUPERVISOR_PROMPT,
         "cache_control": {"type": "ephemeral"},
     }])
-    system_msg_advisor = SystemMessage(content=[{
+    sys_intake = SystemMessage(content=[{
         "type": "text",
-        "text": SYSTEM_PROMPT + ADVISOR_MODE_ADDENDUM,
+        "text": SYSTEM_PROMPT + INTAKE_EXTRACTOR_ADDENDUM,
+        "cache_control": {"type": "ephemeral"},
+    }])
+    sys_evidence = SystemMessage(content=[{
+        "type": "text",
+        "text": SYSTEM_PROMPT + EVIDENCE_RETRIEVER_ADDENDUM,
+        "cache_control": {"type": "ephemeral"},
+    }])
+    sys_answerer_default = SystemMessage(content=[{
+        "type": "text",
+        "text": SYSTEM_PROMPT + ANSWERER_ADDENDUM,
+        "cache_control": {"type": "ephemeral"},
+    }])
+    sys_answerer_advisor = SystemMessage(content=[{
+        "type": "text",
+        "text": SYSTEM_PROMPT + ANSWERER_ADDENDUM + ADVISOR_MODE_ADDENDUM,
         "cache_control": {"type": "ephemeral"},
     }])
 
-    async def call_llm(state: AgentState) -> dict:
-        sys_msg = system_msg_advisor if state.get("advisor_mode") else system_msg_default
+    async def supervisor_node(state: AgentState) -> dict:
+        rc = state.get("route_count", 0) + 1
+        if rc > MAX_SUPERVISOR_ROUTES:
+            log.warning(
+                "supervisor: route_count=%d > %d, forcing answer",
+                rc, MAX_SUPERVISOR_ROUTES,
+            )
+            record_tool_event(
+                name="supervisor.route",
+                args={"next_worker": "answer", "reason": "loop_guard"},
+                started_at=time.time(),
+                ok=True,
+                sources_added=0,
+            )
+            return {"worker_route": "answer", "route_count": rc}
+
+        t0 = time.time()
+        decision = await supervisor_chain.ainvoke([sys_supervisor, *state["messages"]])
+        # `with_structured_output` returns a Pydantic instance.
+        next_worker = decision.next_worker
+        reason = decision.reason
+        log.info(
+            "supervisor: route=%s reason=%r (hop %d/%d)",
+            next_worker, reason, rc, MAX_SUPERVISOR_ROUTES,
+        )
+        record_tool_event(
+            name="supervisor.route",
+            args={"next_worker": next_worker, "reason": reason},
+            started_at=t0,
+            ok=True,
+            sources_added=0,
+        )
+        return {"worker_route": next_worker, "route_count": rc}
+
+    async def intake_extractor(state: AgentState) -> dict:
+        messages = [sys_intake, *state["messages"]]
+        response = await intake_model.ainvoke(messages)
+        return {"messages": [response]}
+
+    async def evidence_retriever(state: AgentState) -> dict:
+        messages = [sys_evidence, *state["messages"]]
+        response = await evidence_model.ainvoke(messages)
+        return {"messages": [response]}
+
+    async def answerer(state: AgentState) -> dict:
+        sys_msg = sys_answerer_advisor if state.get("advisor_mode") else sys_answerer_default
         messages = [sys_msg, *state["messages"]]
-        response = await model.ainvoke(messages)
+        response = await answerer_model.ainvoke(messages)
         return {"messages": [response]}
 
     async def execute_tools(state: AgentState) -> dict:
@@ -356,30 +479,93 @@ def build_graph(
             )
         return {"messages": [HumanMessage(content=retry_content)], "validation_attempts": attempts}
 
-    def route_after_llm(state: AgentState) -> Literal["tools", "validate"]:
+    def route_after_supervisor(
+        state: AgentState,
+    ) -> Literal["intake_extractor", "evidence_retriever", "answerer"]:
+        route = state.get("worker_route") or "answer"
+        if route == "intake_extractor":
+            return "intake_extractor"
+        if route == "evidence_retriever":
+            return "evidence_retriever"
+        return "answerer"
+
+    def route_after_worker(state: AgentState) -> Literal["tools", "supervisor"]:
         last = state["messages"][-1]
         if isinstance(last, AIMessage) and last.tool_calls:
             return "tools"
+        return "supervisor"
+
+    def route_after_tools(
+        state: AgentState,
+    ) -> Literal["intake_extractor", "evidence_retriever", "answerer"]:
+        # Re-enter whichever worker the supervisor picked. `worker_route`
+        # is only set by the supervisor, so it survives an `execute_tools`
+        # invocation and tells us where to loop back.
+        route = state.get("worker_route")
+        if route == "intake_extractor":
+            return "intake_extractor"
+        if route == "evidence_retriever":
+            return "evidence_retriever"
+        # Should not happen — answer never has tool calls. Safety fallback
+        # to answerer so the graph terminates instead of looping.
+        log.warning("route_after_tools: unexpected worker_route=%r; falling through to answerer", route)
+        return "answerer"
+
+    def route_after_answer(state: AgentState) -> Literal["validate"]:
         return "validate"
 
-    def route_after_validate(state: AgentState) -> Literal["llm", "__end__"]:
+    def route_after_validate(state: AgentState) -> Literal["answerer", "__end__"]:
         last = state["messages"][-1]
         if (
             isinstance(last, HumanMessage)
             and isinstance(last.content, str)
             and last.content.startswith(VALIDATION_FAILURE_PREFIX)
         ):
-            return "llm"
+            return "answerer"
         return END
 
     graph = StateGraph(AgentState)
-    graph.add_node("llm", call_llm)
+    graph.add_node("supervisor", supervisor_node)
+    graph.add_node("intake_extractor", intake_extractor)
+    graph.add_node("evidence_retriever", evidence_retriever)
+    graph.add_node("answerer", answerer)
     graph.add_node("tools", execute_tools)
     graph.add_node("validate", validate_citations)
 
-    graph.add_edge(START, "llm")
-    graph.add_conditional_edges("llm", route_after_llm, {"tools": "tools", "validate": "validate"})
-    graph.add_edge("tools", "llm")
-    graph.add_conditional_edges("validate", route_after_validate, {"llm": "llm", END: END})
+    graph.add_edge(START, "supervisor")
+    graph.add_conditional_edges(
+        "supervisor",
+        route_after_supervisor,
+        {
+            "intake_extractor": "intake_extractor",
+            "evidence_retriever": "evidence_retriever",
+            "answerer": "answerer",
+        },
+    )
+    graph.add_conditional_edges(
+        "intake_extractor",
+        route_after_worker,
+        {"tools": "tools", "supervisor": "supervisor"},
+    )
+    graph.add_conditional_edges(
+        "evidence_retriever",
+        route_after_worker,
+        {"tools": "tools", "supervisor": "supervisor"},
+    )
+    graph.add_conditional_edges(
+        "tools",
+        route_after_tools,
+        {
+            "intake_extractor": "intake_extractor",
+            "evidence_retriever": "evidence_retriever",
+            "answerer": "answerer",
+        },
+    )
+    graph.add_edge("answerer", "validate")
+    graph.add_conditional_edges(
+        "validate",
+        route_after_validate,
+        {"answerer": "answerer", END: END},
+    )
 
     return graph.compile()

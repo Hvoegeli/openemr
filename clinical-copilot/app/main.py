@@ -104,6 +104,8 @@ def _fresh_state() -> AgentState:
         "validation_attempts": 0,
         "username": None,
         "advisor_mode": False,
+        "worker_route": None,
+        "route_count": 0,
     }
 
 
@@ -440,6 +442,12 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
     state = SESSIONS.get(session_id) or _fresh_state()
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
+    # Reset supervisor loop guard per turn — same shape as
+    # `validation_attempts`. Without this, a long conversation accumulates
+    # `route_count` and the next supervisor invocation trips the loop
+    # guard immediately.
+    state["route_count"] = 0
+    state["worker_route"] = None
     state["username"] = _user
     state["advisor_mode"] = req.advisor_mode
 
@@ -469,6 +477,8 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
         "validation_attempts": result.get("validation_attempts", 0),
         "username": _user,
         "advisor_mode": req.advisor_mode,
+        "worker_route": result.get("worker_route"),
+        "route_count": result.get("route_count", 0),
     }
     SESSIONS[session_id] = new_state
 
@@ -589,6 +599,8 @@ async def chat_stream(
     state = SESSIONS.get(session_id) or _fresh_state()
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
+    state["route_count"] = 0
+    state["worker_route"] = None
     state["username"] = _user
     state["advisor_mode"] = req.advisor_mode
 
@@ -636,6 +648,8 @@ async def chat_stream(
                                 "validation_attempts": output.get("validation_attempts", 0),
                                 "username": _user,
                                 "advisor_mode": req.advisor_mode,
+                                "worker_route": output.get("worker_route"),
+                                "route_count": output.get("route_count", 0),
                             }
                             SESSIONS[session_id] = new_state
 

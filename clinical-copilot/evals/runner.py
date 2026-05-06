@@ -237,6 +237,11 @@ async def record_one(case: Case, patient: Patient | None) -> Snapshot:
         # Advisor mode is off for every existing eval case; new advisor-mode
         # cases (post-submission work) will opt in via a case-level field.
         "advisor_mode": False,
+        # Supervisor topology fields default to "no decision yet"; the
+        # supervisor node sets `worker_route` on the first hop and
+        # `route_count` is reset per-turn just like `validation_attempts`.
+        "worker_route": None,
+        "route_count": 0,
     }
 
     turns_out: list[Turn] = []
@@ -248,6 +253,8 @@ async def record_one(case: Case, patient: Patient | None) -> Snapshot:
         prefix_len = len(state["messages"])
         state["messages"].append(HumanMessage(content=text))
         state["validation_attempts"] = 0
+        state["route_count"] = 0
+        state["worker_route"] = None
         state = await graph.ainvoke(state)
         # Walk the new messages, picking out tool calls + their results.
         new_messages = state["messages"][prefix_len + 1:]
