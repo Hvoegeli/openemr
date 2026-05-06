@@ -37,7 +37,7 @@ from uuid import uuid4
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -105,6 +105,53 @@ def _fresh_state() -> AgentState:
         "username": None,
         "advisor_mode": False,
     }
+
+
+def _mark_user_sessions_stale_after_upload(
+    *,
+    username: str,
+    patient_uuid: str,
+    doc_type: str,
+    reference_id: str,
+) -> int:
+    """Append a SystemMessage to every session belonging to `username` so
+    the agent treats prior tool results as stale and refetches on the next
+    user turn.
+
+    Why this is needed even though `app.state.cache` is invalidated on
+    upload: the cache only protects *new* fetches. Prior `ToolMessage`s
+    for the same patient (chart card, recent notes, document content)
+    are baked into `SESSIONS[sid]["messages"]` from earlier turns, and
+    the LLM happily reads from those instead of re-calling the tool —
+    which is the user-visible "uploaded a doc but Copilot didn't see it
+    until I logged out" symptom. Telling the agent in-context that the
+    data has changed is the cheapest reliable nudge.
+
+    Match by username (not patient_id) because a user can have multiple
+    tabs / pinned patients, and a chart write can ripple into any of
+    them. The cost of an unnecessary refetch on an unrelated session is
+    one extra tool call; the cost of missing one is the bug we're here
+    to fix.
+
+    Returns the count of sessions notified for log visibility.
+    """
+    notice = SystemMessage(content=(
+        f"DATA UPDATE: A new clinical document was just uploaded "
+        f"(doc_type={doc_type}, source=DocumentReference/{reference_id}, "
+        f"patient={patient_uuid}). Any earlier tool results in this "
+        f"conversation for this patient may be stale. Before answering "
+        f"the next question about this patient, refetch the relevant "
+        f"tools (get_patient_card, get_notes_24h, get_document_content, "
+        f"get_observations_24h, get_med_changes_24h) instead of reusing "
+        f"prior ToolMessage content."
+    ))
+    affected = 0
+    for state in SESSIONS.values():
+        if state.get("username") != username:
+            continue
+        state["messages"] = [*state["messages"], notice]
+        affected += 1
+    return affected
 
 
 async def _prewarm_dashboard(app: FastAPI) -> None:
@@ -1022,13 +1069,20 @@ async def api_upload(
     app.state.cache.invalidate(f"card:{patient_uuid}")
     app.state.cache.invalidate(f"trends:{patient_uuid}")
     app.state.cache.invalidate_prefix("calendar:today:")
+    sessions_notified = _mark_user_sessions_stale_after_upload(
+        username=username,
+        patient_uuid=patient_uuid,
+        doc_type=doc_type,
+        reference_id=result.reference_id,
+    )
     log.info(
         "upload: user=%s patient=%s doc_type=%s ref=%s created=%s "
-        "facts_written=%d/%d",
+        "facts_written=%d/%d sessions_notified=%d",
         username, patient_uuid, doc_type,
         result.reference_id, result.created,
         (result.persistence or {}).get("facts_written", 0),
         (result.persistence or {}).get("facts_attempted", 0),
+        sessions_notified,
     )
     return {
         "reference_id": result.reference_id,
