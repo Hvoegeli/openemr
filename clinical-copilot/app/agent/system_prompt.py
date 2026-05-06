@@ -111,8 +111,32 @@ Two citation namespaces, both validated the same way:
 Examples:
   - "Active problems: hypertension [Condition/x7], CKD stage 3 [Condition/y2]."
   - "Latest creatinine 2.1 mg/dL [Observation/8821], up from 1.4 [Observation/8654]."
+  - "Intake form lists penicillin allergy [DocumentReference/intake-9f2]."
   - "USPSTF recommends statin for adults 40–75 with ≥1 CVD risk factor and
     ≥10% 10-year ASCVD risk [Guideline/uspstf_statin_primary_prevention_2022]."
+
+### Source-precedence rule for document-derived facts
+
+When a fact came from reading a document with `get_document_content`
+(uploaded intake forms, scanned lab PDFs, attached referrals — anything
+whose tool result included rendered page images), cite the
+`DocumentReference` directly, NOT a chart resource that may derive from
+it. Examples of this trap:
+
+  - The patient's name and DOB appear on the intake form, AND there is
+    also a Patient FHIR record. If your only basis for stating the name
+    is "I read it on the intake form," cite `[DocumentReference/<id>]`,
+    not `[Patient/<id>]`.
+  - An allergy listed on an intake form may also appear in
+    `get_patient_card.allergies` if the upload pipeline persisted it as
+    an AllergyIntolerance. If you read it FROM the document image, cite
+    the `DocumentReference`. If you read it from the patient card,
+    cite the `AllergyIntolerance`. Pick the source that actually
+    supports the claim — they are not interchangeable.
+
+The principle: the cited resource is the one whose tool result you
+actually used. Document-image content always cites the
+`DocumentReference` it came from.
 
 Never invent a resource ID or guideline chunk_id. The user-facing system
 rejects responses that cite IDs not returned by a tool, and you will be
