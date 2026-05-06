@@ -110,19 +110,36 @@ async def get_calendar_today(
             sources.append(_ref(a))
 
     # Latest encounter per patient — gives "reason" + "time" fallback
-    # when no scheduled appointment exists for today. One round-trip in
-    # wall-clock time via gather.
-    latest_encs = await asyncio.gather(*[
-        _safe_search(
-            client, "Encounter",
-            {"patient": p["id"], "_count": 1, "_sort": "-date"},
-        )
-        for p in patients
-    ])
+    # when no scheduled appointment exists for today.
+    #
+    # Pre-fix: N+1 — one `Encounter?patient=X&_count=1&_sort=-date` per
+    # patient. With OpenEMR's PHP session locking serializing FHIR reads
+    # server-side, a 21-patient roster paid ~21× ~250ms ≈ 5s on the
+    # admin view despite asyncio.gather giving us client-side parallelism.
+    #
+    # Post-fix: ONE search for the most-recent N encounters across the
+    # whole panel, then bucket by patient id client-side. First-seen
+    # within the patient bucket wins because the bundle is sorted
+    # `-date` descending. `_count` is sized so each patient on a
+    # reasonably busy roster (≤ 30 inpatients × 10 recent encounters
+    # each) is covered without truncating any patient's latest.
+    all_encs = await _safe_search(
+        client, "Encounter",
+        {"_sort": "-date", "_count": 300},
+    )
+    latest_by_patient: dict[str, dict] = {}
+    for enc in all_encs:
+        ref = (enc.get("subject") or {}).get("reference") or ""
+        if not ref.startswith("Patient/"):
+            continue
+        pid = ref.removeprefix("Patient/")
+        # First occurrence wins because `-date` sort puts the latest first.
+        if pid not in latest_by_patient:
+            latest_by_patient[pid] = enc
 
     entries: list[CalendarEntry] = []
-    for p, enc_list in zip(patients, latest_encs):
-        enc = enc_list[0] if enc_list else None
+    for p in patients:
+        enc = latest_by_patient.get(p["id"])
         if enc:
             sources.append(_ref(enc))
         # Prefer today's scheduled Appointment over the latest encounter
