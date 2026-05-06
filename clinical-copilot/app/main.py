@@ -59,6 +59,7 @@ from app import access_control  # noqa: E402
 from app.auth import current_session, current_user, is_admin, require_admin, verify_openemr_credentials  # noqa: E402
 from app.assignments_db import AssignmentStore  # noqa: E402
 from app.auth_db import AuthStore  # noqa: E402
+from app.hidden_docs_db import HiddenDocsStore  # noqa: E402
 import hashlib  # noqa: E402
 
 from app.cache import TTLCache  # noqa: E402
@@ -245,6 +246,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # because OpenEMR's UI doesn't write to FHIR `Patient.generalPractitioner`.
     app.state.assignments = AssignmentStore(auth_db_path)
     log.info("assignment store: sqlite at %s", auth_db_path)
+    # Soft-hide store for the supporting-documents view — doctors can
+    # tidy duplicates / wrong-patient uploads without deleting the
+    # underlying OpenEMR DocumentReference. Shares the same SQLite file
+    # via a separate `hidden_documents` table.
+    app.state.hidden_docs = HiddenDocsStore(auth_db_path)
+    log.info("hidden-docs store: sqlite at %s", auth_db_path)
     # build_graph AFTER assignment store so the per-tool ACL gate has its
     # source of truth wired in.
     app.state.graph = build_graph(
@@ -264,6 +271,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.traces.close()
         app.state.auth_store.close()
         app.state.assignments.close()
+        app.state.hidden_docs.close()
 
 
 app = FastAPI(title="Clinical Co-pilot", lifespan=lifespan)
@@ -932,7 +940,17 @@ async def patient_documents(
     patient_id: str,
     request: Request,
     username: str = Depends(current_user),
+    include_hidden: bool = False,
 ) -> dict:
+    """Supporting-Documents tab payload.
+
+    When `include_hidden=False` (default), DocumentReference rows that
+    appear in the soft-hide store are stripped — same patient retention
+    is preserved on the OpenEMR side, the doctor just gets a cleaner
+    list. Pass `?include_hidden=true` to see them again with a `hidden:
+    true` marker on each affected item so the UI can render them
+    differently and offer an "unhide" action.
+    """
     await _check_patient_access(request, username, patient_id)
     async def _compute() -> dict:
         result = await get_supporting_documents(app.state.fhir, patient_id=patient_id)
@@ -947,6 +965,28 @@ async def patient_documents(
     cn_items = [n.to_doc_item() for n in app.state.clinical_notes.list_for_patient(patient_id, now=now_utc())]
     items = list(data.get("items") or []) + cn_items
     items.sort(key=lambda x: x.get("date") or "", reverse=True)
+
+    # Soft-hide pass — only DocumentReference items participate.
+    # Encounters and clinical notes are out of scope for hide/unhide
+    # (they are not user-uploaded). The set lookup is O(1) per item.
+    hidden_ids = app.state.hidden_docs.list_hidden_ids()
+    if hidden_ids:
+        out: list[dict] = []
+        for it in items:
+            ref = it.get("ref") or ""
+            if ref.startswith("DocumentReference/"):
+                doc_id = ref.removeprefix("DocumentReference/")
+                if doc_id in hidden_ids:
+                    if include_hidden:
+                        # Re-emit with a marker so the UI can grey it
+                        # out and show an Unhide button.
+                        merged = dict(it)
+                        merged["hidden"] = True
+                        out.append(merged)
+                    # else: drop entirely
+                    continue
+            out.append(it)
+        items = out
     return {"items": items}
 
 
@@ -1296,6 +1336,93 @@ async def api_document_bbox_manifest(
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
     return result["data"]
+
+
+@app.post("/api/document/{document_id}/hide")
+async def api_document_hide(
+    document_id: str,
+    request: Request,
+    username: str = Depends(current_user),
+) -> dict:
+    """Soft-hide a DocumentReference from the supporting-documents view.
+
+    The underlying OpenEMR DocumentReference is preserved — this is a
+    view-side toggle backed by the `hidden_documents` SQLite table.
+    Idempotent: hiding an already-hidden doc refreshes the audit row
+    (`hidden_by` / `hidden_at`).
+
+    ACL: the user must be on a panel that includes the document's
+    patient subject — same fail-closed shape as the other document
+    endpoints. 404 on denial so a guesser can't probe panel
+    boundaries via response codes.
+    """
+    panel = await access_control.get_panel_for_user(
+        request.app.state.fhir, username, request.app.state.assignments,
+    )
+    try:
+        # Light ACL check — fetching the DocumentReference confirms it
+        # exists AND lets us inspect `subject.reference` for panel
+        # membership before flipping the bit.
+        doc = await request.app.state.fhir.get(f"DocumentReference/{document_id}")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail="Document not found") from e
+    subject_ref = (doc.get("subject") or {}).get("reference") or ""
+    patient_id = subject_ref.removeprefix("Patient/") if subject_ref.startswith("Patient/") else None
+    if panel is not None and (patient_id is None or patient_id not in panel):
+        request.app.state.auth_store.log_event(
+            event_type="patient_access_denied",
+            username=username,
+            sid=request.session.get("sid"),
+            user_agent=request.headers.get("user-agent"),
+            ip=request.client.host if request.client else None,
+            detail=f"document={document_id} patient={patient_id}",
+        )
+        raise HTTPException(status_code=404, detail="Document not found")
+    record = request.app.state.hidden_docs.hide(
+        document_id=document_id, hidden_by=username,
+    )
+    # Bust the docs cache so the supporting-docs list re-renders without
+    # the hidden item on the next fetch. Same key shape the upload path
+    # invalidates.
+    if patient_id:
+        app.state.cache.invalidate(f"docs:{patient_id}")
+    log.info(
+        "document hidden: user=%s document=%s patient=%s",
+        username, document_id, patient_id,
+    )
+    return {
+        "document_id": record.document_id,
+        "hidden_by": record.hidden_by,
+        "hidden_at": record.hidden_at,
+    }
+
+
+@app.post("/api/document/{document_id}/unhide")
+async def api_document_unhide(
+    document_id: str,
+    request: Request,
+    username: str = Depends(current_user),
+) -> dict:
+    """Restore a soft-hidden DocumentReference to the default view.
+
+    No ACL fetch on the unhide path: the user must already be authenticated,
+    and the only thing they can do is restore visibility of a doc that
+    is already in the hidden table. A user without panel access cannot
+    *see* the hidden doc to call this on, so the practical attack
+    surface is nil. (Hide does check ACL because hiding a doc you can't
+    see would be a panel-leak signal otherwise.)
+    """
+    existed = request.app.state.hidden_docs.unhide(document_id)
+    # Best-effort cache bust — we don't always know the patient_id at
+    # this point. Fetching the doc to discover it would be wasteful;
+    # invalidate every patient's docs slice instead. Cheap (string
+    # prefix scan over an in-process dict).
+    app.state.cache.invalidate_prefix("docs:")
+    log.info(
+        "document unhidden: user=%s document=%s existed=%s",
+        username, document_id, existed,
+    )
+    return {"document_id": document_id, "was_hidden": existed}
 
 
 @app.get("/upload", response_model=None)

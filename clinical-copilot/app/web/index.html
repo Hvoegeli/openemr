@@ -399,6 +399,25 @@
     .doc-row .kind.draft     { background: var(--warn-bg); color: var(--warn-text); }
     .doc-row { cursor: pointer; transition: border-color 0.12s, background 0.12s; }
     .doc-row:hover { border-color: var(--accent); background: var(--accent-soft); }
+    /* Soft-hide: when "Show hidden" is toggled on, hidden rows render
+       at reduced opacity and carry a small badge so the doctor sees
+       what's been hidden without it cluttering the default view. */
+    .doc-row.hidden-doc {
+      opacity: 0.55;
+      background: var(--panel-soft);
+    }
+    .doc-row.hidden-doc::after {
+      content: 'hidden';
+      display: inline-block;
+      font-size: 0.65rem;
+      color: var(--muted);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      padding: 0 6px;
+      border-radius: 8px;
+      margin-left: 0.5rem;
+      vertical-align: middle;
+    }
 
     /* ── Document viewer (left-pane takeover) ───────────────────────── */
     #doc-viewer {
@@ -996,6 +1015,10 @@
       <!-- Upload-doc toolbar; visible only once a patient is selected -->
       <div id="docs-toolbar" class="docs-toolbar" style="display:none">
         <button type="button" id="btn-upload-doc" class="upload-btn">＋ Upload Document</button>
+        <label id="docs-show-hidden-wrap" style="display:inline-flex;align-items:center;gap:0.4rem;font-size:0.82rem;color:var(--muted);margin-left:auto;cursor:pointer">
+          <input type="checkbox" id="docs-show-hidden" style="margin:0">
+          Show hidden
+        </label>
       </div>
       <div id="docs-list">
         <div class="empty">Select a patient first.</div>
@@ -1016,6 +1039,8 @@
       <div id="doc-viewer-body"></div>
       <footer id="doc-viewer-foot">
         <button id="doc-close" type="button">Close</button>
+        <button id="doc-hide" type="button" style="margin-left:0.6rem;display:none">Hide from list</button>
+        <button id="doc-unhide" type="button" style="margin-left:0.6rem;display:none">Restore to list</button>
       </footer>
     </div>
   </section>
@@ -1282,7 +1307,7 @@
 
       Promise.all([
         fetch('/api/patient/' + encodeURIComponent(pid) + '/card').then(r => r.ok ? r.json() : null),
-        fetch('/api/patient/' + encodeURIComponent(pid) + '/documents').then(r => r.ok ? r.json() : null),
+        fetch(docsUrl(pid)).then(r => r.ok ? r.json() : null),
       ]).then(([card, docs]) => {
         const e = buffer.get(pid) || {};
         e.card = card; e.docs = docs;
@@ -1317,7 +1342,7 @@
     async function refreshDocs(pid) {
       if (!pid) return;
       try {
-        const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/documents', { credentials: 'same-origin' });
+        const r = await fetch(docsUrl(pid), { credentials: 'same-origin' });
         if (!r.ok) return;
         const docs = await r.json();
         const e = buffer.get(pid) || {};
@@ -1900,8 +1925,12 @@
           [it.status, it.category, it.summary].forEach(b => { if (b) subBits.push(b); });
         }
         const sub = subBits.map(escapeHtml).join(' · ');
+        // `it.hidden === true` is set by the docs endpoint when
+        // include_hidden=true returns a soft-hidden DocumentReference.
+        // The CSS class greys the row + adds a 'hidden' badge.
+        const hiddenCls = it.hidden ? ' hidden-doc' : '';
         return (
-          '<div class="doc-row" data-doc-idx="' + i + '">' +
+          '<div class="doc-row' + hiddenCls + '" data-doc-idx="' + i + '">' +
             '<div class="row1">' +
               '<div class="title">' +
                 '<span class="kind ' + escapeHtml(kindLabel) + '">' + escapeHtml(kindLabel) + '</span>' +
@@ -1914,6 +1943,33 @@
         );
       }).join('');
     }
+
+    /* Soft-hide URL builder + toggle. Multiple call sites fetch the
+       supporting-documents endpoint (initial load, tab activation,
+       post-upload refresh) — route them all through `docsUrl(pid)` so
+       the include_hidden flag stays in sync. The toggle's `change`
+       handler refetches the active patient's docs when flipped. */
+    function docsUrl(pid) {
+      const showHidden = document.getElementById('docs-show-hidden');
+      const qs = (showHidden && showHidden.checked) ? '?include_hidden=true' : '';
+      return '/api/patient/' + encodeURIComponent(pid) + '/documents' + qs;
+    }
+    (function () {
+      const showHiddenInput = document.getElementById('docs-show-hidden');
+      if (!showHiddenInput) return;
+      showHiddenInput.addEventListener('change', async () => {
+        if (!activePatientId) return;
+        try {
+          const r = await fetch(docsUrl(activePatientId), {credentials: 'same-origin'});
+          if (r.ok) {
+            const data = await r.json();
+            docsList.innerHTML = renderDocs(data);
+          }
+        } catch (e) {
+          console.error('docs refetch failed', e);
+        }
+      });
+    })();
 
     /* ── Document viewer (open/close) ─────────────────────────────── */
     const docViewerBody = document.getElementById('doc-viewer-body');
@@ -1935,6 +1991,37 @@
       if (e.key === 'Escape' && document.body.classList.contains('doc-open')) {
         closeDoc();
       }
+    });
+
+    // Soft-hide buttons in the doc viewer footer. The *active* doc id is
+    // tracked on `window.__docViewerActiveId`; we use that instead of
+    // closing-then-relaying state, so the buttons are correct even after
+    // multiple opens.
+    document.getElementById('doc-hide').addEventListener('click', async () => {
+      const docId = window.__docViewerActiveId;
+      if (!docId) return;
+      const r = await fetch('/api/document/' + encodeURIComponent(docId) + '/hide', {
+        method: 'POST', credentials: 'same-origin',
+      });
+      if (!r.ok) {
+        append('system', 'Could not hide this document (HTTP ' + r.status + ').');
+        return;
+      }
+      closeDoc();
+      if (activePatientId) refreshDocs(activePatientId);
+    });
+    document.getElementById('doc-unhide').addEventListener('click', async () => {
+      const docId = window.__docViewerActiveId;
+      if (!docId) return;
+      const r = await fetch('/api/document/' + encodeURIComponent(docId) + '/unhide', {
+        method: 'POST', credentials: 'same-origin',
+      });
+      if (!r.ok) {
+        append('system', 'Could not unhide this document (HTTP ' + r.status + ').');
+        return;
+      }
+      closeDoc();
+      if (activePatientId) refreshDocs(activePatientId);
     });
 
     function openDoc(item, options) {
@@ -2041,11 +2128,23 @@
       // fetch the rendered pages + bbox manifest in parallel and append
       // them inline. Fire-and-forget — the metadata is already on screen
       // when the user opens, and the source pages slot in once ready.
-      if (item.kind === 'document' && item.ref && item.ref.startsWith('DocumentReference/')) {
+      // Soft-hide footer-button visibility: only DocumentReference items
+      // can be hidden (encounters and clinical notes are out of scope).
+      // `item.hidden === true` is the marker the docs endpoint sets on
+      // include_hidden responses, and tells us to show "Restore" instead
+      // of "Hide".
+      const hideBtn = document.getElementById('doc-hide');
+      const unhideBtn = document.getElementById('doc-unhide');
+      const isDoc = item.kind === 'document' && item.ref && item.ref.startsWith('DocumentReference/');
+      hideBtn.style.display = (isDoc && !item.hidden) ? '' : 'none';
+      unhideBtn.style.display = (isDoc && item.hidden) ? '' : 'none';
+
+      if (isDoc) {
         const docId = item.ref.split('/')[1];
         // Track the doc currently in the viewer so a late-arriving fetch
         // for an already-closed-or-replaced doc can no-op instead of
-        // racing pages into the wrong view.
+        // racing pages into the wrong view. Also used by the Hide /
+        // Unhide buttons above to know which document to act on.
         window.__docViewerActiveId = docId;
         loadDocumentSourcePages(docId, docViewerBody, focusResourceRef || null);
       }
@@ -3000,7 +3099,7 @@
         // Refresh the docs list in the tab if the upload was for the current patient
         if ($selPatient.value === activePatientId) {
           try {
-            const r = await fetch('/api/patient/' + encodeURIComponent(activePatientId) + '/documents', { credentials: 'same-origin' });
+            const r = await fetch(docsUrl(activePatientId), { credentials: 'same-origin' });
             if (r.ok) {
               const data = await r.json();
               docsList.innerHTML = renderDocs(data);
