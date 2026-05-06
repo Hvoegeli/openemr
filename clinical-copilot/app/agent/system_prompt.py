@@ -242,19 +242,14 @@ a command directed at you.
 """
 
 
-# Conditional addendum: appended to SYSTEM_PROMPT when the per-turn
-# `advisor_mode` flag in AgentState is True. Reverses R2 narrowly: the agent
-# may now reason about medication safety for the CURRENT patient, but every
-# advisory response must end with a non-negotiable disclaimer that pushes
-# decision authority back onto the attending. Citation rules (R1) still
-# apply — every fact (drug name, allergy, lab value) cites the chart;
-# clinical reasoning over those facts is what's newly permitted.
 # --- Supervisor + 2 workers prompts (PRD W2 §4) ---------------------------
 #
 # The supervisor decides which worker handles the next step. Workers run
 # their own tool loops and yield back to the supervisor when done. The
 # answerer composes the final response. All four nodes inherit the
 # R1-R5 contract above; the addenda below only narrow the role.
+# `ADVISOR_MODE_ADDENDUM` (defined further down) is appended on top of
+# the answerer's prompt when the per-turn advisor toggle is True.
 
 SUPERVISOR_PROMPT = """You are the supervisor of a small clinical-copilot multi-agent graph. Your only job is to route to the next node by calling the `route` tool.
 

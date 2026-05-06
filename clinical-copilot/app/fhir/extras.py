@@ -7,7 +7,7 @@ applies to them in the future.
 """
 
 import asyncio
-from datetime import date, datetime
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import TypedDict
 

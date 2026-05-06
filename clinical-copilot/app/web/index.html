@@ -2090,6 +2090,14 @@
           for (const f of facts) {
             const b = f.bbox;
             if (!b || !wPx || !hPx) continue;
+            // Skip overlays whose bbox is missing any required numeric
+            // field — interpolating `undefined / wPx` produces `NaN%`,
+            // which browsers reject silently and yields ghost overlays
+            // pinned at (0,0). Better to drop the overlay than misalign.
+            if (typeof b.x !== 'number' || typeof b.y !== 'number'
+                || typeof b.width !== 'number' || typeof b.height !== 'number') {
+              continue;
+            }
             // bbox is the value the VLM returned at extraction time. The
             // schema docstring claims PDF-point space, but Claude saw a
             // 150-DPI PNG; assume PNG-pixel space and let the page's

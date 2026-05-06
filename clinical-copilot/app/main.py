@@ -139,9 +139,12 @@ def _mark_user_sessions_stale_after_upload(
 
     Returns the count of sessions notified for log visibility.
     """
+    # `reference_id` is already prefixed (`DocumentReference/<uuid>`) from
+    # the writer; do not re-prefix it here or the agent sees a malformed
+    # double-prefixed source.
     notice = SystemMessage(content=(
         f"DATA UPDATE: A new clinical document was just uploaded "
-        f"(doc_type={doc_type}, source=DocumentReference/{reference_id}, "
+        f"(doc_type={doc_type}, source={reference_id}, "
         f"patient={patient_uuid}). Any earlier tool results in this "
         f"conversation for this patient may be stale. Before answering "
         f"the next question about this patient, refetch the relevant "

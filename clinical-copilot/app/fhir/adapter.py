@@ -8,12 +8,15 @@ tool call in the same conversation.
 
 import base64
 import io
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 
 from app.fhir.client import FhirClient
+
+log = logging.getLogger("agent.fhir.adapter")
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
@@ -679,7 +682,11 @@ async def get_document_bbox_manifest(
     ):
         try:
             rows = await client.search(resource_type, {"patient": patient_id, "_count": 200})
-        except Exception:  # noqa: BLE001 — partial manifest is better than 500
+        except Exception as e:  # noqa: BLE001 — partial manifest is better than 500
+            log.warning(
+                "bbox-manifest: %s search failed for patient=%s document=%s: %s",
+                resource_type, patient_id, document_id, e,
+            )
             continue
         for row in rows:
             tag = _parse_source_tag(_collect_note_text(row), document_id)
