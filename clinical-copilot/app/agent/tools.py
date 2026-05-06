@@ -315,6 +315,21 @@ async def _get_vital_trends_impl(
     ]
     trends = collect_vital_trends(observations, notes)
 
+    # `collect_vital_trends` preserves FHIR's raw UTC `effectiveDateTime`
+    # in each point's `date` field. The web UI hides this with a
+    # `toLocaleString` on render, but the agent sees the raw string and
+    # narrates it verbatim — so a vital recorded at 15:35 clinical-local
+    # gets summarized as "21:35", confusing the doctor. Re-stamp every
+    # point's date through `_clinical_iso` (the same helper the chart
+    # adapter uses on `effectiveDateTime` everywhere else) before the
+    # tool result reaches the LLM. The UI path is untouched.
+    from app.fhir.adapter import _clinical_iso  # noqa: PLC0415
+    for points in trends.values():
+        for p in points:
+            d = p.get("date")
+            if isinstance(d, str):
+                p["date"] = _clinical_iso(d)
+
     sources: list[str] = []
     seen: set[str] = set()
     for points in trends.values():
