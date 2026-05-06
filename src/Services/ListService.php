@@ -193,7 +193,8 @@ class ListService
         $sql .= "     title=?,";
         $sql .= "     begdate=?,";
         $sql .= "     enddate=?,";
-        $sql .= "     diagnosis=?";
+        $sql .= "     diagnosis=?,";
+        $sql .= "     comments=?";
 
         return sqlInsert(
             $sql,
@@ -203,7 +204,8 @@ class ListService
                 $data["title"],
                 $data["begdate"],
                 $data["enddate"],
-                $data["diagnosis"]
+                $data["diagnosis"] ?? null,
+                $data["comments"] ?? null
             ]
         );
     }

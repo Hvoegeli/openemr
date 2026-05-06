@@ -39,7 +39,8 @@ class ConditionRestController
         'title',
         'begdate',
         'enddate',
-        'diagnosis'
+        'diagnosis',
+        'comments'
     ];
 
     public function __construct()
