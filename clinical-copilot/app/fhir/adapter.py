@@ -29,17 +29,14 @@ def _clinical_iso(iso_str: str | None) -> str | None:
     when the doctor's wall clock said 15:35 MDT — confusing in chat output.
     Convert here so the offset is on the wire (`2026-04-30T15:35:48-06:00`)
     and downstream parsers (Python, JS) still get an unambiguous instant.
+
+    Thin wrapper over `app.timeutil.to_clinical_iso` — kept here for
+    backward compatibility with the dozen call sites in this file that
+    already import this name. New code should call `to_clinical_iso`
+    directly.
     """
-    if not iso_str:
-        return None
-    try:
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-    except ValueError:
-        return iso_str
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    from app.config import settings  # lazy to avoid circular import on module load
-    return dt.astimezone(ZoneInfo(settings.clinical_tz)).isoformat(timespec="seconds")
+    from app.timeutil import to_clinical_iso  # noqa: PLC0415
+    return to_clinical_iso(iso_str)
 
 
 class SourcedResult(TypedDict):

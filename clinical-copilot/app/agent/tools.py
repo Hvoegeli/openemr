@@ -12,13 +12,10 @@ tools like `current_time`, but the LLM is still forbidden from synthesizing
 facts that don't appear in some tool's `data`.
 """
 
-from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from langchain_core.tools import tool
 
-from app.config import settings
 from app.fhir import adapter
 from app.fhir.adapter import SourcedResult
 from app.fhir.client import FhirClient
@@ -275,10 +272,13 @@ EVIDENCE_TOOLS = [
 
 
 async def _current_time_impl() -> SourcedResult:
-    # Use the clinical TZ explicitly — astimezone() with no arg returns the
-    # system's local time, but Hetzner runs UTC so the agent would otherwise
-    # narrate "21:35" when the doctor's wall clock said 15:35 MDT.
-    now = datetime.now(ZoneInfo(settings.clinical_tz))
+    # `clinical_now()` is the centralized clinical-tz helper — same
+    # function used by the schedule endpoint, calendar fetcher, and
+    # eval invariants. astimezone() with no arg returns server-local
+    # time (Hetzner is UTC), so the agent would otherwise narrate
+    # "21:35" when the doctor's wall clock said 15:35 MDT.
+    from app.timeutil import clinical_now  # noqa: PLC0415
+    now = clinical_now()
     return {
         "data": {
             "iso_datetime": now.isoformat(timespec="seconds"),

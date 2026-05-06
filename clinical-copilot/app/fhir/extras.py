@@ -7,8 +7,6 @@ applies to them in the future.
 """
 
 import asyncio
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from typing import TypedDict
 
 from app.fhir.adapter import (
@@ -61,11 +59,11 @@ async def get_calendar_today(
     # `date.today()` returns server-local. Hetzner runs UTC; the doctor
     # using Copilot is in clinical-local TZ. At ~5pm clinical it's
     # already midnight on the server, so server-local "today" can be
-    # one day ahead of the user's "today" — every subsequent
-    # Appointment search for `?date=today_iso` would miss the doctor's
-    # actual today's appointments. Anchor on `settings.clinical_tz`.
-    from app.config import settings  # lazy: avoids module-load circular
-    today_iso = datetime.now(ZoneInfo(settings.clinical_tz)).date().isoformat()
+    # one day ahead of the user's "today". `clinical_today()` reads
+    # `settings.clinical_tz` so the deployment can flip TZ without
+    # touching this site.
+    from app.timeutil import clinical_today  # lazy: keeps module-load fast
+    today_iso = clinical_today().isoformat()
     sources: list[str] = []
 
     # Appointment overlay temporarily disabled pending the time-zone
