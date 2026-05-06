@@ -58,7 +58,12 @@ log = logging.getLogger("agent.fhir.writer")
 # user/vital.cruds for the vitals POST, user/document.cruds for the
 # Week 2 multipart document upload, user/DocumentReference.read for
 # the FHIR search that resolves the uploaded doc's FHIR resource id,
-# and user/appointment.cruds for the calendar / scheduling endpoint.
+# user/appointment.cruds for the calendar / scheduling endpoint, and
+# user/{allergy,medical_problem,medication}.cruds for the Phase-3
+# extracted-fact persistence path (write_allergy / write_medical_problem
+# / write_medication). The scopes registered on the seed client must
+# be a superset of these — the OAuth password grant only includes
+# scopes that are BOTH requested here AND registered on the client.
 _SCOPE = " ".join(
     [
         "openid", "fhirUser", "offline_access",
@@ -66,6 +71,8 @@ _SCOPE = " ".join(
         "user/patient.cruds", "user/encounter.cruds", "user/vital.cruds",
         "user/document.cruds", "user/DocumentReference.read",
         "user/appointment.cruds",
+        "user/allergy.cruds", "user/medical_problem.cruds",
+        "user/medication.cruds",
     ]
 )
 
