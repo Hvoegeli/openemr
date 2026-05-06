@@ -1107,6 +1107,87 @@ async def api_upload(
     }
 
 
+@app.get("/api/document/{document_id}/pages")
+async def api_document_pages(
+    document_id: str,
+    request: Request,
+    username: str = Depends(current_user),
+) -> dict:
+    """Return rendered PNG pages of a `DocumentReference` for the
+    Supporting-Documents inline viewer (PRD W2 §5 — visual PDF
+    bounding-box overlay).
+
+    The adapter performs the panel ACL check using the document's
+    `subject.reference`; we still resolve the panel here because the
+    adapter takes a `panel` arg (same shape it already uses for the
+    agent's `get_document_content` tool path). 404 on access denial,
+    matching the patient-id-keyed endpoints — no panel-leakage via
+    response codes.
+    """
+    panel = await access_control.get_panel_for_user(
+        request.app.state.fhir, username, request.app.state.assignments,
+    )
+    try:
+        result = await adapter.get_document_pages(
+            request.app.state.fhir,
+            document_id=document_id,
+            panel=panel,
+        )
+    except access_control.PatientAccessDenied as e:
+        request.app.state.auth_store.log_event(
+            event_type="patient_access_denied",
+            username=username,
+            sid=request.session.get("sid"),
+            user_agent=request.headers.get("user-agent"),
+            ip=request.client.host if request.client else None,
+            detail=f"document={document_id} patient={e.patient_id}",
+        )
+        raise HTTPException(status_code=404, detail="Document not found") from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    return result["data"]
+
+
+@app.get("/api/document/{document_id}/bbox-manifest")
+async def api_document_bbox_manifest(
+    document_id: str,
+    request: Request,
+    username: str = Depends(current_user),
+) -> dict:
+    """Return every extracted fact persisted from a `DocumentReference`
+    along with its bbox metadata, so the Supporting-Documents viewer can
+    overlay highlight rectangles on the rendered pages.
+
+    Pairs with `/api/document/{id}/pages`; the frontend fetches both,
+    renders the pages, then absolute-positions one overlay per fact at
+    its `bbox` coordinates. Facts whose `bbox` is null are still returned
+    so the frontend can list them as "extracted but no source rectangle"
+    instead of silently hiding them.
+    """
+    panel = await access_control.get_panel_for_user(
+        request.app.state.fhir, username, request.app.state.assignments,
+    )
+    try:
+        result = await adapter.get_document_bbox_manifest(
+            request.app.state.fhir,
+            document_id=document_id,
+            panel=panel,
+        )
+    except access_control.PatientAccessDenied as e:
+        request.app.state.auth_store.log_event(
+            event_type="patient_access_denied",
+            username=username,
+            sid=request.session.get("sid"),
+            user_agent=request.headers.get("user-agent"),
+            ip=request.client.host if request.client else None,
+            detail=f"document={document_id} patient={e.patient_id}",
+        )
+        raise HTTPException(status_code=404, detail="Document not found") from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    return result["data"]
+
+
 @app.get("/upload", response_model=None)
 async def upload_page(request: Request) -> FileResponse | RedirectResponse:
     """Minimal HTML form for uploading a clinical document.

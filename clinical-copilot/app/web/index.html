@@ -466,6 +466,60 @@
       display: flex; justify-content: space-between; align-items: baseline;
       gap: 1rem;
     }
+    /* Bbox overlay v0 (PRD W2 §5) — rendered PNG pages with absolute-
+       positioned highlight rectangles per extracted fact. The page wrapper
+       is `position: relative` so the overlay's percentage coords resolve
+       against the page image, not the body. Misalignment in v0 is
+       acceptable; v1 nails alignment via PDF.js page coords. */
+    #doc-viewer-body .doc-page {
+      position: relative;
+      margin: 0.75rem 0 1.25rem;
+      border: 1px solid var(--border);
+      background: #fff;
+      max-width: 100%;
+    }
+    #doc-viewer-body .doc-page img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    #doc-viewer-body .doc-page .bbox-overlay {
+      position: absolute;
+      background: rgba(255, 230, 0, 0.28);
+      border: 2px solid rgba(214, 160, 0, 0.85);
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6) inset;
+      border-radius: 2px;
+      pointer-events: auto;
+      cursor: pointer;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    #doc-viewer-body .doc-page .bbox-overlay:hover,
+    #doc-viewer-body .doc-page .bbox-overlay.bbox-active {
+      background: rgba(255, 200, 0, 0.45);
+      border-color: rgba(190, 130, 0, 1);
+    }
+    #doc-viewer-body .doc-page .bbox-label {
+      position: absolute;
+      top: -1.2rem;
+      left: 0;
+      font-size: 0.72rem;
+      background: rgba(214, 160, 0, 0.95);
+      color: #fff;
+      padding: 1px 6px;
+      border-radius: 3px;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    #doc-viewer-body .doc-page-stub {
+      padding: 1rem;
+      color: var(--muted);
+      font-style: italic;
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      margin: 0.75rem 0;
+      text-align: center;
+    }
+
     #doc-viewer-body .att-row a { color: var(--accent); text-decoration: none; }
     #doc-viewer-body .att-row a:hover { text-decoration: underline; }
     #doc-viewer-foot {
@@ -1964,10 +2018,108 @@
 
       document.body.classList.add('doc-open');
       docViewerBody.scrollTop = 0;
+
+      // Bbox overlay v0 (PRD W2 §5): if this is a DocumentReference,
+      // fetch the rendered pages + bbox manifest in parallel and append
+      // them inline. Fire-and-forget — the metadata is already on screen
+      // when the user opens, and the source pages slot in once ready.
+      if (item.kind === 'document' && item.ref && item.ref.startsWith('DocumentReference/')) {
+        const docId = item.ref.split('/')[1];
+        // Track the doc currently in the viewer so a late-arriving fetch
+        // for an already-closed-or-replaced doc can no-op instead of
+        // racing pages into the wrong view.
+        window.__docViewerActiveId = docId;
+        loadDocumentSourcePages(docId, docViewerBody);
+      }
+    }
+
+    async function loadDocumentSourcePages(docId, container) {
+      const stub = document.createElement('div');
+      stub.className = 'doc-page-stub';
+      stub.textContent = 'Loading source pages…';
+      container.appendChild(stub);
+
+      try {
+        const [pagesRes, manifestRes] = await Promise.all([
+          fetch('/api/document/' + encodeURIComponent(docId) + '/pages')
+            .then(r => r.ok ? r.json() : null),
+          fetch('/api/document/' + encodeURIComponent(docId) + '/bbox-manifest')
+            .then(r => r.ok ? r.json() : {facts: []}),
+        ]);
+        // Drop the result if the user moved on to another document.
+        if (window.__docViewerActiveId !== docId) return;
+        if (!pagesRes || !Array.isArray(pagesRes.pages) || pagesRes.pages.length === 0) {
+          stub.textContent = 'No rendered source pages available for this document.';
+          return;
+        }
+        // Bucket facts by page number for O(1) lookup per page render.
+        const byPage = new Map();
+        for (const f of (manifestRes.facts || [])) {
+          const b = f && f.bbox;
+          if (!b || !b.page) continue;
+          if (!byPage.has(b.page)) byPage.set(b.page, []);
+          byPage.get(b.page).push(f);
+        }
+
+        // Swap the stub for the heading + page elements.
+        stub.remove();
+        const heading = document.createElement('h3');
+        heading.textContent = 'Source pages';
+        container.appendChild(heading);
+        if (manifestRes && Array.isArray(manifestRes.facts) && manifestRes.facts.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'doc-page-stub';
+          empty.style.marginTop = '-0.25rem';
+          empty.textContent = 'No extracted facts persisted from this document yet — pages shown without highlights.';
+          container.appendChild(empty);
+        }
+
+        for (const page of pagesRes.pages) {
+          const pageDiv = document.createElement('div');
+          pageDiv.className = 'doc-page';
+          pageDiv.dataset.page = String(page.page);
+
+          const img = document.createElement('img');
+          img.src = 'data:image/png;base64,' + page.png_b64;
+          img.alt = 'Page ' + page.page;
+          pageDiv.appendChild(img);
+
+          const wPx = page.width_px || 0;
+          const hPx = page.height_px || 0;
+          const facts = byPage.get(page.page) || [];
+          for (const f of facts) {
+            const b = f.bbox;
+            if (!b || !wPx || !hPx) continue;
+            // bbox is the value the VLM returned at extraction time. The
+            // schema docstring claims PDF-point space, but Claude saw a
+            // 150-DPI PNG; assume PNG-pixel space and let the page's
+            // returned width_px / height_px normalize. v1 will resolve
+            // any residual misalignment via PDF.js's page coords.
+            const overlay = document.createElement('div');
+            overlay.className = 'bbox-overlay';
+            overlay.dataset.resourceRef = f.resource_ref || '';
+            overlay.title = f.label || f.resource_type || '';
+            overlay.style.left   = ((b.x / wPx) * 100).toFixed(3) + '%';
+            overlay.style.top    = ((b.y / hPx) * 100).toFixed(3) + '%';
+            overlay.style.width  = ((b.width / wPx) * 100).toFixed(3) + '%';
+            overlay.style.height = ((b.height / hPx) * 100).toFixed(3) + '%';
+            const label = document.createElement('span');
+            label.className = 'bbox-label';
+            label.textContent = (f.label || f.resource_type || '').slice(0, 60);
+            overlay.appendChild(label);
+            pageDiv.appendChild(overlay);
+          }
+          container.appendChild(pageDiv);
+        }
+      } catch (err) {
+        if (stub.parentNode) stub.textContent = 'Failed to load source pages.';
+        console.error('loadDocumentSourcePages failed', err);
+      }
     }
 
     function closeDoc() {
       document.body.classList.remove('doc-open');
+      window.__docViewerActiveId = null;
     }
 
     /* ── Chat header status pills ────────────────────────────────── */

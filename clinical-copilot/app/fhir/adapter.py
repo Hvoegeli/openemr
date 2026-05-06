@@ -7,6 +7,7 @@ tool call in the same conversation.
 """
 
 import base64
+import io
 import re
 from datetime import datetime, timedelta, timezone
 from typing import TypedDict
@@ -561,6 +562,222 @@ def _b64_png(png_bytes: bytes) -> str:
     Standalone helper so the graph layer can re-build image blocks from
     the SourcedResult without re-rendering pages."""
     return base64.standard_b64encode(png_bytes).decode("ascii")
+
+
+# Bbox source-tag persisted by `OpenEMRWriter._source_back_ref` into a
+# resource's `comments` / FHIR `note.text` field. Shape on disk:
+#   `[copilot-source: DocumentReference/<id>; bbox={"page":1,"x":..,"y":..,"width":..,"height":..}]`
+# The bbox JSON is optional. The pattern tolerates surrounding whitespace
+# and the optional `bbox=` segment so rows persisted before bbox support
+# (Phase-3 backfill) still parse out their source DocumentReference id.
+_SOURCE_TAG_RE = re.compile(
+    r"\[copilot-source:\s*(?P<ref>[^\];]+)(?:\s*;\s*bbox=(?P<bbox>\{[^}]*\}))?\s*\]",
+)
+
+
+def _parse_source_tag(text: str | None, document_id: str) -> dict | None:
+    """Pull `(ref, bbox_dict)` out of a comments/note string when it
+    references the given DocumentReference. Returns None when the text
+    is empty, when no source tag is present, or when the tag points at
+    a DIFFERENT DocumentReference. Malformed bbox JSON yields None for
+    the bbox field but the function still returns a dict — the caller
+    can decide whether a citation without coords is worth keeping in
+    the manifest (it isn't, today, but the ref is still useful audit).
+    """
+    if not text:
+        return None
+    for m in _SOURCE_TAG_RE.finditer(text):
+        ref = m.group("ref").strip()
+        target = ref if "/" in ref else f"DocumentReference/{ref}"
+        wanted = (
+            document_id if "/" in document_id else f"DocumentReference/{document_id}"
+        )
+        if target != wanted:
+            continue
+        bbox_dict: dict | None = None
+        bbox_raw = m.group("bbox")
+        if bbox_raw:
+            import json as _json  # noqa: PLC0415 — module-private use
+            try:
+                parsed = _json.loads(bbox_raw)
+                if isinstance(parsed, dict):
+                    bbox_dict = parsed
+            except (ValueError, TypeError):
+                bbox_dict = None
+        return {"ref": target, "bbox": bbox_dict}
+    return None
+
+
+def _collect_note_text(resource: dict) -> str:
+    """Concatenate every `note.text` (FHIR Annotation) on a resource into
+    a single string. The writer stores its source tag on `note[0].text`
+    today, but a defensive concatenation tolerates older or third-party
+    rows that may have spread tags across multiple annotations."""
+    notes = resource.get("note") or []
+    parts: list[str] = []
+    for n in notes:
+        if isinstance(n, dict):
+            t = n.get("text")
+            if isinstance(t, str) and t:
+                parts.append(t)
+    return "\n".join(parts)
+
+
+async def get_document_bbox_manifest(
+    client: FhirClient,
+    *,
+    document_id: str,
+    panel: frozenset[str] | None = None,
+) -> SourcedResult:
+    """Walk every resource derived from `DocumentReference/<document_id>`
+    (allergies, medications, problems, lab observations) and pull the
+    bbox metadata each one carries via the writer's `[copilot-source:
+    ...; bbox=...]` comment tag.
+
+    Used by the Supporting-Documents PDF-overlay UI (PRD W2 §5 — visual
+    PDF bounding-box overlay). The agent itself does not call this; the
+    return shape is keyed for the frontend, not for inline LLM ingestion.
+
+    ACL gates on the DocumentReference's `subject.reference` Patient: a
+    user whose panel doesn't include that patient gets `PatientAccessDenied`
+    even if they somehow guessed a real document id.
+    """
+    from app.access_control import PatientAccessDenied  # noqa: PLC0415
+
+    doc = await client.get(f"DocumentReference/{document_id}")
+
+    subject_ref = (doc.get("subject") or {}).get("reference") or ""
+    patient_id: str | None = None
+    if subject_ref.startswith("Patient/"):
+        patient_id = subject_ref.removeprefix("Patient/")
+    if panel is not None and (patient_id is None or patient_id not in panel):
+        raise PatientAccessDenied(patient_id or "")
+
+    facts: list[dict] = []
+    sources: list[str] = [_ref(doc)]
+
+    if patient_id is None:
+        # Document with no Patient subject — no derived facts to walk.
+        return {
+            "data": {
+                "document_id": document_id,
+                "patient_id": None,
+                "facts": facts,
+            },
+            "sources": sources,
+        }
+
+    # Three resource lists own the writer's intake-form derivatives.
+    # Lab-encounter results live under Observation -> Encounter and are
+    # reached via the SOAP note's manifest; v0 covers the intake-form
+    # path (allergies / medications / medical problems) which is the
+    # primary surface for the demo. Lab bbox manifests come in v1.
+    for resource_type, label_fn in (
+        ("AllergyIntolerance", lambda r: _coded_display(r.get("code") or {})),
+        ("MedicationRequest", lambda r: _coded_display(r.get("medicationCodeableConcept") or {})),
+        ("Condition", lambda r: _coded_display(r.get("code") or {})),
+    ):
+        try:
+            rows = await client.search(resource_type, {"patient": patient_id, "_count": 200})
+        except Exception:  # noqa: BLE001 — partial manifest is better than 500
+            continue
+        for row in rows:
+            tag = _parse_source_tag(_collect_note_text(row), document_id)
+            if tag is None:
+                continue
+            row_id = row.get("id") or ""
+            ref = f"{resource_type}/{row_id}" if row_id else None
+            label = (label_fn(row) or "").strip() or resource_type
+            facts.append({
+                "resource_type": resource_type,
+                "resource_id": row_id,
+                "resource_ref": ref,
+                "label": label,
+                "bbox": tag.get("bbox"),
+            })
+            if ref:
+                sources.append(ref)
+
+    return {
+        "data": {
+            "document_id": document_id,
+            "patient_id": patient_id,
+            "facts": facts,
+        },
+        "sources": sources,
+    }
+
+
+async def get_document_pages(
+    client: FhirClient,
+    *,
+    document_id: str,
+    panel: frozenset[str] | None = None,
+    max_pages: int = 30,
+) -> SourcedResult:
+    """Render a DocumentReference's attachments to PNG pages and return
+    them with per-page pixel dimensions, for the Supporting-Documents
+    inline PDF viewer.
+
+    Companion to `get_document_content` (which is the agent-facing tool
+    and bounds at 10 pages so token costs stay sane). The viewer can
+    afford a higher cap; we still cap at 30 to keep the JSON response
+    sub-megabyte for any pathological scan.
+    """
+    from app.access_control import PatientAccessDenied  # noqa: PLC0415
+    from app.extraction.render import render_to_png_pages
+    from PIL import Image  # noqa: PLC0415
+
+    doc = await client.get(f"DocumentReference/{document_id}")
+
+    subject_ref = (doc.get("subject") or {}).get("reference") or ""
+    patient_id: str | None = None
+    if subject_ref.startswith("Patient/"):
+        patient_id = subject_ref.removeprefix("Patient/")
+    if panel is not None and (patient_id is None or patient_id not in panel):
+        raise PatientAccessDenied(patient_id or "")
+
+    pages: list[dict] = []
+    truncated = False
+
+    for content_entry in doc.get("content") or []:
+        att = content_entry.get("attachment") or {}
+        content_type = att.get("contentType") or ""
+        file_bytes = await _fetch_attachment_bytes(client, att)
+        if file_bytes is None:
+            continue
+        try:
+            pngs = render_to_png_pages(file_bytes, content_type)
+        except ValueError:
+            continue
+        for png in pngs:
+            if len(pages) >= max_pages:
+                truncated = True
+                break
+            try:
+                with Image.open(io.BytesIO(png)) as im:
+                    w, h = im.size
+            except Exception:  # noqa: BLE001
+                w, h = 0, 0
+            pages.append({
+                "page": len(pages) + 1,
+                "png_b64": _b64_png(png),
+                "width_px": w,
+                "height_px": h,
+            })
+        if truncated:
+            break
+
+    return {
+        "data": {
+            "document_id": document_id,
+            "patient_id": patient_id,
+            "page_count": len(pages),
+            "pages_truncated": truncated,
+            "pages": pages,
+        },
+        "sources": [_ref(doc)],
+    }
 
 
 async def get_med_changes_24h(
