@@ -511,9 +511,6 @@ def build_graph(
         log.warning("route_after_tools: unexpected worker_route=%r; falling through to answerer", route)
         return "answerer"
 
-    def route_after_answer(state: AgentState) -> Literal["validate"]:
-        return "validate"
-
     def route_after_validate(state: AgentState) -> Literal["answerer", "__end__"]:
         last = state["messages"][-1]
         if (
