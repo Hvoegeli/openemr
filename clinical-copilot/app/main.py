@@ -172,10 +172,13 @@ async def _prewarm_dashboard(app: FastAPI) -> None:
     via the per-key lock. No duplicate work, no thundering herd.
 
     OpenEMR's FHIR layer serializes responses on the server side (PHP
-    session locking + MariaDB), so client-side parallelism saves only a
-    little. The real win is caching: the user pays this latency once at
-    server boot, never on a click.
+    session locking + MariaDB), so per-patient parallelism only buys
+    us a little. The real win is **batching**: one roster-wide search
+    per resource type, bucketed by patient client-side. See
+    `app.fhir.prewarm.warm_panel_cards_and_docs`.
     """
+    from app.fhir.prewarm import warm_panel_cards_and_docs  # lazy: avoid cycle
+
     cache: TTLCache = app.state.cache
     fhir: FhirClient = app.state.fhir
     t0 = time.time()
@@ -190,33 +193,41 @@ async def _prewarm_dashboard(app: FastAPI) -> None:
             r = await get_calendar_today(fhir, panel=None)
             return r["data"]
         cal_data = await cache.get_or_compute("calendar:today:all", _calendar)
+        # Pull the raw Patient resources too — the calendar fetch produced
+        # them but only kept the trimmed dashboard shape. The batched
+        # prewarm wants the full FHIR Patient resource so it can format
+        # the patient-card payload (which needs name / DOB / gender).
+        try:
+            patients = await _safe_search_patients(fhir, panel=None)
+        except Exception as e:  # noqa: BLE001
+            log.warning("prewarm: Patient search failed: %s", e)
+            patients = []
         log.info(
             "prewarm: calendar ready in %.2fs (%d patients)",
-            time.time() - t0, len(cal_data.get("patients", [])),
+            time.time() - t0, len(patients),
         )
 
-        async def _warm_patient(pid: str) -> None:
-            async def _card() -> dict:
-                r = await adapter.get_patient_card(fhir, patient_id=pid)
-                return r["data"]
-
-            async def _docs() -> dict:
-                r = await get_supporting_documents(fhir, patient_id=pid)
-                return r["data"]
-
-            await asyncio.gather(
-                cache.get_or_compute(f"card:{pid}", _card),
-                cache.get_or_compute(f"docs:{pid}", _docs),
-            )
-
-        await asyncio.gather(*[
-            _warm_patient(p["patient_id"])
-            for p in cal_data.get("patients", [])
-            if p.get("patient_id")
-        ])
-        log.info("prewarm: dashboard fully warm in %.2fs", time.time() - t0)
+        warmed = await warm_panel_cards_and_docs(
+            fhir, cache, patients,
+        )
+        log.info(
+            "prewarm: dashboard fully warm in %.2fs (cards=%d)",
+            time.time() - t0, warmed,
+        )
     except Exception as e:  # noqa: BLE001
         log.warning("prewarm failed (non-fatal): %s", e)
+
+
+async def _safe_search_patients(fhir: FhirClient, *, panel: frozenset[str] | None):
+    """Wrapper around the Patient search the calendar already does, but
+    returning the full resource list (the calendar fetcher trims to
+    dashboard shape). Same `_count` as `get_calendar_today` so the two
+    paths see the same roster.
+    """
+    rows = await fhir.search("Patient", {"_count": 50})
+    if panel is None:
+        return rows
+    return [p for p in rows if p.get("id") in panel]
 
 
 MODEL_NAME = "claude-sonnet-4-6"

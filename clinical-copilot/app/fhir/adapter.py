@@ -136,6 +136,10 @@ async def get_patient_card(client: FhirClient, *, patient_id: str) -> SourcedRes
     All six FHIR queries fan out in parallel via `asyncio.gather` — sequential
     awaits added ~3s on a local stack and ~5s through cloudflared. They are
     independent (no result feeds the next), so parallelism is safe.
+
+    Pairs with `format_patient_card_data` — that function is the formatter
+    half (no I/O), used by `app.fhir.prewarm` to build cards for every
+    panel patient from a single set of roster-wide batched fetches.
     """
     import asyncio
 
@@ -157,7 +161,34 @@ async def get_patient_card(client: FhirClient, *, patient_id: str) -> SourcedRes
             {"patient": patient_id, "category": "vital-signs", "_count": 50},
         ),
     )
+    return format_patient_card_data(
+        patient=patient,
+        patient_id=patient_id,
+        encounters_all=encounters_all,
+        allergies=allergies,
+        problems_all=problems_all,
+        meds=meds,
+        vitals=vitals,
+    )
 
+
+def format_patient_card_data(
+    *,
+    patient: dict,
+    patient_id: str,
+    encounters_all: list[dict],
+    allergies: list[dict],
+    problems_all: list[dict],
+    meds: list[dict],
+    vitals: list[dict],
+) -> SourcedResult:
+    """Pure formatter for the patient-card payload — no I/O.
+
+    Factored out of `get_patient_card` so `app.fhir.prewarm` can build
+    every panel patient's card from a single roster-wide batched fetch
+    (collapses the prewarm's previous 6 × 21 = 126 FHIR calls into ~5
+    batched calls + client-side bucketing).
+    """
     encounters = [
         e for e in encounters_all
         if e.get("status") in {"in-progress", "arrived", "triaged", "finished"}

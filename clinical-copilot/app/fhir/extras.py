@@ -225,12 +225,29 @@ async def get_supporting_documents(
     Combines `Encounter` history (most recent first) with
     `DocumentReference` so the doctor can pull up prior context. Returns
     a flat, time-sorted list — caller groups in the UI.
+
+    Pairs with `format_supporting_documents_data` — that function is the
+    formatter half (no I/O), used by `app.fhir.prewarm` to build the
+    docs slice for every panel patient from a single roster-wide
+    batched fetch.
     """
     encounters, docs = await asyncio.gather(
         _safe_search(client, "Encounter", {"patient": patient_id, "_count": 30}),
         _safe_search(client, "DocumentReference", {"patient": patient_id, "_count": 30}),
     )
+    return format_supporting_documents_data(encounters=encounters, docs=docs)
 
+
+def format_supporting_documents_data(
+    *,
+    encounters: list[dict],
+    docs: list[dict],
+) -> SourcedResult:
+    """Pure formatter for the supporting-docs payload — no I/O.
+
+    Factored out of `get_supporting_documents` so the prewarm path can
+    pass pre-bucketed roster-wide encounter / document lists.
+    """
     items: list[dict] = []
     sources: list[str] = []
 
