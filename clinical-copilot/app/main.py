@@ -59,6 +59,8 @@ from app import access_control  # noqa: E402
 from app.auth import current_session, current_user, is_admin, require_admin, verify_openemr_credentials  # noqa: E402
 from app.assignments_db import AssignmentStore  # noqa: E402
 from app.auth_db import AuthStore  # noqa: E402
+import hashlib  # noqa: E402
+
 from app.cache import TTLCache  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.fhir import adapter  # noqa: E402
@@ -1016,6 +1018,7 @@ async def api_upload(
     file: UploadFile,
     doc_type: str = Form(...),
     patient_uuid: str = Form(...),
+    acknowledge_existing: bool = Form(False),
     username: str = Depends(current_user),
 ) -> dict:
     """Multipart upload endpoint: persist a clinical document to OpenEMR
@@ -1025,14 +1028,25 @@ async def api_upload(
       file: the upload (PDF, PNG, or JPEG)
       doc_type: one of the DOC_TYPE_LABELS keys (lab_pdf, intake_form)
       patient_uuid: a FHIR Patient UUID the user has write access to
+      acknowledge_existing: when True, accept that the file is already
+        on the patient's chart and return its existing reference. The
+        upload UI sets this on the second submission after the user
+        clicks "Use existing" on the duplicate prompt. Default False
+        means a SHA-256 dedup hit returns 409 instead of silently
+        de-duplicating, so the user sees the prompt.
 
     Returns:
-      {reference_id, sha256, created, extracted}
+      {reference_id, sha256, created, extracted, persistence}
 
     Errors:
       400 — empty file, missing fields, unsupported doc_type
       404 — patient not in user's panel (prefer 404 over 403 to avoid
             leaking that the patient exists)
+      409 — same file bytes are already on this patient's chart and
+            `acknowledge_existing=False`. Body shape:
+            {"detail": {"code": "duplicate_file", "message": ...,
+                        "existing": {"ref","title","date","category"},
+                        "sha256": "..."}}
       502 — OpenEMR write failure or extractor failure
     """
     await _check_patient_access(request, username, patient_uuid)
@@ -1047,6 +1061,57 @@ async def api_upload(
         raise HTTPException(status_code=400, detail="empty file upload")
     mime_type = file.content_type or "application/octet-stream"
     filename = file.filename or "upload.bin"
+
+    # Dedup Layer 1 — SHA-256 prompt. The writer will idempotently
+    # return the existing reference if we proceed; what's missing today
+    # is the user-visible "you already uploaded this" surface. Run the
+    # SHA lookup before attach_and_extract so a confirmed-duplicate
+    # upload doesn't re-spend Anthropic credits on a re-extraction
+    # whose facts are already persisted.
+    if not acknowledge_existing:
+        sha_hex = hashlib.sha256(file_bytes).hexdigest()
+        try:
+            existing_ref = await app.state.openemr_writer.find_document_reference_by_sha(
+                patient_uuid, sha_hex,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("dedup precheck failed; proceeding without it: %s", e)
+            existing_ref = None
+        if existing_ref:
+            existing_meta: dict = {"ref": existing_ref}
+            # Best-effort: pull title + date for the prompt body. A 502
+            # here would be silly — fall back to the bare ref so the UI
+            # can still ask the user to confirm.
+            try:
+                doc_id_only = existing_ref.split("/", 1)[-1]
+                existing_doc = await app.state.fhir.get(
+                    f"DocumentReference/{doc_id_only}",
+                )
+                attach = (existing_doc.get("content") or [{}])[0].get("attachment") or {}
+                existing_meta.update({
+                    "title": attach.get("title") or "",
+                    "filename": attach.get("title") or "",
+                    "date": existing_doc.get("date"),
+                    "status": existing_doc.get("status"),
+                })
+            except Exception as e:  # noqa: BLE001
+                log.info("dedup metadata fetch failed: %s", e)
+            log.info(
+                "upload dedup-prompt: user=%s patient=%s sha256=%s -> %s",
+                username, patient_uuid, sha_hex[:12], existing_ref,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "duplicate_file",
+                    "message": (
+                        "This file is already on the patient's chart. "
+                        "Use the existing copy or cancel this upload."
+                    ),
+                    "existing": existing_meta,
+                    "sha256": sha_hex,
+                },
+            )
 
     try:
         result = await attach_and_extract(

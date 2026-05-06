@@ -111,6 +111,65 @@
     color: var(--muted);
   }
   .meta strong { color: var(--ink); font-weight: 600; }
+
+  /* Dedup-prompt modal — appears on HTTP 409 from /api/upload when the
+     SHA-256 of the uploaded bytes matches a DocumentReference already on
+     the patient's chart. Two actions: use existing (re-submit with
+     acknowledge_existing=true) or cancel. */
+  .dedup-overlay {
+    position: fixed; inset: 0;
+    background: rgba(15, 23, 42, 0.55);
+    display: none;
+    align-items: center; justify-content: center;
+    z-index: 1000;
+  }
+  .dedup-overlay.open { display: flex; }
+  .dedup-modal {
+    background: var(--panel, #fff);
+    border-radius: 10px;
+    padding: 24px 28px;
+    max-width: 520px;
+    width: calc(100% - 2rem);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+  }
+  .dedup-modal h2 {
+    margin: 0 0 8px;
+    font-size: 18px;
+    color: var(--ink, #0f172a);
+  }
+  .dedup-modal p {
+    margin: 0 0 12px;
+    color: #475569;
+    line-height: 1.5;
+    font-size: 14px;
+  }
+  .dedup-modal .existing-row {
+    background: #f1f5f9;
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 12px 0 16px;
+    font-size: 13px;
+  }
+  .dedup-modal .existing-row .k {
+    color: #64748b; margin-right: 6px;
+  }
+  .dedup-modal .actions {
+    display: flex; gap: 10px; justify-content: flex-end;
+  }
+  .dedup-modal button {
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border, #cbd5e1);
+    background: #fff;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .dedup-modal button.primary {
+    background: var(--accent, #2563eb);
+    color: #fff;
+    border-color: var(--accent, #2563eb);
+  }
+  .dedup-modal button:hover { filter: brightness(0.95); }
 </style>
 </head>
 <body>
@@ -147,6 +206,22 @@
 <div id="result-card" class="card" style="display:none">
   <div class="meta" id="result-meta"></div>
   <pre id="result-body"></pre>
+</div>
+
+<div id="dedup-overlay" class="dedup-overlay" role="dialog" aria-modal="true" aria-labelledby="dedup-title">
+  <div class="dedup-modal">
+    <h2 id="dedup-title">This file is already on the chart</h2>
+    <p id="dedup-msg">The bytes you're uploading match a DocumentReference already attached to this patient.</p>
+    <div class="existing-row" id="dedup-existing">
+      <div><span class="k">Filename:</span><span id="dedup-filename">—</span></div>
+      <div><span class="k">Date:</span><span id="dedup-date">—</span></div>
+      <div><span class="k">Reference:</span><span id="dedup-ref" style="font-family:monospace">—</span></div>
+    </div>
+    <div class="actions">
+      <button type="button" id="dedup-cancel">Cancel upload</button>
+      <button type="button" id="dedup-use-existing" class="primary">Use existing copy</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -206,10 +281,61 @@
     setStatus('Uploading + extracting (this can take ~10–30s on first run)…', '');
     $resultCard.style.display = 'none';
 
+    await postUpload({acknowledgeExisting: false});
+  });
+
+  // Dedup-prompt modal wiring. The first POST to /api/upload sets
+  // acknowledgeExisting=false, so a SHA-256 collision against an existing
+  // DocumentReference comes back as HTTP 409. Open the modal, let the
+  // user pick "Use existing" (re-POST with acknowledge_existing=true,
+  // which short-circuits to the writer's idempotency path) or "Cancel"
+  // (close the modal, reset the submit state, do nothing).
+  const $dedupOverlay = document.getElementById('dedup-overlay');
+  const $dedupFilename = document.getElementById('dedup-filename');
+  const $dedupDate = document.getElementById('dedup-date');
+  const $dedupRef = document.getElementById('dedup-ref');
+  const $dedupCancel = document.getElementById('dedup-cancel');
+  const $dedupUseExisting = document.getElementById('dedup-use-existing');
+
+  function openDedupModal(detail) {
+    const ex = (detail && detail.existing) || {};
+    $dedupFilename.textContent = ex.filename || ex.title || '(unknown)';
+    $dedupDate.textContent = ex.date
+      ? new Date(ex.date).toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'short'})
+      : '—';
+    $dedupRef.textContent = ex.ref || '—';
+    $dedupOverlay.classList.add('open');
+  }
+  function closeDedupModal() {
+    $dedupOverlay.classList.remove('open');
+  }
+  $dedupCancel.addEventListener('click', () => {
+    closeDedupModal();
+    setStatus('Upload cancelled — duplicate file.', '');
+    $submit.disabled = false;
+  });
+  $dedupUseExisting.addEventListener('click', async () => {
+    closeDedupModal();
+    setStatus('Using existing copy on the chart…', '');
+    await postUpload({acknowledgeExisting: true});
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $dedupOverlay.classList.contains('open')) {
+      closeDedupModal();
+      $submit.disabled = false;
+      setStatus('Upload cancelled — duplicate file.', '');
+    }
+  });
+
+  async function postUpload({acknowledgeExisting}) {
+    const file = $file.files[0];
+    if (!file) { setStatus('Pick a file first.', 'err'); $submit.disabled = false; return; }
+
     const fd = new FormData();
     fd.append('file', file);
     fd.append('doc_type', $docType.value);
     fd.append('patient_uuid', $patient.value);
+    if (acknowledgeExisting) fd.append('acknowledge_existing', 'true');
 
     let resp;
     try {
@@ -224,8 +350,20 @@
     try { body = await resp.json(); }
     catch { body = { detail: 'non-JSON response' }; }
 
+    if (resp.status === 409) {
+      const detail = (body && typeof body.detail === 'object') ? body.detail : null;
+      if (detail && detail.code === 'duplicate_file') {
+        openDedupModal(detail);
+        return;
+      }
+      // Fallback for any other 409 shape — treat as plain error.
+    }
+
     if (!resp.ok) {
-      setStatus('Upload failed (HTTP ' + resp.status + '): ' + (body.detail || ''), 'err');
+      const msg = (body && body.detail && typeof body.detail === 'string')
+        ? body.detail
+        : (body && body.detail && body.detail.message) || JSON.stringify(body.detail || body);
+      setStatus('Upload failed (HTTP ' + resp.status + '): ' + msg, 'err');
       $submit.disabled = false;
       return;
     }
@@ -251,7 +389,7 @@
     $resultBody.textContent = JSON.stringify(body.extracted, null, 2);
     $resultCard.style.display = 'block';
     $submit.disabled = false;
-  });
+  }
 })();
 </script>
 </body>
