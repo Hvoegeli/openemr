@@ -132,6 +132,29 @@ async def get_notes_24h(patient_id: str, hours: int = 24) -> str:
 
 
 @tool
+async def get_document_content(document_id: str) -> str:
+    """Fetch the actual contents (rendered pages) of a `DocumentReference`
+    so you can read what the document says — not just its metadata.
+
+    Use this AFTER `get_notes_24h` (or any tool that surfaces a document
+    id) when the doctor asks "what does the doc say?", "summarize the
+    intake form", "any new info in that PDF?". `get_notes_24h` only
+    returns metadata; this tool returns the rendered pages so you can
+    actually read them.
+
+    Returns JSON metadata (title, type, date, page_count, attachments) AND
+    the rendered page images themselves as part of the tool result, so you
+    can see the document directly. Cite findings as
+    `[DocumentReference/{document_id}]`.
+
+    Args:
+        document_id: The FHIR DocumentReference id (without the
+            `DocumentReference/` prefix).
+    """
+    raise NotImplementedError("Dispatched in agent.graph.execute_tools_node")
+
+
+@tool
 async def get_med_changes_24h(patient_id: str, hours: int = 24) -> str:
     """Fetch MedicationRequests authored in the last `hours` — new orders,
     dose changes, holds.
@@ -217,6 +240,7 @@ TOOLS = [
     get_vital_trends,
     get_observations_24h,
     get_notes_24h,
+    get_document_content,
     get_med_changes_24h,
     clinical_flags,
     retrieve_guidelines,
@@ -447,6 +471,12 @@ async def dispatch(
             client,
             patient_id=args["patient_id"],
             hours=int(args.get("hours", 24)),
+        )
+    if name == "get_document_content":
+        return await adapter.get_document_content(
+            client,
+            document_id=args["document_id"],
+            panel=panel,
         )
     if name == "get_med_changes_24h":
         return await adapter.get_med_changes_24h(

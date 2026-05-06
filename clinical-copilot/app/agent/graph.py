@@ -40,6 +40,67 @@ MAX_VALIDATION_ATTEMPTS = 2
 VALIDATION_FAILURE_PREFIX = "VALIDATION FAILED:"
 
 
+def _format_tool_result(name: str, result: dict) -> str | list[dict]:
+    """Serialize a tool dispatch result into the `ToolMessage.content` shape.
+
+    Most tools return JSON-stringifiable structured data and the LLM reads
+    it as text — that's the default path. `get_document_content` is the
+    exception: its `data.pages_png_b64` carries rendered page images that
+    Claude can only "see" if they're delivered as `image` content blocks
+    in the tool result (text descriptions of "here's a base64 PNG" are
+    useless to the model). For that tool we strip `pages_png_b64` from
+    the JSON metadata, keep the metadata as a leading text block, and
+    append one image block per page so Claude reads the actual document.
+    """
+    if name == "get_document_content" and isinstance(result.get("data"), dict):
+        data = dict(result["data"])
+        pages_b64 = data.pop("pages_png_b64", None)
+        meta_payload = {"data": data, "sources": result.get("sources", [])}
+        text_block: dict = {"type": "text", "text": json.dumps(meta_payload, default=str)}
+        if not isinstance(pages_b64, list) or not pages_b64:
+            return [text_block]
+        blocks: list[dict] = [text_block]
+        for b64 in pages_b64:
+            if not isinstance(b64, str) or not b64:
+                continue
+            blocks.append({
+                "type": "image",
+                "source_type": "base64",
+                "mime_type": "image/png",
+                "data": b64,
+            })
+        return blocks
+    return json.dumps(result, default=str)
+
+
+def _content_text_for_scan(content: str | list[dict]) -> str:
+    """Extract the text portion of a tool result for the jailbreak scan.
+
+    The scanner only operates on text — image blocks can't carry prompt
+    injections through this path. For string content this is the identity;
+    for list content we concatenate every `text`-typed block.
+    """
+    if isinstance(content, str):
+        return content
+    return "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    )
+
+
+def _prepend_quarantine(
+    content: str | list[dict], marker: str,
+) -> str | list[dict]:
+    """Prepend a quarantine marker without losing image blocks. For string
+    content this is plain concatenation; for list content the marker
+    becomes a new leading text block."""
+    if isinstance(content, str):
+        return marker + content
+    return [{"type": "text", "text": marker}, *content]
+
+
 def message_text(message: BaseMessage) -> str:
     """Extract plain text from an LLM message regardless of content shape.
 
@@ -187,7 +248,7 @@ def build_graph(
                 if call["name"] == "resolve_patient" and isinstance(result["data"], dict) \
                         and result["data"].get("found"):
                     new_patient_id = result["data"].get("patient_id")
-                content = json.dumps(result, default=str)
+                content = _format_tool_result(call["name"], result)
                 log.info(
                     "tool=%s args=%s sources=%d",
                     call["name"], call["args"], sources_added,
@@ -220,10 +281,13 @@ def build_graph(
             # instructions" in a chart record), prepend a quarantine
             # header so the LLM sees the suspicious content as data, not
             # a directive. The data itself flows through unchanged so we
-            # don't accidentally hide a legitimate clinical detail.
-            jb_label = detect_jailbreak(content)
+            # don't accidentally hide a legitimate clinical detail. For
+            # multimodal results (image blocks from `get_document_content`)
+            # we only scan the text portion — image bytes can't carry text
+            # injections through this code path.
+            jb_label = detect_jailbreak(_content_text_for_scan(content))
             if jb_label is not None:
-                content = quarantine_marker(jb_label) + content
+                content = _prepend_quarantine(content, quarantine_marker(jb_label))
                 log.warning(
                     "tool-output quarantine: tool=%s pattern=%s",
                     call["name"], jb_label,

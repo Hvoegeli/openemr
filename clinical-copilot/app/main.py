@@ -1437,14 +1437,23 @@ async def admin_practitioners(_admin: str = Depends(require_admin)) -> dict:
         rows = await app.state.fhir.search("Practitioner", {"_count": 50})
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    # OpenEMR's Practitioner search runs a compound OR over `username` and
+    # `abook_type` (see src/Services/PractitionerService.php). A user matching
+    # both branches comes back twice with identical ids — dedupe here so the
+    # admin UI dropdown shows each practitioner once.
     items: list[dict] = []
+    seen_ids: set[str] = set()
     for p in rows:
+        pid = p.get("id")
+        if not pid or pid in seen_ids:
+            continue
+        seen_ids.add(pid)
         name = (p.get("name") or [{}])[0]
         given = " ".join(name.get("given") or [])
         family = name.get("family") or ""
         full = (given + " " + family).strip() or "(unknown)"
         items.append({
-            "id": p.get("id"),
+            "id": pid,
             "name": full,
             "active": p.get("active"),
             "telecom": [

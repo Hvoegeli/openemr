@@ -2499,6 +2499,7 @@
      * Route a click on `[Type/id]` to the right place:
      *   Patient            → Patient Card tab (top)
      *   Encounter          → Supporting Documents → open in viewer if found
+     *   DocumentReference  → Supporting Documents → open in viewer if found
      *   AllergyIntolerance →
      *   Condition          →  scroll Patient Card to the matching <li>
      *   MedicationRequest  →  and flash it for ~1.6s
@@ -2518,9 +2519,9 @@
         return;
       }
 
-      if (type === 'Encounter') {
+      if (type === 'Encounter' || type === 'DocumentReference') {
         switchTab('docs');
-        // Try to open the matching encounter in the doc viewer.
+        // Try to open the matching item in the doc viewer.
         const items = window.__currentDocs || [];
         const idx = items.findIndex(it => it.ref === ref);
         if (idx >= 0) {

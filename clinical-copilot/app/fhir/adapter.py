@@ -6,6 +6,7 @@ node downstream rejects any agent claim not backed by a source ID from a
 tool call in the same conversation.
 """
 
+import base64
 import re
 from datetime import datetime, timedelta, timezone
 from typing import TypedDict
@@ -402,6 +403,164 @@ async def get_notes_24h(
         },
         "sources": sources,
     }
+
+
+async def get_document_content(
+    client: FhirClient,
+    *,
+    document_id: str,
+    panel: frozenset[str] | None = None,
+    max_pages: int = 10,
+) -> SourcedResult:
+    """Fetch a `DocumentReference`'s attachment bytes and render them to PNG
+    pages so the agent can read the actual document content (PDF text,
+    scanned images) rather than just metadata.
+
+    Companion to `get_notes_24h`, which only returns metadata. The agent
+    typically discovers a document_id via `get_notes_24h` (or another
+    tool) and then calls this when the doctor asks "what does the doc
+    say?", "summarize the intake form", etc.
+
+    ACL: when `panel` is non-None, the DocumentReference's `subject.reference`
+    must point to a Patient inside the panel; otherwise raises
+    `PatientAccessDenied`. This fails CLOSED — a doc with no Patient subject
+    is also denied when a panel is enforced, since we have no basis to
+    decide it belongs to a patient inside the panel. Prevents a user from
+    fetching a doc by guessing its UUID for a patient outside their
+    assignment.
+
+    Returns `data` containing metadata + a `pages_png_b64` list (base64
+    PNG strings, one per rendered page across all attachments). The graph
+    layer special-cases this tool to surface the pages as image blocks in
+    a multimodal `ToolMessage` so Claude can actually see them.
+
+    `max_pages` caps total page count across all attachments to keep the
+    message under Anthropic's per-request limits; `data.pages_truncated`
+    is true when the cap kicked in.
+    """
+    from app.access_control import PatientAccessDenied  # lazy: avoids circular import
+    from app.extraction.render import render_to_png_pages
+
+    doc = await client.get(f"DocumentReference/{document_id}")
+
+    subject_ref = (doc.get("subject") or {}).get("reference") or ""
+    patient_id: str | None = None
+    if subject_ref.startswith("Patient/"):
+        patient_id = subject_ref.removeprefix("Patient/")
+    if panel is not None and (patient_id is None or patient_id not in panel):
+        # Fail closed: when a panel is enforced and we cannot establish
+        # a Patient subject inside it, deny. PatientAccessDenied requires
+        # a string `patient_id` field; pass an empty string when the doc
+        # has no Patient subject so the audit log shows the denial without
+        # inventing a UUID.
+        raise PatientAccessDenied(patient_id or "")
+
+    attachments_meta: list[dict] = []
+    pages_b64: list[str] = []
+    truncated = False
+
+    for idx, content_entry in enumerate(doc.get("content") or []):
+        att = content_entry.get("attachment") or {}
+        content_type = att.get("contentType") or ""
+        title = att.get("title")
+        att_meta = {
+            "index": idx,
+            "title": title,
+            "content_type": content_type,
+            "page_count": 0,
+        }
+
+        file_bytes = await _fetch_attachment_bytes(client, att)
+        if file_bytes is None:
+            att_meta["error"] = "no inline data or fetchable url"
+            attachments_meta.append(att_meta)
+            continue
+
+        try:
+            pngs = render_to_png_pages(file_bytes, content_type)
+        except ValueError as e:
+            att_meta["error"] = str(e)
+            attachments_meta.append(att_meta)
+            continue
+
+        delivered = 0
+        for png in pngs:
+            if len(pages_b64) >= max_pages:
+                truncated = True
+                break
+            pages_b64.append(_b64_png(png))
+            delivered += 1
+        att_meta["page_count"] = delivered
+        attachments_meta.append(att_meta)
+        if truncated:
+            break
+
+    return {
+        "data": {
+            "document_id": document_id,
+            "title": _coded_display(doc.get("type") or {}) or "Document",
+            "category": _coded_display((doc.get("category") or [{}])[0]),
+            "date": _clinical_iso(doc.get("date")),
+            "status": doc.get("status"),
+            "patient_id": patient_id,
+            "attachments": attachments_meta,
+            "page_count": len(pages_b64),
+            "max_pages": max_pages,
+            "pages_truncated": truncated,
+            "pages_png_b64": pages_b64,
+        },
+        "sources": [_ref(doc)],
+    }
+
+
+async def _fetch_attachment_bytes(
+    client: FhirClient, attachment: dict,
+) -> bytes | None:
+    """Materialize the raw bytes for a FHIR `Attachment` element.
+
+    Two paths per FHIR spec, in order of preference:
+      - `data` is a base64 string with the bytes inline.
+      - `url` references the bytes elsewhere — typically a relative
+        `Binary/{id}` on the same OpenEMR server, but absolute URLs are
+        also legal in FHIR.
+    Returns None if neither path yields bytes (caller surfaces this to the
+    agent as a per-attachment error rather than failing the whole call).
+    Absolute URLs that don't point at our own FHIR base are refused
+    (returned as None) — `client.get_raw` always prepends our base, and
+    we don't want to silently fan our system access token out to a
+    third-party host even if the FHIR server claims a doc lives there.
+    """
+    inline = attachment.get("data")
+    if isinstance(inline, str) and inline:
+        try:
+            return base64.b64decode(inline, validate=False)
+        except (ValueError, TypeError):
+            return None
+
+    url = attachment.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+
+    if url.startswith(("http://", "https://")):
+        # Lazy import: matches the rest of this module's pattern of avoiding
+        # an `app.config` import at module load.
+        from app.config import settings  # noqa: PLC0415
+        base = settings.openemr_fhir_base_url.rstrip("/") + "/"
+        if not url.startswith(base):
+            return None
+        path = url[len(base):]
+    else:
+        path = url
+
+    bytes_, _ctype = await client.get_raw(path)
+    return bytes_
+
+
+def _b64_png(png_bytes: bytes) -> str:
+    """Base64-encode PNG bytes for the Anthropic image-block envelope.
+    Standalone helper so the graph layer can re-build image blocks from
+    the SourcedResult without re-rendering pages."""
+    return base64.standard_b64encode(png_bytes).decode("ascii")
 
 
 async def get_med_changes_24h(

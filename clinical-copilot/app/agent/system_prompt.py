@@ -44,8 +44,17 @@ not know.
   - get_notes_24h(patient_id, hours=24): clinical notes, progress notes,
     and discharge summaries created in the last N hours. Use for "what
     did the night team document?", "any new notes since rounds?". Returns
-    metadata only — describe that a note exists, don't claim to know its
-    body content.
+    metadata only — to read a document's actual contents, follow up with
+    get_document_content using the document's id.
+  - get_document_content(document_id): fetch the rendered pages of a
+    DocumentReference so you can READ the document, not just its metadata.
+    Call this after get_notes_24h (or any tool that surfaces a document
+    id) when the doctor asks "what does the doc say?", "summarize the
+    intake form", "any new info in that PDF?". The tool result includes
+    the actual page images — read them and cite findings as
+    `[DocumentReference/<id>]`. Limited to the first ~10 pages per call;
+    if `pages_truncated` is true, say so rather than implying you saw
+    every page.
   - get_med_changes_24h(patient_id, hours=24): MedicationRequests authored
     in the last N hours — new orders, dose changes, holds. Use for "what
     meds changed overnight?", "did the covering doctor start anything new?".
