@@ -98,6 +98,7 @@ async def attach_and_extract(
     writer: OpenEMRWriter | None = None,
     anthropic_client: AsyncAnthropic | None = None,
     model: str = DEFAULT_MODEL,
+    skip_persistence: bool = False,
 ) -> AttachAndExtractResult:
     """Persist a clinical document to OpenEMR + extract its structured
     contents via Claude vision.
@@ -172,6 +173,19 @@ async def attach_and_extract(
         # `persistence` summary and surfaced in the API response. The
         # alternative (raise on first failure) would leave the source
         # document orphaned and force the user to re-upload.
+        #
+        # `skip_persistence=True` defers Phase 3 so the caller can run
+        # post-extraction checks (dedup Layer 2 — content fingerprint)
+        # before deciding whether to persist facts. The caller must
+        # either invoke `persist_extracted_facts` themselves once a
+        # decision is reached, or accept that no facts have been
+        # written (in which case the new DocumentReference is harmless
+        # but orphan; soft-hiding it is the recommended cancel path).
+        if skip_persistence:
+            return AttachAndExtractResult(
+                extracted=extracted, write_result=write_result,
+                persistence=None,
+            )
         persistence = await persist_extracted_facts(
             writer=w,
             patient_uuid=patient_uuid,

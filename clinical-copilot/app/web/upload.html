@@ -224,6 +224,32 @@
   </div>
 </div>
 
+<!-- Content-match modal: same patient, different bytes, same extracted
+     content (rescan / re-photograph). Three actions: replace older,
+     keep both, or cancel (soft-hides the new doc). -->
+<div id="cm-overlay" class="dedup-overlay" role="dialog" aria-modal="true" aria-labelledby="cm-title">
+  <div class="dedup-modal">
+    <h2 id="cm-title">A document with this same content already exists</h2>
+    <p>The agent extracted the same patient name, dates, and clinical fields it has already seen on this patient's chart. The two files differ in bytes (a rescan, re-photograph, or a re-export from another system), but the content matches.</p>
+    <div class="existing-row">
+      <div><strong>Already on chart</strong></div>
+      <div><span class="k">Filename:</span><span id="cm-prior-filename">—</span></div>
+      <div><span class="k">Date:</span><span id="cm-prior-date">—</span></div>
+      <div><span class="k">Reference:</span><span id="cm-prior-ref" style="font-family:monospace">—</span></div>
+    </div>
+    <div class="existing-row">
+      <div><strong>Just uploaded</strong></div>
+      <div><span class="k">Filename:</span><span id="cm-new-filename">—</span></div>
+      <div><span class="k">Reference:</span><span id="cm-new-ref" style="font-family:monospace">—</span></div>
+    </div>
+    <div class="actions">
+      <button type="button" id="cm-cancel">Cancel (hide new)</button>
+      <button type="button" id="cm-keep-both">Keep both</button>
+      <button type="button" id="cm-replace" class="primary">Replace older</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (async () => {
   const $patient = document.getElementById('patient');
@@ -327,6 +353,99 @@
     }
   });
 
+  // Content-match modal wiring (dedup Layer 2). The 409 detail carries
+  // both the `prior` (already-on-chart) and `new` (just-uploaded) doc
+  // refs. Each button POSTs to /api/document/{new_id}/resolve-content-match
+  // with an `action` form field. The new doc is *real* in OpenEMR by
+  // this point — `cancel` soft-hides it, `replace` soft-hides the
+  // older, `keep_both` leaves them both visible.
+  const $cmOverlay = document.getElementById('cm-overlay');
+  const $cmPriorFilename = document.getElementById('cm-prior-filename');
+  const $cmPriorDate = document.getElementById('cm-prior-date');
+  const $cmPriorRef = document.getElementById('cm-prior-ref');
+  const $cmNewFilename = document.getElementById('cm-new-filename');
+  const $cmNewRef = document.getElementById('cm-new-ref');
+  const $cmCancel = document.getElementById('cm-cancel');
+  const $cmKeepBoth = document.getElementById('cm-keep-both');
+  const $cmReplace = document.getElementById('cm-replace');
+
+  // Tracked across the modal lifecycle so the action handlers know
+  // which doc ids to POST against. Stamped by openContentMatchModal.
+  let _cmContext = null;
+
+  function openContentMatchModal(detail) {
+    const prior = (detail && detail.prior) || {};
+    const fresh = (detail && detail.new) || {};
+    $cmPriorFilename.textContent = prior.filename || prior.title || '(unknown)';
+    $cmPriorDate.textContent = prior.date
+      ? new Date(prior.date).toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'short'})
+      : '—';
+    $cmPriorRef.textContent = prior.ref || '—';
+    $cmNewFilename.textContent = fresh.filename || '(this upload)';
+    $cmNewRef.textContent = fresh.ref || '—';
+    _cmContext = {priorRef: prior.ref || '', newRef: fresh.ref || ''};
+    $cmOverlay.classList.add('open');
+  }
+  function closeContentMatchModal() {
+    $cmOverlay.classList.remove('open');
+  }
+
+  async function _cmResolve(action, statusText) {
+    if (!_cmContext) return;
+    const {priorRef, newRef} = _cmContext;
+    if (!newRef) {
+      closeContentMatchModal();
+      $submit.disabled = false;
+      return;
+    }
+    closeContentMatchModal();
+    setStatus(statusText, '');
+    const docId = newRef.split('/')[1];
+    const fd = new FormData();
+    fd.append('action', action);
+    fd.append('prior_ref', priorRef);
+    let resp;
+    try {
+      resp = await fetch('/api/document/' + encodeURIComponent(docId) + '/resolve-content-match', {
+        method: 'POST', body: fd, credentials: 'same-origin',
+      });
+    } catch (err) {
+      setStatus('Network error: ' + err, 'err');
+      $submit.disabled = false;
+      return;
+    }
+    let body;
+    try { body = await resp.json(); } catch { body = {}; }
+    if (!resp.ok) {
+      setStatus('Resolve failed (HTTP ' + resp.status + '): ' + (body.detail || ''), 'err');
+      $submit.disabled = false;
+      return;
+    }
+    setStatus('Done.', 'ok');
+    // Build a minimal result panel — same shape as the success-path
+    // panel below, but driven by the resolve-content-match response.
+    function row(label, value) {
+      const wrap = document.createElement('div');
+      wrap.appendChild(document.createTextNode(label + ': '));
+      const v = document.createElement('strong');
+      v.textContent = String(value);
+      wrap.appendChild(v);
+      return wrap;
+    }
+    $resultMeta.replaceChildren(
+      row('Action', body.action),
+      row('New', body.new_reference_id || newRef),
+      row('Prior', body.prior_reference_id || priorRef),
+    );
+    $resultBody.textContent = JSON.stringify(body.persistence || body, null, 2);
+    $resultCard.style.display = 'block';
+    $submit.disabled = false;
+  }
+
+  $cmCancel.addEventListener('click', () => _cmResolve('cancel', 'Hiding the new upload…'));
+  $cmKeepBoth.addEventListener('click', () => _cmResolve('keep_both', 'Keeping both copies…'));
+  $cmReplace.addEventListener('click', () => _cmResolve('replace', 'Replacing the older copy…'));
+
   async function postUpload({acknowledgeExisting}) {
     const file = $file.files[0];
     if (!file) { setStatus('Pick a file first.', 'err'); $submit.disabled = false; return; }
@@ -354,6 +473,10 @@
       const detail = (body && typeof body.detail === 'object') ? body.detail : null;
       if (detail && detail.code === 'duplicate_file') {
         openDedupModal(detail);
+        return;
+      }
+      if (detail && detail.code === 'content_match') {
+        openContentMatchModal(detail);
         return;
       }
       // Fallback for any other 409 shape — treat as plain error.

@@ -59,6 +59,7 @@ from app import access_control  # noqa: E402
 from app.auth import current_session, current_user, is_admin, require_admin, verify_openemr_credentials  # noqa: E402
 from app.assignments_db import AssignmentStore  # noqa: E402
 from app.auth_db import AuthStore  # noqa: E402
+from app.document_fingerprints_db import DocumentFingerprintStore  # noqa: E402
 from app.hidden_docs_db import HiddenDocsStore  # noqa: E402
 import hashlib  # noqa: E402
 
@@ -68,7 +69,8 @@ from app.fhir import adapter  # noqa: E402
 from app.fhir.client import FhirClient  # noqa: E402
 from app.fhir.extras import get_calendar_today, get_supporting_documents  # noqa: E402
 from app.fhir.writer import OpenEMRWriter, OpenEMRWriteError  # noqa: E402
-from app.extraction.extract import attach_and_extract  # noqa: E402
+from app.extraction.extract import attach_and_extract, persist_extracted_facts  # noqa: E402
+from app.extraction.fingerprint import compute_fingerprint  # noqa: E402
 from app.extraction.schemas import DOC_TYPE_LABELS  # noqa: E402
 from app.extraction.vision import ExtractionError  # noqa: E402
 from app.observability import (  # noqa: E402
@@ -252,6 +254,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # via a separate `hidden_documents` table.
     app.state.hidden_docs = HiddenDocsStore(auth_db_path)
     log.info("hidden-docs store: sqlite at %s", auth_db_path)
+    # Content-fingerprint index for dedup Layer 2 — same SQLite file,
+    # separate `document_fingerprints` table.
+    app.state.fingerprints = DocumentFingerprintStore(auth_db_path)
+    log.info("fingerprints store: sqlite at %s", auth_db_path)
     # build_graph AFTER assignment store so the per-tool ACL gate has its
     # source of truth wired in.
     app.state.graph = build_graph(
@@ -272,6 +278,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.auth_store.close()
         app.state.assignments.close()
         app.state.hidden_docs.close()
+        app.state.fingerprints.close()
 
 
 app = FastAPI(title="Clinical Co-pilot", lifespan=lifespan)
@@ -1157,6 +1164,13 @@ async def api_upload(
             )
 
     try:
+        # Skip persistence on the initial extract — we want to interpose
+        # Layer-2 dedup (content-fingerprint match against prior docs
+        # for this patient) BEFORE writing facts. The writer's Phase 1
+        # has already committed the source DocumentReference to OpenEMR,
+        # so the new doc id is real and stable; if Layer 2 prompts and
+        # the user cancels, the upload endpoint's caller can soft-hide
+        # the new doc via /api/document/{id}/resolve-content-match.
         result = await attach_and_extract(
             file_bytes=file_bytes,
             filename=filename,
@@ -1164,6 +1178,7 @@ async def api_upload(
             patient_uuid=patient_uuid,
             mime_type=mime_type,
             writer=app.state.openemr_writer,
+            skip_persistence=True,
         )
     except ValueError as e:
         # Render-side errors (unsupported MIME, empty file inside renderer)
@@ -1176,6 +1191,87 @@ async def api_upload(
         raise HTTPException(
             status_code=502, detail=f"Document extraction failed: {e}",
         ) from e
+
+    # Dedup Layer 2 — content fingerprint match.
+    # Compute the structural fingerprint of the extraction. If a prior
+    # DocumentReference for this patient produced the same fingerprint
+    # (and it's not the doc we just uploaded — sha-256 dedup handled
+    # the bytes-identical case earlier), surface a 3-option modal so
+    # the user can pick Replace / Keep both / Cancel before we persist
+    # facts. The new doc stays in OpenEMR either way; cancel
+    # soft-hides it via the resolve-content-match endpoint.
+    new_ref = result.reference_id
+    new_doc_id_only = new_ref.split("/", 1)[-1]
+    fingerprint = compute_fingerprint(result.extracted)
+    if fingerprint and not acknowledge_existing:
+        match = app.state.fingerprints.find_match(
+            patient_id=patient_uuid, fingerprint=fingerprint,
+        )
+        if match is not None and match.document_id != new_doc_id_only:
+            log.info(
+                "upload content-match: user=%s patient=%s fp=%s prior=%s new=%s",
+                username, patient_uuid, fingerprint[:12],
+                match.document_id, new_doc_id_only,
+            )
+            # Pull metadata for the prior doc so the modal can show
+            # the user what they're choosing between.
+            prior_meta: dict = {"ref": f"DocumentReference/{match.document_id}"}
+            try:
+                prior_doc = await app.state.fhir.get(
+                    f"DocumentReference/{match.document_id}",
+                )
+                prior_attach = (prior_doc.get("content") or [{}])[0].get("attachment") or {}
+                prior_meta.update({
+                    "title": prior_attach.get("title") or "",
+                    "filename": prior_attach.get("title") or "",
+                    "date": prior_doc.get("date"),
+                })
+            except Exception as e:  # noqa: BLE001
+                log.info("content-match prior metadata fetch failed: %s", e)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "content_match",
+                    "message": (
+                        "A different file with the same extracted content "
+                        "is already on this patient's chart. Choose "
+                        "Replace, Keep both, or Cancel."
+                    ),
+                    "fingerprint": fingerprint,
+                    "prior": prior_meta,
+                    "new": {
+                        "ref": new_ref,
+                        "filename": filename,
+                    },
+                },
+            )
+
+    # No match (or user already acknowledged): persist facts now and
+    # record the fingerprint so future uploads of the same content
+    # surface the prompt.
+    persistence = await persist_extracted_facts(
+        writer=app.state.openemr_writer,
+        patient_uuid=patient_uuid,
+        extracted=result.extracted,
+        source_document_id=new_ref,
+    )
+    result.persistence = persistence
+    if fingerprint:
+        # Use `record` so the first-seen fingerprint wins and a Replace
+        # decision (handled by the resolve endpoint) overwrites the
+        # row. acknowledge_existing on this branch means we already
+        # know about the match and the user said keep going.
+        existing_owner = app.state.fingerprints.find_match(
+            patient_id=patient_uuid, fingerprint=fingerprint,
+        )
+        if existing_owner is None:
+            app.state.fingerprints.record(
+                patient_id=patient_uuid,
+                fingerprint=fingerprint,
+                document_id=new_doc_id_only,
+                recorded_by=username,
+            )
+
     # Invalidate every cache slice that could now hold stale data:
     #   docs:{pid}    — Supporting Documents tab needs the new
     #                   DocumentReference and the lab-encounter we
@@ -1394,6 +1490,146 @@ async def api_document_hide(
         "document_id": record.document_id,
         "hidden_by": record.hidden_by,
         "hidden_at": record.hidden_at,
+    }
+
+
+@app.post("/api/document/{document_id}/resolve-content-match")
+async def api_document_resolve_content_match(
+    document_id: str,
+    request: Request,
+    action: str = Form(...),
+    prior_ref: str = Form(...),
+    username: str = Depends(current_user),
+) -> dict:
+    """User's choice from the dedup-Layer-2 modal.
+
+    `document_id` is the **new** doc that triggered the prompt. The
+    prior matching doc is passed via `prior_ref` (full
+    `DocumentReference/<uuid>` form) because the frontend already
+    received it on the 409 payload — re-asking the fingerprint store
+    here would race against simultaneous uploads.
+
+    Actions:
+      - `replace`: soft-hide the prior doc, forget its fingerprint,
+        persist facts on the new doc, claim the fingerprint with the
+        new doc id.
+      - `keep_both`: persist facts on the new doc; do not touch the
+        prior doc's fingerprint (it stays the canonical owner).
+      - `cancel`: soft-hide the new doc; do not persist facts.
+    """
+    if action not in {"replace", "keep_both", "cancel"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"action must be one of replace/keep_both/cancel, got {action!r}",
+        )
+    new_doc_id = document_id.split("/", 1)[-1] if "/" in document_id else document_id
+    prior_doc_id = prior_ref.split("/", 1)[-1] if "/" in prior_ref else prior_ref
+
+    # Re-fetch the new doc so we know its patient + extraction. The
+    # straight-through path here is more roundtrip than ideal; a
+    # production version would cache the in-flight extraction on a
+    # short-lived server-side context. For demo scope, an extra FHIR
+    # GET + a re-extract on `replace` / `keep_both` is acceptable.
+    try:
+        new_doc = await request.app.state.fhir.get(
+            f"DocumentReference/{new_doc_id}",
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail="New document not found") from e
+    subject_ref = (new_doc.get("subject") or {}).get("reference") or ""
+    if not subject_ref.startswith("Patient/"):
+        raise HTTPException(status_code=400, detail="New document has no patient subject")
+    patient_id = subject_ref.removeprefix("Patient/")
+    panel = await access_control.get_panel_for_user(
+        request.app.state.fhir, username, request.app.state.assignments,
+    )
+    if panel is not None and patient_id not in panel:
+        request.app.state.auth_store.log_event(
+            event_type="patient_access_denied",
+            username=username,
+            sid=request.session.get("sid"),
+            user_agent=request.headers.get("user-agent"),
+            ip=request.client.host if request.client else None,
+            detail=f"document={new_doc_id} patient={patient_id}",
+        )
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if action == "cancel":
+        # Soft-hide the new doc; don't persist anything. The prior
+        # doc continues to be the canonical fingerprint owner.
+        app.state.hidden_docs.hide(document_id=new_doc_id, hidden_by=username)
+        app.state.cache.invalidate(f"docs:{patient_id}")
+        log.info(
+            "content-match resolve cancel: user=%s patient=%s new=%s",
+            username, patient_id, new_doc_id,
+        )
+        return {"action": "cancel", "new_document_hidden": True}
+
+    # `replace` and `keep_both` both persist facts on the new doc;
+    # the only difference is what happens to the prior doc.
+    # The extraction is no longer in memory — we have to re-fetch +
+    # re-extract from the new doc's bytes. For demo scope this is
+    # acceptable; a production version would memoize.
+    from app.fhir.adapter import _fetch_attachment_bytes  # noqa: PLC0415
+    from app.extraction.render import render_to_png_pages  # noqa: PLC0415
+    from app.extraction.vision import extract_via_claude  # noqa: PLC0415
+
+    att = (new_doc.get("content") or [{}])[0].get("attachment") or {}
+    file_bytes = await _fetch_attachment_bytes(request.app.state.fhir, att)
+    if file_bytes is None:
+        raise HTTPException(status_code=502, detail="Could not fetch new document bytes")
+    content_type = att.get("contentType") or "application/pdf"
+    title = att.get("title") or ""
+    # The doc_type rides on OpenEMR's category mapping; fall back to
+    # `intake_form` if we can't infer (the frontend always supplied
+    # one on the original upload, so this branch is unlikely).
+    category_path = ((new_doc.get("category") or [{}])[0].get("coding") or [{}])[0].get("code") or ""
+    doc_type = "lab_pdf" if "lab" in category_path.lower() or "lab" in title.lower() else "intake_form"
+    page_pngs = render_to_png_pages(file_bytes, content_type)
+    extracted = await extract_via_claude(
+        page_pngs=page_pngs,
+        doc_type=doc_type,  # type: ignore[arg-type]
+        source_document_id=f"DocumentReference/{new_doc_id}",
+    )
+    persistence = await persist_extracted_facts(
+        writer=app.state.openemr_writer,
+        patient_uuid=patient_id,
+        extracted=extracted,
+        source_document_id=f"DocumentReference/{new_doc_id}",
+    )
+
+    fingerprint = compute_fingerprint(extracted)
+    if action == "replace":
+        # Hide the prior doc and reassign its fingerprint to the new doc.
+        app.state.hidden_docs.hide(document_id=prior_doc_id, hidden_by=username)
+        if fingerprint:
+            app.state.fingerprints.forget_document(prior_doc_id)
+            app.state.fingerprints.record(
+                patient_id=patient_id,
+                fingerprint=fingerprint,
+                document_id=new_doc_id,
+                recorded_by=username,
+            )
+    # action == "keep_both": leave the prior fingerprint alone; both
+    # docs are visible. The next upload of the same content prompts
+    # against the prior (still canonical) doc.
+
+    app.state.cache.invalidate(f"docs:{patient_id}")
+    app.state.cache.invalidate(f"card:{patient_id}")
+    app.state.cache.invalidate(f"trends:{patient_id}")
+    app.state.cache.invalidate_prefix("calendar:today:")
+    log.info(
+        "content-match resolve %s: user=%s patient=%s new=%s prior=%s "
+        "facts_written=%d/%d",
+        action, username, patient_id, new_doc_id, prior_doc_id,
+        persistence.get("facts_written", 0),
+        persistence.get("facts_attempted", 0),
+    )
+    return {
+        "action": action,
+        "new_reference_id": f"DocumentReference/{new_doc_id}",
+        "prior_reference_id": f"DocumentReference/{prior_doc_id}",
+        "persistence": persistence,
     }
 
 
