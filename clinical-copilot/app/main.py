@@ -2199,9 +2199,9 @@ async def api_schedule(
 
     Provider assignment: per Option A from the calendar design — the
     appointment is created for the currently-logged-in user (their
-    `users.id`). Admins schedule on the admin calendar (id=1); mapped
-    practitioner users schedule on their own. Users not in
-    `USERNAME_TO_USER_ID` get HTTP 400.
+    `users.id`). Admins schedule on the admin calendar (id=1); other
+    users are resolved dynamically by querying OpenEMR's `/api/user`
+    endpoint. Users not resolvable to a `users.id` get HTTP 400.
 
     Returns: {appointment_id, event_date, start_time, duration_minutes}.
     Errors:
@@ -2225,13 +2225,15 @@ async def api_schedule(
             detail=f"duration_minutes must be 1-480, got {duration_minutes}",
         )
 
-    provider_user_id = access_control.get_user_id(username)
+    provider_user_id = await access_control.resolve_user_id(
+        app.state.openemr_writer, username,
+    )
     if provider_user_id is None:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"user {username!r} has no users.id mapping; add a row to "
-                f"USERNAME_TO_USER_ID in app/access_control.py"
+                f"user {username!r} could not be resolved to an OpenEMR "
+                f"users.id (neither static override nor /api/user lookup matched)"
             ),
         )
 

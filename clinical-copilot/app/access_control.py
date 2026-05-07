@@ -27,6 +27,7 @@ from app.fhir.client import FhirClient
 if TYPE_CHECKING:
     from app.active_patients_db import ActivePatientsStore
     from app.assignments_db import AssignmentStore
+    from app.fhir.writer import OpenEMRWriter
 
 log = logging.getLogger("agent.acl")
 
@@ -44,19 +45,19 @@ USERNAME_TO_PRACTITIONER: dict[str, str] = {
 
 # Username -> OpenEMR legacy `users.id` integer. The appointment-write
 # endpoint (POST /api/patient/{pid}/appointment) takes the legacy
-# integer id in its `pc_aid` field, NOT the FHIR Practitioner UUID,
-# so we maintain a parallel map. Look up via:
-#   SELECT id, username FROM users WHERE authorized = 1;
-# inside docker compose exec -T mysql ... openemr.
+# integer id in its `pc_aid` field, NOT the FHIR Practitioner UUID, so
+# we keep a small static-override map plus a dynamic resolver below.
+#
+# Static-override semantics: this dict wins over the dynamic OpenEMR
+# `/api/user?username=…` lookup. Use it for two narrow cases:
+#   - admin: the seed admin user is always id=1; hard-coding skips a
+#     resolver round-trip on the most common write path.
+#   - deployments where username≠what the user table indexes (rare).
+#
+# Adding a new physician no longer requires editing this file — the
+# resolver below queries OpenEMR's `users` table by username.
 USERNAME_TO_USER_ID: dict[str, int] = {
-    # Legacy `users.id` is not exposed on FHIR Practitioner, so this stays
-    # static for now. Only the appointment-write path consumes it (`pc_aid`),
-    # and the overlay is disabled — the values below are the OpenEMR-shipped
-    # seed defaults; deployments with a different `users` table need to
-    # override these (env var or per-deploy config) when re-enabling
-    # appointments. Tracked as a follow-up.
     "admin": 1,
-    "Smith": 5,
 }
 
 # Demo allow-list: only these patients are surfaced anywhere the co-pilot
@@ -159,6 +160,12 @@ _PANEL_TTL_S = 300.0
 # is stable. Restart the process to repopulate.
 _RESOLVED_PRACTITIONER: dict[str, str | None] = {}
 
+# Resolved username -> legacy `users.id` int. Same caching shape as
+# `_RESOLVED_PRACTITIONER`; populated lazily on the appointment-write
+# path. None is cached too so repeated misses for an unmapped user
+# don't re-hit OpenEMR.
+_RESOLVED_USER_ID: dict[str, int | None] = {}
+
 
 def get_practitioner_id(username: str | None) -> str | None:
     """Return the Practitioner UUID for `username` from the static override map.
@@ -239,15 +246,60 @@ async def resolve_practitioner_id(
 
 
 def get_user_id(username: str | None) -> int | None:
-    """Return the legacy `users.id` for `username`, or None if unmapped.
+    """Return the legacy `users.id` for `username` from the static
+    override map only.
 
-    Used by the appointment-write path which targets the standard REST
-    API (POST /api/patient/{pid}/appointment) with `pc_aid` set to the
-    integer user id rather than the FHIR Practitioner UUID.
+    Static-only; the async `resolve_user_id` below adds an OpenEMR
+    standard-API fallback. Kept as a sync helper for callers that just
+    want the override (none today, but the symbol is part of the
+    module's public surface).
     """
     if not username:
         return None
     return USERNAME_TO_USER_ID.get(username)
+
+
+async def resolve_user_id(
+    writer: "OpenEMRWriter", username: str | None,
+) -> int | None:
+    """Resolve a username to its legacy `users.id` integer.
+
+    Resolution order:
+      1. Static `USERNAME_TO_USER_ID` override.
+      2. OpenEMR standard-API GET `/api/user?username={username}`,
+         taking the first active match.
+
+    The fallback exists so deployments don't have to touch source to
+    add a new physician — OpenEMR's `users` table indexes on
+    `username` and the standard API returns the integer `id` directly.
+
+    Cached by lowercased username for the process lifetime; `None`
+    cached too so a repeated lookup for an unmapped user doesn't
+    re-hit OpenEMR. Process restart repopulates.
+    """
+    if not username:
+        return None
+    static = USERNAME_TO_USER_ID.get(username)
+    if static is not None:
+        return static
+    key = username.strip().lower()
+    if key in _RESOLVED_USER_ID:
+        return _RESOLVED_USER_ID[key]
+    try:
+        resolved = await writer.resolve_user_id_by_username(username)
+    except Exception as e:  # noqa: BLE001
+        # OpenEMRWriteError on transport failure — log and treat as
+        # miss so the caller can return a clean 400 rather than 502.
+        # The cache is intentionally NOT updated on transport failure,
+        # so a transient outage doesn't pin the user as unmapped.
+        log.warning("acl: user-id resolve failed for %s: %s", username, e)
+        return None
+    _RESOLVED_USER_ID[key] = resolved
+    if resolved is not None:
+        log.info("acl: resolved username=%s -> users.id=%s", username, resolved)
+    else:
+        log.warning("acl: no users.id for username=%s", username)
+    return resolved
 
 
 async def get_panel_for_user(
@@ -325,6 +377,8 @@ def invalidate_panel(username: str | None = None) -> None:
     if username is None:
         _PANEL_CACHE.clear()
         _RESOLVED_PRACTITIONER.clear()
+        _RESOLVED_USER_ID.clear()
         return
     _PANEL_CACHE.pop(username, None)
     _RESOLVED_PRACTITIONER.pop(username.strip().lower(), None)
+    _RESOLVED_USER_ID.pop(username.strip().lower(), None)

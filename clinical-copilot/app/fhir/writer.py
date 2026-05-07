@@ -258,6 +258,60 @@ class OpenEMRWriter:
         )
         return result
 
+    async def resolve_user_id_by_username(self, username: str) -> int | None:
+        """Resolve an OpenEMR username to its legacy ``users.id`` integer
+        via ``GET /api/user?username=…``.
+
+        OpenEMR's ``users`` table enforces a unique ``username`` so the
+        lookup returns at most one row. The integer ``id`` returned is
+        the value the appointment-write endpoint needs in ``pc_aid``.
+
+        Returns ``None`` when no row matches, or when every match is
+        marked inactive (``active=0`` / ``false``). Raises
+        ``OpenEMRWriteError`` only on a non-200 transport response — a
+        no-match returns 200 with an empty data list.
+        """
+        if not username:
+            return None
+        token = await self._ensure_token()
+        r = await self._http.get(
+            f"{self._api_base}/user",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"username": username},
+        )
+        if r.status_code != 200:
+            raise OpenEMRWriteError(
+                f"user lookup failed for {username!r}: "
+                f"{r.status_code} {r.text[:200]}"
+            )
+        try:
+            body = r.json()
+        except ValueError as exc:
+            raise OpenEMRWriteError(
+                f"user lookup returned non-JSON for {username!r}: "
+                f"{r.text[:200]}"
+            ) from exc
+        rows = body.get("data") if isinstance(body, dict) else body
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            # OpenEMR's users.active is a smallint(1) but the JSON
+            # serializer surfaces it as int (0/1) on some routes and
+            # bool elsewhere. Treat any falsy form as inactive.
+            active = row.get("active")
+            if active in (False, 0, "0"):
+                continue
+            rid = row.get("id")
+            if rid is None:
+                continue
+            try:
+                return int(rid)
+            except (TypeError, ValueError):
+                continue
+        return None
+
     async def _patient_numeric_pid(self, token: str, patient_uuid: str) -> int:
         """Resolve a FHIR Patient UUID to OpenEMR's internal numeric pid."""
         r = await self._http.get(
