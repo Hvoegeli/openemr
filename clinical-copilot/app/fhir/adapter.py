@@ -391,23 +391,31 @@ async def get_observations_24h(
 
 
 async def get_notes_24h(
-    client: FhirClient, *, patient_id: str, hours: int = 24,
+    client: FhirClient, *, patient_id: str, hours: int = 0,
 ) -> SourcedResult:
-    """`DocumentReference`s (clinical notes, progress notes, summaries)
-    created for the patient in the last `hours`. Metadata only — title,
-    type, date, status, attachment titles. Full-text fetch is a separate
-    (planned) tool; metadata alone already answers "did the night team
-    document anything I should know about?"."""
-    cutoff_iso = _utc_cutoff_iso(hours)
-    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
-    docs = await client.search(
-        "DocumentReference",
-        {"patient": patient_id, "date": f"ge{cutoff_iso}", "_count": 30},
-    )
+    """`DocumentReference`s for the patient (clinical notes, progress
+    notes, summaries, lab reports, intake forms, imaging reports).
+
+    `hours=0` (default): no date filter — returns ALL documents on file.
+    `hours>0`: only docs whose date is within `hours` of now.
+
+    Metadata only — title, type, date, status, attachment titles. Pair
+    with `get_document_content(document_id)` to read pages.
+    """
+    use_window = hours > 0
+    if use_window:
+        cutoff_iso = _utc_cutoff_iso(hours)
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
+        params = {"patient": patient_id, "date": f"ge{cutoff_iso}", "_count": 100}
+    else:
+        cutoff_iso = None
+        cutoff_dt = None
+        params = {"patient": patient_id, "_count": 100}
+    docs = await client.search("DocumentReference", params)
     items: list[dict] = []
     sources: list[str] = []
     for d in docs:
-        if not _is_recent(d.get("date"), cutoff_dt):
+        if use_window and not _is_recent(d.get("date"), cutoff_dt):
             continue
         sources.append(_ref(d))
         attachments: list[dict] = []

@@ -109,21 +109,33 @@ async def get_observations_24h(patient_id: str, hours: int = 24) -> str:
 
 
 @tool
-async def get_notes_24h(patient_id: str, hours: int = 24) -> str:
+async def get_notes_24h(patient_id: str, hours: int = 0) -> str:
     """Fetch DocumentReferences (clinical notes, progress notes, discharge
-    summaries) created in the last `hours`.
+    summaries, lab reports, intake forms, imaging reports) for a patient.
 
-    Use for "what did the night team document?", "any new notes since
-    rounds?". Returns metadata only — title, type, date, status, attachment
-    titles. Content-body fetch is not supported by this tool yet; describe
-    that a note exists and let the doctor open it.
+    DEFAULT BEHAVIOUR (`hours=0`): returns ALL documents on file for the
+    patient regardless of age. This is what you want for most queries —
+    "show me her labs", "what intake forms do we have on him", "any
+    imaging?". The tool's name retains "24h" for backwards compatibility
+    with eval snapshots; behaviour is "all documents" unless hours is
+    explicitly set to a positive integer.
 
-    Returns JSON with `data.documents`, `data.window_hours`,
-    `data.cutoff_iso`, plus `sources` listing every DocumentReference ID.
+    Set `hours` to a positive integer only when you specifically need a
+    short window (e.g. "what did the night team document in the last
+    shift?"), in which case the result is limited to docs whose date is
+    within `hours` of now.
+
+    Returns metadata only — title, type, date, status, attachment titles.
+    Pair with `get_document_content(document_id)` to read the doc's actual
+    pages.
+
+    Returns JSON with `data.documents`, `data.window_hours`
+    (0 means unbounded), `data.cutoff_iso` (null when unbounded), plus
+    `sources` listing every DocumentReference ID.
 
     Args:
         patient_id: The FHIR Patient resource ID.
-        hours: Lookback window in hours. Defaults to 24.
+        hours: Lookback window in hours, or 0 for all documents. Defaults to 0.
     """
     raise NotImplementedError("Dispatched in agent.graph.execute_tools_node")
 
