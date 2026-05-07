@@ -175,7 +175,7 @@ def _hl7_projection(extracted: Hl7Message) -> dict:
     """Pull the identifying slice out of an `Hl7Message`.
 
     HL7's MSH-10 (message_control_id) is supposed to be globally unique
-    per message, but in practice senders re-use it for retransmits or
+    per message, but in practice senders reuse it for retransmits or
     derive it from a deterministic timestamp template — so we cannot
     rely on it alone. We hash the clinically-relevant payload instead:
 

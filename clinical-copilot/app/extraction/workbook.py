@@ -90,7 +90,7 @@ def _date_or_none(value: object) -> date | None:
 
 
 def _int_or_none(value: object) -> int | None:
-    """Coerce to int, returning None for blanks or unparseable strings."""
+    """Coerce to int, returning None for blanks or unparsable strings."""
     if value is None:
         return None
     if isinstance(value, bool):
