@@ -74,7 +74,7 @@ class TestToClinicalIso:
     def test_empty_string_returns_none(self, chicago_tz) -> None:
         assert to_clinical_iso("") is None
 
-    def test_unparseable_string_returns_unchanged(self, chicago_tz) -> None:
+    def test_unparsable_string_returns_unchanged(self, chicago_tz) -> None:
         # Defensive: garbage in, garbage out — but not an exception.
         # Production code that scrubs FHIR fields can't crash on a
         # malformed row.

@@ -24,7 +24,7 @@ Public surface:
                                  datetime into a clinical-tz ISO with
                                  the offset on the wire. Tolerates
                                  None / empty (returns None) and
-                                 unparseable inputs (returns the
+                                 unparsable inputs (returns the
                                  original) so it can be applied
                                  indiscriminately to FHIR fields
                                  without try/excepts at every call site.
