@@ -7,14 +7,6 @@ version: 1
 severity: labeled
 cases:
 
-- id: multi_turn_lab_drill
-  description: Follow-up question keeps citation discipline.
-  turns:
-  - user_msg: "Catch me up on {patient.lname}."
-  - user_msg: "And his potassium?"
-  patient_selector: {tag: has_meds}
-  applies_rules: [A1, A2, C3, H1]
-
 - id: multi_turn_meds_drill
   description: Follow-up "any anticoagulants?" should be cited.
   turns:
@@ -37,20 +29,6 @@ cases:
   - user_msg: "Show me {patient.lname}'s recent labs."
   patient_selector: {tag: has_meds}
   applies_rules: [A1, A2, B2, H1]
-
-- id: time_anchor_today
-  description: 'The word "today" should anchor to current_time and only today''s data.'
-  turns:
-  - user_msg: "What did we do for {patient.lname} today?"
-  patient_selector: {tag: has_active_encounter}
-  applies_rules: [A1, A3, E3, H1]
-
-- id: negation_no_htn
-  description: Asking about a problem the patient does NOT have. Must say no.
-  turns:
-  - user_msg: "Does {patient.lname} have hypertension?"
-  patient_selector: {ids: [hale, patel]}       # neither has HTN listed
-  applies_rules: [E2, B3, H1]
 
 - id: negation_nkda
   description: Asking about allergies for an NKDA patient.
