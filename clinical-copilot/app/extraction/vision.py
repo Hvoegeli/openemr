@@ -43,8 +43,10 @@ from anthropic.types import ToolUseBlock
 from app.extraction.schemas import (
     DocumentType,
     ExtractedDocument,
+    FaxPacket,
     IntakeForm,
     LabReport,
+    ReferralLetter,
 )
 
 log = logging.getLogger("agent.extraction.vision")
@@ -74,6 +76,23 @@ abnormal flag as printed.
 - For intake forms: extract demographics, chief concern, current \
 medications, allergies, family history. Empty list-fields are fine \
 (intake forms with NKDA, no current meds, no recorded family history).
+- For referral letters: extract the referring physician, the reason for \
+referral (verbatim or close to it), HPI if printed, the requested action \
+if printed, plus the structured chart slice the letter exposes — past \
+medical history (with ICD-10 codes when printed), current medications, \
+allergies, and any pertinent lab values cited inline. Empty list-fields \
+are fine (a referral with NKDA, or a referral that omits PMH because it \
+folds it into the HPI paragraph).
+- For fax packets: a single fax bundles a transmittal cover sheet plus \
+1+ clinical pages (referral request, patient face sheet, lab report). \
+Extract the cover-sheet metadata (date, sender, recipient, urgency, the \
+free-text MESSAGE paragraph), the reason-for-consultation from the \
+referral page, the receiving specialty, and the structured chart slice \
+from the face sheet (active problems with ICD-10 when printed, current \
+medications, allergies). When a Laboratory Report page is included, \
+extract every result row into `lab_results` — these will be persisted as \
+a real lab encounter (the fax IS the source, not a quotation). Empty \
+list fields are fine for cover-only or referral-only faxes.
 - Citations: `page_or_section` is human-readable like 'page 1' or \
 'Allergies section'. `field_or_chunk_id` is a snake_case slug like \
 'results_table.hba1c' or 'medications.0' that uniquely identifies the \
@@ -107,9 +126,42 @@ def _tool_for_intake_form() -> dict[str, Any]:
     }
 
 
+def _tool_for_referral_letter() -> dict[str, Any]:
+    """Tool definition that forces a ReferralLetter-shaped tool call."""
+    return {
+        "name": "record_referral_letter",
+        "description": (
+            "Record the structured contents of a clinical referral letter "
+            "(referring physician + reason for referral + HPI + requested "
+            "action + the patient's PMH / current meds / allergies / "
+            "pertinent labs as cited in the letter) as a ReferralLetter "
+            "object."
+        ),
+        "input_schema": ReferralLetter.model_json_schema(),
+    }
+
+
+def _tool_for_fax_packet() -> dict[str, Any]:
+    """Tool definition that forces a FaxPacket-shaped tool call."""
+    return {
+        "name": "record_fax_packet",
+        "description": (
+            "Record the structured contents of a multi-page clinical "
+            "fax packet (transmittal cover + referral request + patient "
+            "face sheet + optional lab report). Pull cover-sheet "
+            "metadata, reason for consultation, the active "
+            "problems / medications / allergies from the face sheet, "
+            "and any inline lab results."
+        ),
+        "input_schema": FaxPacket.model_json_schema(),
+    }
+
+
 _TOOL_BUILDERS = {
     "lab_pdf": (_tool_for_lab_report, "record_lab_report", LabReport),
     "intake_form": (_tool_for_intake_form, "record_intake_form", IntakeForm),
+    "referral_letter": (_tool_for_referral_letter, "record_referral_letter", ReferralLetter),
+    "fax_packet": (_tool_for_fax_packet, "record_fax_packet", FaxPacket),
 }
 
 
@@ -153,7 +205,7 @@ async def extract_via_claude(
     source_document_id: str,
     client: AsyncAnthropic | None = None,
     model: str = DEFAULT_MODEL,
-    max_tokens: int = 4096,
+    max_tokens: int = 8192,
 ) -> ExtractedDocument:
     """Send the rendered pages to Claude and return a validated
     ExtractedDocument.

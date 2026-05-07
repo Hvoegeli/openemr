@@ -1353,8 +1353,26 @@ async def api_upload(
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="empty file upload")
-    mime_type = file.content_type or "application/octet-stream"
+    raw_ct = (file.content_type or "").lower()
     filename = file.filename or "upload.bin"
+    # Some browsers send `application/octet-stream` for .docx / .hl7 /
+    # .tiff / .xlsx instead of the dedicated MIME (HL7 v2 has no
+    # widely-supported MIME at all; .tiff handling depends on the OS).
+    # Fall back to the filename extension before handing off to the
+    # renderer's MIME dispatch / HL7 dispatcher / workbook parser.
+    if not raw_ct or raw_ct == "application/octet-stream":
+        fl = filename.lower()
+        if fl.endswith(".docx"):
+            raw_ct = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif fl.endswith(".pdf"):
+            raw_ct = "application/pdf"
+        elif fl.endswith(".hl7"):
+            raw_ct = "text/plain"
+        elif fl.endswith(".tiff") or fl.endswith(".tif"):
+            raw_ct = "image/tiff"
+        elif fl.endswith(".xlsx"):
+            raw_ct = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    mime_type = raw_ct or "application/octet-stream"
 
     # Dedup Layer 1 — SHA-256 prompt. The writer will idempotently
     # return the existing reference if we proceed; what's missing today
@@ -1415,17 +1433,41 @@ async def api_upload(
         # so the new doc id is real and stable; if Layer 2 prompts and
         # the user cancels, the upload endpoint's caller can soft-hide
         # the new doc via /api/document/{id}/resolve-content-match.
-        result = await attach_and_extract(
-            file_bytes=file_bytes,
-            filename=filename,
-            doc_type=doc_type,  # type: ignore[arg-type]
-            patient_uuid=patient_uuid,
-            mime_type=mime_type,
-            writer=app.state.openemr_writer,
-            skip_persistence=True,
-        )
+        if doc_type == "hl7_message":
+            # HL7 v2 messages bypass the render+vision path entirely —
+            # the parser walks segments deterministically (zero LLM cost).
+            from app.extraction.extract import attach_and_extract_hl7  # noqa: PLC0415
+            result = await attach_and_extract_hl7(
+                file_bytes=file_bytes,
+                filename=filename,
+                patient_uuid=patient_uuid,
+                writer=app.state.openemr_writer,
+                skip_persistence=True,
+            )
+        elif doc_type == "workbook":
+            # Workbooks (.xlsx) also bypass vision — openpyxl walks the
+            # 4 sheets deterministically (zero LLM cost).
+            from app.extraction.extract import attach_and_extract_workbook  # noqa: PLC0415
+            result = await attach_and_extract_workbook(
+                file_bytes=file_bytes,
+                filename=filename,
+                patient_uuid=patient_uuid,
+                writer=app.state.openemr_writer,
+                skip_persistence=True,
+            )
+        else:
+            result = await attach_and_extract(
+                file_bytes=file_bytes,
+                filename=filename,
+                doc_type=doc_type,  # type: ignore[arg-type]
+                patient_uuid=patient_uuid,
+                mime_type=mime_type,
+                writer=app.state.openemr_writer,
+                skip_persistence=True,
+            )
     except ValueError as e:
         # Render-side errors (unsupported MIME, empty file inside renderer)
+        # and Hl7ParseError (subclass of ValueError) both land here.
         raise HTTPException(status_code=400, detail=str(e)) from e
     except OpenEMRWriteError as e:
         raise HTTPException(
@@ -1844,13 +1886,53 @@ async def api_document_resolve_content_match(
     # `intake_form` if we can't infer (the frontend always supplied
     # one on the original upload, so this branch is unlikely).
     category_path = ((new_doc.get("category") or [{}])[0].get("coding") or [{}])[0].get("code") or ""
-    doc_type = "lab_pdf" if "lab" in category_path.lower() or "lab" in title.lower() else "intake_form"
-    page_pngs = render_to_png_pages(file_bytes, content_type)
-    extracted = await extract_via_claude(
-        page_pngs=page_pngs,
-        doc_type=doc_type,  # type: ignore[arg-type]
-        source_document_id=f"DocumentReference/{new_doc_id}",
-    )
+    cp_lower = category_path.lower()
+    title_lower = title.lower()
+    if "lab" in cp_lower or "lab" in title_lower:
+        doc_type = "lab_pdf"
+    elif "referral" in cp_lower or "referral" in title_lower:
+        doc_type = "referral_letter"
+    elif (
+        title_lower.endswith(".hl7")
+        or "hl7" in title_lower
+        or "adt-a08" in title_lower
+        or "oru-r01" in title_lower
+    ):
+        doc_type = "hl7_message"
+    elif (
+        title_lower.endswith(".tiff")
+        or title_lower.endswith(".tif")
+        or "fax" in title_lower
+    ):
+        doc_type = "fax_packet"
+    elif (
+        title_lower.endswith(".xlsx")
+        or "workbook" in title_lower
+    ):
+        doc_type = "workbook"
+    else:
+        doc_type = "intake_form"
+    if doc_type == "hl7_message":
+        # HL7 v2 doesn't render to PNG — re-parse the segments directly.
+        from app.extraction.hl7 import parse_hl7_message  # noqa: PLC0415
+        extracted = parse_hl7_message(
+            file_bytes,
+            source_document_id=f"DocumentReference/{new_doc_id}",
+        )
+    elif doc_type == "workbook":
+        # Workbooks (.xlsx) also bypass vision — re-parse via openpyxl.
+        from app.extraction.workbook import parse_workbook  # noqa: PLC0415
+        extracted = parse_workbook(
+            file_bytes,
+            source_document_id=f"DocumentReference/{new_doc_id}",
+        )
+    else:
+        page_pngs = render_to_png_pages(file_bytes, content_type)
+        extracted = await extract_via_claude(
+            page_pngs=page_pngs,
+            doc_type=doc_type,  # type: ignore[arg-type]
+            source_document_id=f"DocumentReference/{new_doc_id}",
+        )
     persistence = await persist_extracted_facts(
         writer=app.state.openemr_writer,
         patient_uuid=patient_id,

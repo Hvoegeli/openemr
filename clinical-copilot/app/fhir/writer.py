@@ -83,8 +83,30 @@ _SCOPE = " ".join(
 # (Spaces and case in the path query string would otherwise silently fail
 # to match, leaving the document unlinked from any category.)
 DOC_CATEGORIES: dict[str, str] = {
-    "lab_pdf":     "labreport",          # → OpenEMR "Lab Report" (id=2)
-    "intake_form": "patientinformation",  # → OpenEMR "Patient Information" (id=4)
+    "lab_pdf":         "labreport",          # → OpenEMR "Lab Report" (id=2)
+    "intake_form":     "patientinformation",  # → OpenEMR "Patient Information" (id=4)
+    # The dev-easy seed has no dedicated "Referral" category; folding
+    # referrals into "Patient Information" keeps them linked to the chart
+    # without requiring a schema migration. The doc_type still rides in
+    # our app-level taxonomy (DOC_TYPE_LABELS / DocumentType), so the
+    # extractor and persistence branches treat referrals distinctly.
+    # Title-based inference at the prefetch boundary picks "referral_letter"
+    # back out via filename keyword.
+    "referral_letter": "patientinformation",
+    # The dev-easy seed has no dedicated HL7 category. Folding HL7
+    # messages into "Patient Information" keeps them on the chart with
+    # zero schema migration; the doc_type lives in our app-level
+    # taxonomy and the title-keyword inference (`hl7` / `adt` / `oru`
+    # in the filename) picks them back out at the prefetch boundary.
+    "hl7_message":     "patientinformation",
+    # No dedicated "Fax" category in the dev-easy seed either. Same
+    # pattern: persist under "Patient Information" + recover the
+    # doc_type via the `fax` filename keyword on the prefetch path.
+    "fax_packet":      "patientinformation",
+    # No dedicated "Workbook" category in the dev-easy seed. Same
+    # pattern: persist under "Patient Information"; the `.xlsx` /
+    # `workbook` filename keywords recover the doc_type at prefetch.
+    "workbook":        "patientinformation",
 }
 
 

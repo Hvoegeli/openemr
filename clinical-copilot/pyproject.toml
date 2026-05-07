@@ -37,6 +37,9 @@ dependencies = [
     "pillow>=11.0",
     "python-multipart>=0.0.10",
     "rank-bm25>=0.2.2",
+    # .xlsx workbook parser. Pure-Python, no native deps. Used by the
+    # workbook doc-type ingest path — deterministic, zero LLM credit.
+    "openpyxl>=3.1",
 ]
 
 [dependency-groups]

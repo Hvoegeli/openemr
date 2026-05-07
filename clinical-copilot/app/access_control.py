@@ -84,6 +84,20 @@ ACTIVE_PATIENT_NAMES: frozenset[tuple[str, str]] = frozenset({
     ("binder", "jason"),    # empty shell — demo target for assignment flow
     ("buckley", "wallace"),  # empty shell
     ("dickey", "robert"),    # empty shell
+    # Asset-bundle demo cohort: chen/reyes/kowalski are already in the
+    # roster above. Johnson + Nguyen + Aisha-Patel don't yet exist as
+    # FHIR patients — they'll be created on first upload via the
+    # `+ New patient` flow on the upload modal, then appear immediately
+    # because their (family, given) tuple is allowlisted here.
+    #
+    # Note on Patel: the asset bundle ships a 34yo pre-conception case
+    # named "Aisha Patel" (DOB 1991-06-15, MRN EMR-4413089) — distinct
+    # from the existing seeded "Anjali Patel" (DOB 1942-09-08) elderly
+    # urosepsis case. Both are kept on the roster as separate patients;
+    # only the surname collides.
+    ("johnson", "marcus"),
+    ("nguyen", "olivia"),
+    ("patel", "aisha"),
 })
 
 
