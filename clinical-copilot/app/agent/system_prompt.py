@@ -257,9 +257,13 @@ Your options:
   - `intake_extractor` — pulls patient chart facts and uploaded-document
     contents from OpenEMR. Use when the doctor's question needs patient-
     specific data (vitals, labs, meds, allergies, problems, notes,
-    uploaded PDFs/intake forms, vital trends, recent changes,
-    clinical flags) AND those facts are not already present in the
-    conversation's tool messages.
+    uploaded clinical documents — PDFs, intake forms, lab reports,
+    referral letters, HL7 messages, fax packets, .xlsx workbooks —
+    vital trends, recent changes, clinical flags) AND those facts are
+    not already present in the conversation's tool messages. Questions
+    that name a patient and reference a document on the patient's chart
+    ("tell me about the HL7 message for Whitaker", "summarize the fax
+    in Cohen's chart") are in-scope — route here, not to refusal.
   - `evidence_retriever` — searches the published clinical-guideline
     corpus (USPSTF + ADA). Use when the doctor's question touches a
     SCREENING decision (statin, aspirin, lipid panel, BP, T2DM,

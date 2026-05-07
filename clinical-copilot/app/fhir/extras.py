@@ -285,12 +285,14 @@ def format_supporting_documents_data(
         # OpenEMR sometimes encodes the document type as a Coding whose
         # `display` is literally the string "unknown" (the seeded
         # "Lab Pdf"/"Intake Form" docs have proper displays; older
-        # OpenEMR-native uploads tend to be the unknown ones). Treat
-        # that as "no useful label" so the UI shows "Document" instead
-        # of "Document unknown."
+        # OpenEMR-native uploads tend to be the unknown ones). When the
+        # title would otherwise collapse to a generic "Document", reach
+        # into the first attachment's filename so the UI surfaces
+        # something distinguishable (e.g. "Whitaker ADT-A08.hl7" instead
+        # of three rows that all read "Document Patient Information").
         type_display = _coded_display(d.get("type") or {})
         if not type_display or type_display.strip().lower() == "unknown":
-            type_display = "Document"
+            type_display = _friendly_label_from_attachments(attachments) or "Document"
         items.append({
             "kind": "document",
             "id": d["id"],
@@ -308,6 +310,33 @@ def format_supporting_documents_data(
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────
+
+
+def _friendly_label_from_attachments(attachments: list[dict]) -> str | None:
+    """Best-effort document label when FHIR `type.text` is missing/unknown.
+
+    Strategy: take the first attachment's filename, strip the SHA-256
+    prefix the writer adds (`sha256-<hex>__`), and return what's left.
+    The original filename usually carries enough signal for a clinician
+    to recognize the document at a glance ("whitaker_adt_a08.hl7",
+    "patel_referral.docx", "kowalski_fax_packet.tiff"). Returns None
+    when no attachment carries a usable filename — caller falls back to
+    the generic "Document" label.
+    """
+    for a in attachments or []:
+        title = (a or {}).get("title") or ""
+        title = title.strip()
+        if not title:
+            continue
+        # `_idempotency_filename` prepends `sha256-<hex>__` to the
+        # original name; strip it for display.
+        if title.startswith("sha256-"):
+            sep = title.find("__")
+            if sep >= 0:
+                title = title[sep + 2:]
+        if title:
+            return title
+    return None
 
 
 async def _safe_search(client: FhirClient, resource: str, params: dict) -> list[dict]:
