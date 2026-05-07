@@ -374,3 +374,89 @@ def compute_fingerprint(extracted: ExtractedDocument) -> str | None:
         return None
     serialized = _canonical(projection)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+# Layer 1.5 — pre-extraction text-layer dedup. Companion to
+# `compute_fingerprint` (Layer 2). Layer 2 needs a vision pass to derive
+# the structural fields it hashes; Layer 1.5 hashes the PDF's embedded
+# text layer directly so we can short-circuit a duplicate prompt
+# *before* paying for a Claude vision call.
+
+_TEXT_FP_NAMESPACE = "text-v1:"
+
+
+def namespace_text_fingerprint(text_fp: str) -> str:
+    """Wrap a raw PDF text-layer fingerprint with the L1.5 namespace prefix.
+
+    The fingerprints store is shared with the post-extraction structural
+    fingerprints; the prefix prevents a freak SHA collision between the
+    two layers from cross-prompting a user with a doc that matches by
+    text but not by extracted facts (or vice versa).
+    """
+    return f"{_TEXT_FP_NAMESPACE}{text_fp}"
+
+
+def pdf_text_fingerprint(pdf_bytes: bytes) -> str | None:
+    """Return a stable SHA-256 over the normalized text layer of a PDF.
+
+    Used by dedup Layer 1.5 to short-circuit a Layer-2 prompt for a
+    re-uploaded text-PDF *before* paying for a Claude vision call. Two
+    PDFs with identical visible text but different bytes — the same
+    lab report re-exported from a different EHR with new generator
+    metadata, the same referral re-printed at a different DPI — collide
+    here even though the byte-SHA differs.
+
+    Returns `None` when the PDF carries no extractable text. Pure
+    scanned-image PDFs (faxes that arrived as TIFFs and were re-wrapped
+    as PDF, photos of paper forms) need vision; the post-extraction
+    structural fingerprint catches those duplicates downstream.
+
+    Normalization is intentionally aggressive — Unicode whitespace runs
+    collapse to a single space and case is folded — so two PDFs with
+    the same visible text but different paragraph wrapping or font
+    casing still hash the same.
+    """
+    if not pdf_bytes:
+        return None
+    # Lazy import: pypdfium2 ships a sizeable native library and we
+    # don't want to pay it on `from app.extraction.fingerprint import …`
+    # paths (e.g. agent graph startup) that never touch this helper.
+    import pypdfium2 as pdfium  # noqa: PLC0415
+
+    # Open defensively — non-PDF bytes (a mislabelled MIME at the
+    # writer, or a `contentType`-less attachment that the resolve
+    # endpoint defaulted to "application/pdf") raise PdfiumError.
+    # Treat that as "no text-layer fingerprint" so the caller falls
+    # through to vision instead of 500-ing the upload.
+    try:
+        pdf = pdfium.PdfDocument(pdf_bytes)
+    except pdfium.PdfiumError:
+        return None
+    try:
+        if len(pdf) == 0:
+            return None
+        normalized_pages: list[str] = []
+        any_text = False
+        for page in pdf:
+            try:
+                tp = page.get_textpage()
+                try:
+                    text = tp.get_text_range()
+                finally:
+                    tp.close()
+            finally:
+                page.close()
+            normalized = " ".join(text.split()).lower()
+            if normalized:
+                any_text = True
+            normalized_pages.append(normalized)
+        if not any_text:
+            return None
+        # Per-page newline keeps page boundaries observable in the hash;
+        # two PDFs with the same text rearranged across pages (rare but
+        # possible) hash differently. Within a page, content is already
+        # whitespace-collapsed to one line.
+        joined = "\n".join(normalized_pages)
+        return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    finally:
+        pdf.close()

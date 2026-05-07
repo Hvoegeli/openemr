@@ -187,6 +187,31 @@ class TestAttachAndExtract:
         assert result.created is False
 
     @pytest.mark.asyncio
+    async def test_skip_extraction_returns_phase_1_only(self) -> None:
+        # Layer-1.5 dedup interposes between Phase 1 (writer) and Phase 2
+        # (vision) so a duplicate text-PDF can short-circuit before
+        # paying for a Claude call. With skip_extraction=True we MUST
+        # call the writer once, MUST NOT call Claude, and MUST return
+        # extracted=None / persistence=None so the caller can decide.
+        writer = _FakeWriter()
+        anthropic_client = _FakeAnthropicClient(_lab_payload_with(TEST_REF_ID))
+        result = await attach_and_extract(
+            file_bytes=COHEN_LAB_PDF.read_bytes(),
+            filename="cohen_lab.pdf",
+            doc_type="lab_pdf",
+            patient_uuid=PATIENT_UUID,
+            mime_type="application/pdf",
+            writer=writer,  # type: ignore[arg-type]
+            anthropic_client=anthropic_client,  # type: ignore[arg-type]
+            skip_extraction=True,
+        )
+        assert len(writer.calls) == 1
+        assert anthropic_client.last_kwargs is None
+        assert result.extracted is None
+        assert result.persistence is None
+        assert result.reference_id == TEST_REF_ID
+
+    @pytest.mark.asyncio
     async def test_empty_file_bytes_raises(self) -> None:
         # We never want to send a zero-byte file to the writer or to
         # Claude — surface this at the entry point with a clear error.
