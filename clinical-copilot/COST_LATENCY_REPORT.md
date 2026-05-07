@@ -5,7 +5,7 @@ agent run on **2026-05-07 17:22 UTC**
 against the local OpenEMR docker stack, model **claude-sonnet-4-6**.
 
 Sample size: **12 cases** (0 failed). The cases are a curated subset of the
-150-run eval suite that exercise every major code path 
+150-run eval suite that exercise every major code path
 (chart summary, lab/vital pulls, drug-interaction RAG, refusals,
 ACL, multi-turn).
 
