@@ -311,7 +311,25 @@ def build_graph(
             return {"worker_route": "answer", "route_count": rc}
 
         t0 = time.time()
-        decision = await supervisor_chain.ainvoke([sys_supervisor, *state["messages"]])
+        # Anthropic's messages API rejects a conversation that ends in an
+        # assistant turn ("This model does not support assistant message
+        # prefill. The conversation must end with a user message."). On the
+        # first hop the message tail IS the user's HumanMessage and we're
+        # fine, but on subsequent hops a worker has just yielded with an
+        # AIMessage carrying no tool_calls — that trailing AIMessage trips
+        # the 400. Pad the supervisor's input with a synthetic prompt
+        # whenever the conversation doesn't already end in a HumanMessage.
+        history = list(state["messages"])
+        if not history or not isinstance(history[-1], HumanMessage):
+            history = [
+                *history,
+                HumanMessage(content=(
+                    "Choose the next worker (intake_extractor, "
+                    "evidence_retriever, or answer) and call the routing "
+                    "tool with your decision."
+                )),
+            ]
+        decision = await supervisor_chain.ainvoke([sys_supervisor, *history])
         # `with_structured_output` returns a Pydantic instance.
         next_worker = decision.next_worker
         reason = decision.reason
