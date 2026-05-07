@@ -1192,22 +1192,66 @@ async def api_create_patient(
             status_code=400,
             detail="given_name and family_name are required to create a patient",
         )
+    given_clean = body.given_name.strip()
+    family_clean = body.family_name.strip()
+
+    # Idempotent create — match the seed-script convention. Search FHIR for
+    # an existing Patient with the same family + given + birthdate before
+    # minting a new one. Without this guard, a doctor who re-runs the
+    # create-from-upload flow on the same intake form (e.g. after a
+    # network hiccup or because they hit "back" and resubmitted) ends up
+    # with N orphan duplicates of the same person — exactly what
+    # populated Hetzner with 4 "James Whitaker" rows during testing.
     try:
-        result = await app.state.openemr_writer.write_patient(
-            given_name=body.given_name.strip(),
-            family_name=body.family_name.strip(),
-            date_of_birth=body.date_of_birth,
-            sex=body.sex,
-            street=body.street,
-            city=body.city,
-            state=body.state,
-            postal_code=body.postal_code,
-            phone=body.phone,
+        params = {"family": family_clean, "given": given_clean, "_count": 5}
+        if body.date_of_birth:
+            params["birthdate"] = body.date_of_birth
+        existing_rows = await app.state.fhir.search("Patient", params)
+    except Exception as e:  # noqa: BLE001
+        log.warning("create_patient: pre-check FHIR search failed: %s", e)
+        existing_rows = []
+    existing_match: dict | None = None
+    for row in existing_rows:
+        names = (row.get("name") or [{}])[0]
+        rfam = (names.get("family") or "").strip().lower()
+        rgiv = ""
+        given_list = names.get("given") or []
+        if isinstance(given_list, list) and given_list:
+            rgiv = str(given_list[0]).strip().lower()
+        if rfam == family_clean.lower() and rgiv == given_clean.lower():
+            # Optional DOB check — match only if the existing row carries
+            # the same birthDate (else accept any same-name row, since
+            # the doctor explicitly told us this is the patient).
+            if body.date_of_birth and row.get("birthDate") and row["birthDate"] != body.date_of_birth:
+                continue
+            existing_match = row
+            break
+    if existing_match is not None:
+        new_uuid = existing_match.get("id")
+        log.info(
+            "create_patient: idempotent hit, reusing existing uuid=%s for %s, %s",
+            new_uuid, family_clean, given_clean,
         )
-    except OpenEMRWriteError as e:
-        raise HTTPException(
-            status_code=502, detail=f"OpenEMR patient create failed: {e}",
-        ) from e
+        # Auto-assign + active-patients add still run below via the
+        # shared post-create code path.
+        result = {"uuid": new_uuid, "pid": None}
+    else:
+        try:
+            result = await app.state.openemr_writer.write_patient(
+                given_name=given_clean,
+                family_name=family_clean,
+                date_of_birth=body.date_of_birth,
+                sex=body.sex,
+                street=body.street,
+                city=body.city,
+                state=body.state,
+                postal_code=body.postal_code,
+                phone=body.phone,
+            )
+        except OpenEMRWriteError as e:
+            raise HTTPException(
+                status_code=502, detail=f"OpenEMR patient create failed: {e}",
+            ) from e
     new_uuid = result.get("uuid")
     new_pid = result.get("pid")
     if not new_uuid:
@@ -1216,8 +1260,10 @@ async def api_create_patient(
             detail=f"OpenEMR did not return a uuid for the new patient: {result}",
         )
     # Add to runtime allow-list so the new patient surfaces immediately.
+    # `add` is idempotent (PRIMARY KEY ON CONFLICT IGNORE) so the existing-
+    # match path is harmless re-insert.
     app.state.active_patients.add(
-        family=body.family_name, given=body.given_name, added_by=username,
+        family=family_clean, given=given_clean, added_by=username,
     )
     # Auto-assign the new patient to the creating practitioner so the
     # immediately-following upload (and every subsequent chart fetch by
@@ -1447,12 +1493,28 @@ async def api_upload(
     # No match (or user already acknowledged): persist facts now and
     # record the fingerprint so future uploads of the same content
     # surface the prompt.
-    persistence = await persist_extracted_facts(
-        writer=app.state.openemr_writer,
-        patient_uuid=patient_uuid,
-        extracted=result.extracted,
-        source_document_id=new_ref,
-    )
+    #
+    # SHA-256 dedup guard: if the writer returned `created=False` the
+    # uploaded bytes are byte-identical to a DocumentReference already
+    # on the patient's chart, and Phase 3 (persist_extracted_facts) ran
+    # on the original upload. Re-running it now would create a duplicate
+    # lab Encounter / Observation / Condition row pointing at the same
+    # source doc — the symptom Harrison saw on Hetzner where Kowalski
+    # had three lab-encounter rows but only one visible lab document.
+    if not result.created:
+        log.info(
+            "upload SHA-dedup: skipping Phase 3 persistence (doc already on file)"
+            " ref=%s patient=%s",
+            new_ref, patient_uuid,
+        )
+        persistence = None
+    else:
+        persistence = await persist_extracted_facts(
+            writer=app.state.openemr_writer,
+            patient_uuid=patient_uuid,
+            extracted=result.extracted,
+            source_document_id=new_ref,
+        )
     result.persistence = persistence
     if fingerprint:
         # Use `record` so the first-seen fingerprint wins and a Replace
