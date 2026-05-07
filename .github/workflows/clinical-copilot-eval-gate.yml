@@ -1,0 +1,75 @@
+name: Clinical Co-Pilot eval gate
+
+# PR-blocking eval CI per W2 PRD §6 ("Eval-driven CI gate").
+# Runs the deterministic snapshot-replay gate on every push to master and on
+# every pull_request that touches clinical-copilot. If the gate fails, the
+# check goes red and (when branch protection is configured) the PR cannot be
+# merged. The gate itself does NOT call the LLM — it replays prerecorded
+# snapshots — so this workflow has zero per-run API cost.
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+    - 'clinical-copilot/**'
+    - '.github/workflows/clinical-copilot-eval-gate.yml'
+  push:
+    branches: [master]
+    paths:
+    - 'clinical-copilot/**'
+    - '.github/workflows/clinical-copilot-eval-gate.yml'
+  workflow_dispatch:
+
+# One run per ref at a time. New pushes cancel in-flight runs on the same
+# branch — the latest commit's gate result is the one we want.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Snapshot-replay eval gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: clinical-copilot
+
+    steps:
+    - name: Check out the repo
+      uses: actions/checkout@v4
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+      with:
+          # Pin a uv version for deterministic CI; bump intentionally.
+        version: "0.5.4"
+        enable-cache: true
+        cache-dependency-glob: clinical-copilot/uv.lock
+
+    - name: Sync the locked Python environment
+      run: uv sync --frozen
+      env:
+          # The replay gate doesn't call Anthropic, but the project's pyproject
+          # imports langchain_anthropic at module load. Sync deps without
+          # spending any LLM credit.
+        UV_PYTHON: "3.12"
+
+    - name: Run the eval gate (snapshot replay, no LLM calls)
+      run: PYTHONPATH=. uv run python -m evals.runner --gate --no-langsmith
+      env:
+          # Belt + suspenders: the gate ignores these but if a future code
+          # path tries to instantiate the Anthropic client, fail loud rather
+          # than silently call out and burn credit.
+        ANTHROPIC_API_KEY: "ci-noop"
+          # Disable LangSmith uploads from CI runs — keeps the production
+          # observability project clean of replay-only invocations.
+        LANGSMITH_TRACING: "false"
+
+    - name: Upload eval history artifact (on failure only)
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: eval-history
+        path: clinical-copilot/evals/history/
+        retention-days: 14
