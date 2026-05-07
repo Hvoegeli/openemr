@@ -35,7 +35,10 @@ log = logging.getLogger("agent.acl")
 # Practitioner UUID via `GET /apis/default/fhir/Practitioner?family=Lastname`,
 # (c) add a row here.
 USERNAME_TO_PRACTITIONER: dict[str, str] = {
-    "Smith": "a1afccd2-13c1-47e5-a1f0-a317272dcb12",
+    # Static overrides win over the dynamic resolver below. Use this for
+    # deployments where username ≠ lname or where two providers share a
+    # surname. Empty by default — every seeded OpenEMR user we ship with
+    # has username == lname (case-insensitive), which the resolver handles.
 }
 
 # Username -> OpenEMR legacy `users.id` integer. The appointment-write
@@ -45,6 +48,12 @@ USERNAME_TO_PRACTITIONER: dict[str, str] = {
 #   SELECT id, username FROM users WHERE authorized = 1;
 # inside docker compose exec -T mysql ... openemr.
 USERNAME_TO_USER_ID: dict[str, int] = {
+    # Legacy `users.id` is not exposed on FHIR Practitioner, so this stays
+    # static for now. Only the appointment-write path consumes it (`pc_aid`),
+    # and the overlay is disabled — the values below are the OpenEMR-shipped
+    # seed defaults; deployments with a different `users` table need to
+    # override these (env var or per-deploy config) when re-enabling
+    # appointments. Tracked as a follow-up.
     "admin": 1,
     "Smith": 5,
 }
@@ -55,12 +64,89 @@ USERNAME_TO_USER_ID: dict[str, int] = {
 _PANEL_CACHE: dict[str, tuple[float, frozenset[str] | None]] = {}
 _PANEL_TTL_S = 300.0
 
+# Resolved username -> Practitioner UUID, populated lazily by the dynamic
+# resolver below. Lowercased keys. Lives for the process lifetime — the FHIR
+# user table doesn't change often, and a UUID for an existing username
+# is stable. Restart the process to repopulate.
+_RESOLVED_PRACTITIONER: dict[str, str | None] = {}
+
 
 def get_practitioner_id(username: str | None) -> str | None:
-    """Return the Practitioner UUID for `username`, or None if unmapped."""
+    """Return the Practitioner UUID for `username` from the static override map.
+
+    Static-only; the async `resolve_practitioner_id` below adds a FHIR
+    fallback. Kept as a sync helper for callers that just want the override
+    (none today, but the symbol is part of the module's public surface).
+    """
     if not username:
         return None
     return USERNAME_TO_PRACTITIONER.get(username)
+
+
+async def resolve_practitioner_id(
+    client: FhirClient, username: str | None,
+) -> str | None:
+    """Resolve a username to a Practitioner UUID, with a FHIR-search fallback.
+
+    Resolution order:
+      1. Static `USERNAME_TO_PRACTITIONER` override.
+      2. FHIR search `Practitioner?family={username}`, taking the first
+         non-inactive match (lowercased family-name compare). We don't
+         pass `active=true` server-side because OpenEMR's Practitioner
+         endpoint returns 0 rows for that filter even when the records
+         are active — the active check is done client-side instead.
+
+    The fallback exists so deployments don't have to touch source to add a
+    new physician — every OpenEMR user we ship with has `username == lname`
+    by convention, so a `family=` search reliably hits the right record.
+
+    Limitations:
+      - Two providers with the same surname collide (the static map is the
+        escape hatch).
+      - A deployment that intentionally sets `username != lname` won't
+        resolve via FHIR; populate `USERNAME_TO_PRACTITIONER` instead.
+
+    Cached by lowercased username for the process lifetime; `None` cached
+    too (avoids re-hitting FHIR on every request for an unmapped user).
+    """
+    if not username:
+        return None
+    static = USERNAME_TO_PRACTITIONER.get(username)
+    if static:
+        return static
+    key = username.strip().lower()
+    if key in _RESOLVED_PRACTITIONER:
+        return _RESOLVED_PRACTITIONER[key]
+    # NOTE: do NOT pass `active=true` — OpenEMR's Practitioner endpoint
+    # has a bug where the `active` token search returns 0 rows even when
+    # the resource carries `active: true`. We filter client-side below.
+    try:
+        rows = await client.search(
+            "Practitioner", {"family": username, "_count": 5},
+        )
+    except Exception:  # noqa: BLE001
+        rows = []
+    resolved: str | None = None
+    for r in rows:
+        rid = r.get("id")
+        if not rid:
+            continue
+        if r.get("active") is False:
+            continue
+        # Defensive lname match — OpenEMR's family-name search is case-
+        # insensitive, but in case a deploy returns near-matches we double-
+        # check the lname equals (case-insensitive) the username.
+        family = ((r.get("name") or [{}])[0].get("family") or "").strip().lower()
+        if family and family != key:
+            continue
+        resolved = rid
+        break
+    _RESOLVED_PRACTITIONER[key] = resolved
+    if resolved:
+        log.info("acl: resolved username=%s -> practitioner=%s", username, resolved)
+    else:
+        log.warning("acl: no Practitioner found for username=%s", username)
+    return resolved
 
 
 def get_user_id(username: str | None) -> int | None:
@@ -110,7 +196,7 @@ async def get_panel_for_user(
     if cached and (now - cached[0]) < _PANEL_TTL_S:
         return cached[1]
 
-    prac_id = get_practitioner_id(username)
+    prac_id = await resolve_practitioner_id(client, username)
     if not prac_id or assignments is None:
         # Logged-in user with no Practitioner mapping (or no store wired) ->
         # sees nothing. Pre-cache so we don't recompute on every request.
@@ -149,5 +235,7 @@ def invalidate_panel(username: str | None = None) -> None:
     """Drop a cached panel (or all of them). Call after admin reassigns."""
     if username is None:
         _PANEL_CACHE.clear()
+        _RESOLVED_PRACTITIONER.clear()
         return
     _PANEL_CACHE.pop(username, None)
+    _RESOLVED_PRACTITIONER.pop(username.strip().lower(), None)
