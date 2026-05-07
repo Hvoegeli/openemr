@@ -25,6 +25,7 @@ from app.auth import is_admin
 from app.fhir.client import FhirClient
 
 if TYPE_CHECKING:
+    from app.active_patients_db import ActivePatientsStore
     from app.assignments_db import AssignmentStore
 
 log = logging.getLogger("agent.acl")
@@ -102,21 +103,32 @@ def _patient_name_key(patient: dict) -> tuple[str, str] | None:
     return (family, given)
 
 
-def filter_active(patients: list[dict]) -> list[dict]:
-    """Drop any Patient whose (family, given) isn't in `ACTIVE_PATIENT_NAMES`.
+def filter_active(
+    patients: list[dict],
+    *,
+    dynamic_store: "ActivePatientsStore | None" = None,
+) -> list[dict]:
+    """Drop any Patient whose (family, given) isn't allow-listed.
+
+    Two sources are union-ed: the static `ACTIVE_PATIENT_NAMES` (demo cut)
+    and the optional `dynamic_store` (patients created at runtime via the
+    create-from-upload flow). Either source empty / None means it
+    contributes nothing. If both are empty the filter is a no-op.
 
     Used at the FHIR-fetch boundary in the calendar, admin-assignment, and
-    upload-picker paths. Empty allow-list disables the filter. The panel
-    ACL filter still applies on top for non-admin users.
+    upload-picker paths. The panel ACL filter still applies on top for
+    non-admin users.
     """
-    if not ACTIVE_PATIENT_NAMES:
+    dynamic = dynamic_store.all() if dynamic_store is not None else frozenset()
+    allowed = ACTIVE_PATIENT_NAMES | dynamic
+    if not allowed:
         return patients
     out = []
     for p in patients:
         key = _patient_name_key(p)
         if key is None:
             continue
-        if key in ACTIVE_PATIENT_NAMES:
+        if key in allowed:
             out.append(p)
     return out
 

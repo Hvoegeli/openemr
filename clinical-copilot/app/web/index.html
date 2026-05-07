@@ -890,6 +890,46 @@
           <select id="upload-patient" required>
             <option value="">Loading…</option>
           </select>
+          <div class="hint">Pick an existing patient, or choose "➕ New patient" to create one from this document's intake form.</div>
+        </div>
+
+        <!-- New-patient inline form. Hidden until the user picks "New patient"
+             from the dropdown above. "Auto-fill from document" runs the
+             intake extractor; the user can review or edit before submit. -->
+        <div id="upload-newpatient" class="field" style="display:none; padding:0.85rem; border:1px dashed var(--border); border-radius:6px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:0.6rem; margin-bottom:0.6rem;">
+            <strong>New patient</strong>
+            <button type="button" id="upload-newpatient-autofill" style="font-size:0.85em; padding:0.3rem 0.7rem;">Auto-fill from document</button>
+          </div>
+          <div id="upload-newpatient-status" class="hint" style="margin-bottom:0.5rem;"></div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.5rem;">
+            <div>
+              <label for="np-given" style="display:block; font-size:0.85em;">First name *</label>
+              <input id="np-given" type="text" autocomplete="off" />
+            </div>
+            <div>
+              <label for="np-family" style="display:block; font-size:0.85em;">Last name *</label>
+              <input id="np-family" type="text" autocomplete="off" />
+            </div>
+            <div>
+              <label for="np-dob" style="display:block; font-size:0.85em;">Date of birth (YYYY-MM-DD)</label>
+              <input id="np-dob" type="text" autocomplete="off" placeholder="1973-04-12" />
+            </div>
+            <div>
+              <label for="np-sex" style="display:block; font-size:0.85em;">Sex</label>
+              <select id="np-sex">
+                <option value="">—</option>
+                <option value="Male">Male</option>
+                <option value="Female">Female</option>
+                <option value="Other">Other</option>
+                <option value="Unknown">Unknown</option>
+              </select>
+            </div>
+            <div style="grid-column: span 2;">
+              <label for="np-phone" style="display:block; font-size:0.85em;">Phone (optional)</label>
+              <input id="np-phone" type="text" autocomplete="off" />
+            </div>
+          </div>
         </div>
 
         <div class="field">
@@ -2935,6 +2975,16 @@
       const $selPatient  = document.getElementById('upload-patient');
       const $nameInput   = document.getElementById('upload-name');
       const $status      = document.getElementById('upload-status');
+      // Create-from-upload form (shown when patient = "__new__")
+      const $newPatBox   = document.getElementById('upload-newpatient');
+      const $newPatStat  = document.getElementById('upload-newpatient-status');
+      const $newPatFill  = document.getElementById('upload-newpatient-autofill');
+      const $npGiven     = document.getElementById('np-given');
+      const $npFamily    = document.getElementById('np-family');
+      const $npDob       = document.getElementById('np-dob');
+      const $npSex       = document.getElementById('np-sex');
+      const $npPhone     = document.getElementById('np-phone');
+      const NEW_PATIENT_MARKER = '__new__';
 
       let pickedFile = null;
       let dropdownsLoaded = false;
@@ -2966,12 +3016,92 @@
             fetch('/api/upload/doc-types').then(r => r.ok ? r.json() : Promise.reject('doc-types ' + r.status)),
           ]);
           fillSelect($selPatient, pr.items, '— Select patient —');
+          // Insert the "create new patient" option at the top of the dropdown
+          // (above existing patients) so it's a deliberate, easy-to-spot pick.
+          const newOpt = document.createElement('option');
+          newOpt.value = NEW_PATIENT_MARKER;
+          newOpt.textContent = '➕ New patient (create from this document)';
+          $selPatient.insertBefore(newOpt, $selPatient.children[1] || null);
           fillSelect($selDocType, dr.items, '— Select document type —');
           dropdownsLoaded = true;
         } catch (err) {
           setStatus('Failed to load form options: ' + err, 'err');
         }
       }
+
+      function setNewPatientFormVisible(visible) {
+        $newPatBox.style.display = visible ? 'block' : 'none';
+        if (!visible) {
+          $newPatStat.textContent = '';
+          $newPatStat.className = 'hint';
+        }
+      }
+
+      function resetNewPatientForm() {
+        $npGiven.value = '';
+        $npFamily.value = '';
+        $npDob.value = '';
+        $npSex.value = '';
+        $npPhone.value = '';
+        $newPatStat.textContent = '';
+        $newPatStat.className = 'hint';
+      }
+
+      $selPatient.addEventListener('change', () => {
+        setNewPatientFormVisible($selPatient.value === NEW_PATIENT_MARKER);
+      });
+
+      // Auto-fill button — runs the intake-form extractor on the picked file
+      // and pre-fills the demographics fields. The user can edit before submit.
+      $newPatFill.addEventListener('click', async () => {
+        if (!pickedFile) {
+          $newPatStat.textContent = 'Pick a file first.';
+          $newPatStat.className = 'status err';
+          return;
+        }
+        if ($selDocType.value !== 'intake_form') {
+          $newPatStat.textContent =
+            'Auto-fill requires the document type to be "Intake Form" — '
+            + 'lab reports don\'t carry the patient identity fields.';
+          $newPatStat.className = 'status err';
+          return;
+        }
+        $newPatFill.disabled = true;
+        $newPatStat.textContent = 'Extracting demographics from the file (5–15s)…';
+        $newPatStat.className = 'status';
+        const fd = new FormData();
+        fd.append('file', pickedFile, pickedFile.name);
+        fd.append('doc_type', 'intake_form');
+        try {
+          const r = await fetch('/api/upload/extract-demographics', { method: 'POST', body: fd });
+          if (!r.ok) {
+            const body = await r.json().catch(() => ({}));
+            $newPatStat.textContent = 'Extract failed (HTTP ' + r.status + '): ' + (body.detail || '');
+            $newPatStat.className = 'status err';
+            return;
+          }
+          const body = await r.json();
+          const d = body.demographics || {};
+          $npGiven.value  = d.given_name || '';
+          $npFamily.value = d.family_name || '';
+          $npDob.value    = d.date_of_birth || '';
+          // OpenEMR expects capitalized "Male"/"Female"; normalize from the
+          // schema's lowercase values.
+          if (d.sex) {
+            $npSex.value = d.sex.charAt(0).toUpperCase() + d.sex.slice(1).toLowerCase();
+          } else {
+            $npSex.value = '';
+          }
+          $npPhone.value  = d.phone || '';
+          $newPatStat.textContent = 'Auto-filled. Review and edit if needed, then click Upload.';
+          $newPatStat.className = 'status ok';
+        } catch (err) {
+          $newPatStat.textContent = 'Network error: ' + err;
+          $newPatStat.className = 'status err';
+        } finally {
+          $newPatFill.disabled = false;
+        }
+      });
 
       function setPickedFile(file) {
         pickedFile = file;
@@ -2994,6 +3124,8 @@
         $nameInput.placeholder = '(uses original filename if blank)';
         setStatus('', '');
         $submit.disabled = false;
+        resetNewPatientForm();
+        setNewPatientFormVisible(false);
       }
 
       async function openModal() {
@@ -3052,9 +3184,50 @@
         if (!$selPatient.value)  { setStatus('Pick a patient.', 'err'); return; }
         if (!$selDocType.value)  { setStatus('Pick a document type.', 'err'); return; }
 
-        // Compute the upload filename: user-supplied if filled in, else the
-        // file's original name. If the user typed a name without an extension,
-        // append the original file's extension so OpenEMR stores it correctly.
+        const isNewPatient = $selPatient.value === NEW_PATIENT_MARKER;
+        let patientUuid = $selPatient.value;
+
+        // Branch A: create new patient, then upload to them.
+        if (isNewPatient) {
+          const given  = ($npGiven.value  || '').trim();
+          const family = ($npFamily.value || '').trim();
+          if (!given || !family) {
+            setStatus('First name and last name are required to create a patient.', 'err');
+            return;
+          }
+          $submit.disabled = true;
+          setStatus('Creating patient ' + given + ' ' + family + '…', '');
+          const createBody = {
+            given_name: given,
+            family_name: family,
+            date_of_birth: ($npDob.value || '').trim() || null,
+            sex: $npSex.value || null,
+            phone: ($npPhone.value || '').trim() || null,
+          };
+          let cResp;
+          try {
+            cResp = await fetch('/api/admin/patient', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(createBody),
+            });
+          } catch (err) {
+            setStatus('Network error during patient create: ' + err, 'err');
+            $submit.disabled = false;
+            return;
+          }
+          let cBody;
+          try { cBody = await cResp.json(); } catch { cBody = { detail: 'non-JSON response' }; }
+          if (!cResp.ok || !cBody.patient_uuid) {
+            setStatus('Patient create failed (HTTP ' + cResp.status + '): ' + (cBody.detail || ''), 'err');
+            $submit.disabled = false;
+            return;
+          }
+          patientUuid = cBody.patient_uuid;
+          setStatus('Created patient. Uploading document…', '');
+        }
+
+        // Compute the upload filename (same logic for both branches).
         let outName = ($nameInput.value || '').trim();
         if (outName) {
           const userHasExt = /\.[A-Za-z0-9]{1,5}$/.test(outName);
@@ -3068,12 +3241,14 @@
         }
 
         $submit.disabled = true;
-        setStatus('Uploading + extracting (10–30s on first run)…', '');
+        if (!isNewPatient) {
+          setStatus('Uploading + extracting (10–30s on first run)…', '');
+        }
 
         const fd = new FormData();
-        fd.append('file', pickedFile, outName);   // 3rd arg overrides the filename
+        fd.append('file', pickedFile, outName);
         fd.append('doc_type', $selDocType.value);
-        fd.append('patient_uuid', $selPatient.value);
+        fd.append('patient_uuid', patientUuid);
 
         let resp;
         try {
@@ -3091,13 +3266,16 @@
           return;
         }
 
-        const tag = body.created
-          ? 'Uploaded'
-          : 'Already on this patient — kept the existing copy';
+        const tag = isNewPatient
+          ? 'New patient created and document uploaded'
+          : (body.created ? 'Uploaded' : 'Already on this patient — kept the existing copy');
         setStatus(tag + '. Refreshing list…', 'ok');
 
-        // Refresh the docs list in the tab if the upload was for the current patient
-        if ($selPatient.value === activePatientId) {
+        // Refresh the docs list in the tab if the upload was for the current
+        // patient. (Skipped on the new-patient path — the doctor will need
+        // to navigate to the freshly-minted chart, which the dashboard
+        // refresh below makes available.)
+        if (!isNewPatient && patientUuid === activePatientId) {
           try {
             const r = await fetch(docsUrl(activePatientId), { credentials: 'same-origin' });
             if (r.ok) {
@@ -3107,8 +3285,14 @@
             }
           } catch {}
         }
-        // Auto-close after a short success flash
-        setTimeout(closeModal, 1200);
+        // Auto-close after a short success flash. On the new-patient path
+        // we reload the page so the new patient appears in the calendar
+        // without the user having to refresh manually.
+        if (isNewPatient) {
+          setTimeout(() => { window.location.reload(); }, 1200);
+        } else {
+          setTimeout(closeModal, 1200);
+        }
       });
     })();
 

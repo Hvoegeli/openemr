@@ -35,6 +35,7 @@ async def get_calendar_today(
     client: FhirClient,
     *,
     panel: frozenset[str] | None = None,
+    active_patients_store=None,
 ) -> SourcedResult:
     """Return the inpatient roster for the dashboard.
 
@@ -85,9 +86,12 @@ async def get_calendar_today(
         patients = await _safe_search(client, "Patient", {"_count": 50})
         todays_appts = []
 
-    # Demo-cut allowlist (admin sees the cut too — see access_control.ACTIVE_PATIENTS).
+    # Demo-cut allowlist (static + runtime overrides). Admin sees the
+    # cut too — see access_control.ACTIVE_PATIENT_NAMES + ActivePatientsStore.
     from app import access_control
-    patients = access_control.filter_active(patients)
+    patients = access_control.filter_active(
+        patients, dynamic_store=active_patients_store,
+    )
     if panel is not None:
         patients = [p for p in patients if p.get("id") in panel]
     if not patients:

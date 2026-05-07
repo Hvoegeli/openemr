@@ -396,9 +396,46 @@ async def persist_extracted_facts(
     }
 
 
+async def extract_only(
+    *,
+    file_bytes: bytes,
+    doc_type: DocumentType,
+    mime_type: str = "application/pdf",
+    anthropic_client: AsyncAnthropic | None = None,
+    model: str = DEFAULT_MODEL,
+) -> "ExtractedDocument":
+    """Run Claude vision extraction on a file WITHOUT touching OpenEMR.
+
+    Use this when you need the structured extraction but don't yet have
+    a patient to attach to (the create-patient-from-upload flow). No
+    DocumentReference is created; nothing is persisted. The
+    `source_document_id` baked into citations is the placeholder
+    "pending" — callers should not feed an `extract_only` result into
+    `persist_extracted_facts` without first re-running with a real
+    DocumentReference id.
+
+    Returns an `ExtractedDocument` (LabReport | IntakeForm).
+    """
+    if not file_bytes:
+        raise ValueError("extract_only: file_bytes is empty")
+    page_pngs = render_to_png_pages(file_bytes, mime_type)
+    log.info(
+        "extract_only: rendered %d page(s) for doc_type=%s (no persistence)",
+        len(page_pngs), doc_type,
+    )
+    return await extract_via_claude(
+        page_pngs=page_pngs,
+        doc_type=doc_type,
+        source_document_id="pending",
+        client=anthropic_client,
+        model=model,
+    )
+
+
 __all__ = [
     "AttachAndExtractResult",
     "ExtractionError",
     "attach_and_extract",
+    "extract_only",
     "persist_extracted_facts",
 ]

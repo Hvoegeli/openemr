@@ -190,7 +190,10 @@ async def _prewarm_dashboard(app: FastAPI) -> None:
             # Prewarm the admin/no-filter view — matches `_calendar_cache_key(None)`
             # so the first admin request hits warm. Per-user filtered views are
             # cold on first request (rare in demo; 5-min TTL after).
-            r = await get_calendar_today(fhir, panel=None)
+            r = await get_calendar_today(
+                fhir, panel=None,
+                active_patients_store=getattr(app.state, "active_patients", None),
+            )
             return r["data"]
         cal_data = await cache.get_or_compute("calendar:today:all", _calendar)
         # Pull the raw Patient resources too — the calendar fetch produced
@@ -209,6 +212,7 @@ async def _prewarm_dashboard(app: FastAPI) -> None:
 
         warmed = await warm_panel_cards_and_docs(
             fhir, cache, patients,
+            active_patients_store=getattr(app.state, "active_patients", None),
         )
         log.info(
             "prewarm: dashboard fully warm in %.2fs (cards=%d)",
@@ -225,7 +229,9 @@ async def _safe_search_patients(fhir: FhirClient, *, panel: frozenset[str] | Non
     paths see the same roster.
     """
     rows = await fhir.search("Patient", {"_count": 50})
-    rows = access_control.filter_active(rows)
+    rows = access_control.filter_active(
+        rows, dynamic_store=getattr(app.state, "active_patients", None),
+    )
     if panel is None:
         return rows
     return [p for p in rows if p.get("id") in panel]
@@ -270,6 +276,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # separate `document_fingerprints` table.
     app.state.fingerprints = DocumentFingerprintStore(auth_db_path)
     log.info("fingerprints store: sqlite at %s", auth_db_path)
+    # Dynamic active-patients overrides — doctors create new patients via
+    # the upload-extract-and-create flow; their (family, given) tuples
+    # land here so they show up in the dashboard / picker without a
+    # source-code change to ACTIVE_PATIENT_NAMES.
+    from app.active_patients_db import ActivePatientsStore  # noqa: E402
+    app.state.active_patients = ActivePatientsStore(auth_db_path)
+    log.info("active-patients store: sqlite at %s", auth_db_path)
     # build_graph AFTER assignment store so the per-tool ACL gate has its
     # source of truth wired in.
     app.state.graph = build_graph(
@@ -291,6 +304,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.assignments.close()
         app.state.hidden_docs.close()
         app.state.fingerprints.close()
+        app.state.active_patients.close()
 
 
 app = FastAPI(title="Clinical Co-pilot", lifespan=lifespan)
@@ -1032,7 +1046,9 @@ async def api_upload_patients(
         patients = await app.state.fhir.search("Patient", {"_count": "200"})
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
-    patients = access_control.filter_active(patients)
+    patients = access_control.filter_active(
+        patients, dynamic_store=app.state.active_patients,
+    )
     items: list[dict] = []
     for p in patients:
         pid = p.get("id")
@@ -1072,6 +1088,149 @@ async def api_upload_doc_types(
             {"id": value, "label": label}
             for value, label in DOC_TYPE_LABELS.items()
         ],
+    }
+
+
+@app.post("/api/upload/extract-demographics")
+async def api_extract_demographics(
+    file: UploadFile,
+    doc_type: str = Form(...),
+    _user: str = Depends(current_user),
+) -> dict:
+    """Run intake-form extraction on an uploaded file WITHOUT persisting.
+
+    Used by the "create new patient from this document" flow in the upload
+    UI: the doctor selects a file before picking a patient, the frontend
+    POSTs here to pull demographics out of the file, and the user gets a
+    populated form they confirm or edit before clicking "Create patient."
+
+    Only `intake_form` is supported — lab PDFs don't carry the
+    demographics fields needed to mint a Patient. Other doc-types return
+    400.
+
+    Returns: `{"demographics": {given_name, family_name, date_of_birth,
+    sex, address, phone}, "chief_concern": str}`. Fields can be null when
+    the doc didn't carry that field.
+    """
+    if doc_type != "intake_form":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "extract-demographics requires doc_type=intake_form; "
+                f"got {doc_type!r}. Lab reports don't carry the patient "
+                "identity fields needed to create a Patient."
+            ),
+        )
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="empty file upload")
+    mime_type = file.content_type or "application/pdf"
+    try:
+        from app.extraction.extract import extract_only
+        extracted = await extract_only(
+            file_bytes=file_bytes,
+            doc_type="intake_form",
+            mime_type=mime_type,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except ExtractionError as e:
+        raise HTTPException(
+            status_code=502, detail=f"Document extraction failed: {e}",
+        ) from e
+    # extracted is an IntakeForm; pull just the fields the create-patient
+    # form needs. Keep `chief_concern` so the UI can show context.
+    demo = extracted.demographics
+    return {
+        "demographics": {
+            "given_name": demo.given_name,
+            "family_name": demo.family_name,
+            "date_of_birth": demo.date_of_birth.isoformat() if demo.date_of_birth else None,
+            "sex": demo.sex,
+            "address": demo.address,
+            "phone": demo.phone,
+        },
+        "chief_concern": extracted.chief_concern,
+    }
+
+
+class CreatePatientRequest(BaseModel):
+    """Demographics body for `/api/admin/patient` (create-from-upload)."""
+    given_name: str
+    family_name: str
+    date_of_birth: str | None = None  # ISO YYYY-MM-DD; required by OpenEMR for idempotency search
+    sex: str | None = None  # one of "Male", "Female", "Other", "Unknown"
+    street: str | None = None
+    city: str | None = None
+    state: str | None = None
+    postal_code: str | None = None
+    phone: str | None = None
+
+
+@app.post("/api/admin/patient")
+async def api_create_patient(
+    body: CreatePatientRequest,
+    username: str = Depends(current_user),
+) -> dict:
+    """Create a new Patient in OpenEMR and add them to the active-patients
+    allowlist so they appear immediately on the dashboard.
+
+    The create-from-upload flow calls this AFTER the doctor has reviewed
+    the demographics extracted from a doc and clicked "Create." On
+    success the response carries the new FHIR Patient UUID, which the
+    frontend then feeds back into `/api/upload` to attach the original
+    document to the freshly-minted patient.
+
+    Auth: any logged-in user can create a patient (matches the seeded
+    OpenEMR convention; the demo doesn't model nurse-vs-doctor roles).
+    Audit trail: write_patient logs the create at the writer level;
+    `username` is recorded as the `added_by` on the active-patients
+    override so we can see who minted each runtime entry.
+    """
+    if not body.given_name.strip() or not body.family_name.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="given_name and family_name are required to create a patient",
+        )
+    try:
+        result = await app.state.openemr_writer.write_patient(
+            given_name=body.given_name.strip(),
+            family_name=body.family_name.strip(),
+            date_of_birth=body.date_of_birth,
+            sex=body.sex,
+            street=body.street,
+            city=body.city,
+            state=body.state,
+            postal_code=body.postal_code,
+            phone=body.phone,
+        )
+    except OpenEMRWriteError as e:
+        raise HTTPException(
+            status_code=502, detail=f"OpenEMR patient create failed: {e}",
+        ) from e
+    new_uuid = result.get("uuid")
+    new_pid = result.get("pid")
+    if not new_uuid:
+        raise HTTPException(
+            status_code=502,
+            detail=f"OpenEMR did not return a uuid for the new patient: {result}",
+        )
+    # Add to runtime allow-list so the new patient surfaces immediately.
+    app.state.active_patients.add(
+        family=body.family_name, given=body.given_name, added_by=username,
+    )
+    # Bust calendar caches so the dashboard re-fetches with the new
+    # patient included on the next request.
+    app.state.cache.invalidate_prefix("calendar:today:")
+    log.info(
+        "create_patient: user=%s pid=%s uuid=%s name=%s, %s",
+        username, new_pid, new_uuid, body.family_name, body.given_name,
+    )
+    return {
+        "patient_uuid": new_uuid,
+        "pid": new_pid,
+        "given_name": body.given_name,
+        "family_name": body.family_name,
     }
 
 
@@ -1707,7 +1866,10 @@ async def calendar_today(username: str = Depends(current_user)) -> dict:
     cache_key = _calendar_cache_key(panel)
 
     async def _compute() -> dict:
-        result = await get_calendar_today(app.state.fhir, panel=panel)
+        result = await get_calendar_today(
+            app.state.fhir, panel=panel,
+            active_patients_store=app.state.active_patients,
+        )
         return result["data"]
     try:
         return await app.state.cache.get_or_compute(cache_key, _compute)
@@ -2118,7 +2280,9 @@ async def admin_patient_assignments(_admin: str = Depends(require_admin)) -> dic
         patients = await app.state.fhir.search("Patient", {"_count": 200})
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
-    patients = access_control.filter_active(patients)
+    patients = access_control.filter_active(
+        patients, dynamic_store=app.state.active_patients,
+    )
     current = app.state.assignments.all_assignments()  # patient_id -> prac_id
     items: list[dict] = []
     for p in patients:

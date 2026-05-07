@@ -67,6 +67,7 @@ async def warm_panel_cards_and_docs(
     patients: list[dict],
     *,
     encounters: list[dict] | None = None,
+    active_patients_store=None,
 ) -> int:
     """Roster-wide batched prewarm.
 
@@ -76,6 +77,9 @@ async def warm_panel_cards_and_docs(
         encounters: optional pre-fetched Encounter list (the calendar
             fetcher already pulls these for the today-row reason-line);
             pass them through to skip a redundant search.
+        active_patients_store: ActivePatientsStore for runtime overrides;
+            None means "static-only allow-list" which is fine for the
+            initial admin prewarm.
 
     Returns the number of patients whose `card:{pid}` and `docs:{pid}`
     cache slices were populated.
@@ -83,7 +87,9 @@ async def warm_panel_cards_and_docs(
     # Honour the demo allow-list so prewarm doesn't burn FHIR calls on
     # patients the UI will never display.
     from app import access_control  # lazy: avoid import cycle on module load
-    patients = access_control.filter_active(patients)
+    patients = access_control.filter_active(
+        patients, dynamic_store=active_patients_store,
+    )
     if not patients:
         return 0
 

@@ -174,6 +174,68 @@ class OpenEMRWriter:
         return self._token
 
     # ── lookups ────────────────────────────────────────────────────────
+    async def write_patient(
+        self,
+        *,
+        given_name: str,
+        family_name: str,
+        date_of_birth: str | None = None,
+        sex: str | None = None,
+        street: str | None = None,
+        city: str | None = None,
+        state: str | None = None,
+        postal_code: str | None = None,
+        phone: str | None = None,
+    ) -> dict:
+        """Create a new Patient via OpenEMR's standard REST API.
+
+        Mirrors `seed_demo_patients.py`'s create-patient call: POST to
+        `/patient` with fname/lname/DOB/sex/address fields and a normalized
+        `Title` for compatibility with the patient-search idempotency check.
+
+        Args:
+            given_name: First name (maps to `fname`).
+            family_name: Last name (maps to `lname`).
+            date_of_birth: ISO YYYY-MM-DD or None when the doc didn't have one.
+            sex: One of "Male", "Female", "Other", "Unknown" or None.
+                The intake-form schema uses lowercase `male/female/other/unknown`;
+                callers should capitalize before passing.
+            street, city, state, postal_code: Address fields, all optional.
+            phone: Best-known contact phone, optional.
+
+        Returns:
+            Flat dict from the standard-API envelope. Includes `pid` (legacy
+            integer) and `uuid` (FHIR UUID).
+
+        Raises:
+            OpenEMRWriteError on non-2xx, validation errors, or unparsable body.
+        """
+        body: dict = {"fname": given_name, "lname": family_name}
+        if date_of_birth:
+            body["DOB"] = date_of_birth
+        if sex:
+            body["sex"] = sex
+        if street:
+            body["street"] = street
+        if city:
+            body["city"] = city
+        if state:
+            body["state"] = state
+        if postal_code:
+            body["postal_code"] = postal_code
+        if phone:
+            body["phone_contact"] = phone
+        result = await self._post_standard_api(
+            path="/patient",
+            body=body,
+            label=f"create_patient {family_name}, {given_name}",
+        )
+        log.info(
+            "write_patient: created %s, %s pid=%s uuid=%s",
+            family_name, given_name, result.get("pid"), result.get("uuid"),
+        )
+        return result
+
     async def _patient_numeric_pid(self, token: str, patient_uuid: str) -> int:
         """Resolve a FHIR Patient UUID to OpenEMR's internal numeric pid."""
         r = await self._http.get(
