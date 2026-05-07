@@ -482,11 +482,7 @@ def build_graph(
         attempts = state.get("validation_attempts", 0)
 
         if not invalid and not uncited:
-            from app.agent.validator import extract_citations as _xc
-            log.info(
-                "validator: ok (attempts=%d) cites=%s sources=%s",
-                attempts, _xc(text), state["conversation_sources"],
-            )
+            log.info("validator: ok (attempts=%d)", attempts)
             return {}
 
         attempts += 1
