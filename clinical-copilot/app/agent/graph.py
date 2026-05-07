@@ -119,6 +119,59 @@ def _format_tool_result(name: str, result: dict) -> str | list[dict]:
     return json.dumps(result, default=str)
 
 
+def _strip_image_blocks_from_messages(messages: list) -> list:
+    """Return a copy of `messages` with image content blocks dropped from
+    every ToolMessage. Replaces each dropped image with one short text
+    placeholder (only on messages that actually carried images), so the
+    receiver knows pages were elided rather than missing entirely.
+
+    Used by the supervisor's per-hop LLM call. The supervisor only
+    decides which worker to route to next; it never reads pixels. The
+    images live in graph state so the worker that produced them — and
+    any other worker that re-enters with the same patient context —
+    still has full access. We just stop re-serializing the same
+    base64-encoded PNG pages on every supervisor hop.
+
+    Cost impact: a 4-page fax packet (~1,700 vision tokens / page on
+    Sonnet) re-sent across 4-5 supervisor hops is 27K-34K input tokens
+    of pure waste per conversation. Trimming the supervisor view is
+    ~10-25% of total agent input cost on document-grounded chats.
+
+    The function never mutates the input list or any message in it; it
+    returns fresh ToolMessage instances so graph state is unaffected.
+    """
+    out: list = []
+    for msg in messages:
+        if not isinstance(msg, ToolMessage) or not isinstance(msg.content, list):
+            out.append(msg)
+            continue
+        had_image = False
+        kept_blocks: list = []
+        for block in msg.content:
+            if isinstance(block, dict) and block.get("type") == "image":
+                had_image = True
+                continue
+            kept_blocks.append(block)
+        if not had_image:
+            out.append(msg)
+            continue
+        # Inform the supervisor that pages were elided. The text portion
+        # of the original ToolMessage (the JSON metadata block from
+        # `_format_tool_result` for `get_document_content`) is preserved
+        # above; this marker just makes the elision explicit so a future
+        # debug log doesn't read like "where did the images go?".
+        kept_blocks.append({
+            "type": "text",
+            "text": "[document page images omitted from supervisor view; available to extractor/retriever workers]",
+        })
+        out.append(ToolMessage(
+            content=kept_blocks,
+            tool_call_id=msg.tool_call_id,
+            name=msg.name,
+        ))
+    return out
+
+
 def _content_text_for_scan(content: str | list[dict]) -> str:
     """Extract the text portion of a tool result for the jailbreak scan.
 
@@ -327,8 +380,13 @@ def build_graph(
             return {"worker_route": "answer", "route_count": rc}
 
         t0 = time.time()
+        # Trim image blocks before the supervisor sees the message stream.
+        # The supervisor's only job is routing; it never reads pixels.
+        # Workers (intake_extractor, evidence_retriever) still see the
+        # un-trimmed history because they invoke the LLM via `state["messages"]`
+        # directly. See `_strip_image_blocks_from_messages` for cost math.
         history = _pad_for_anthropic(
-            list(state["messages"]),
+            _strip_image_blocks_from_messages(list(state["messages"])),
             prompt=(
                 "Choose the next worker (intake_extractor, "
                 "evidence_retriever, or answer) and call the routing "
