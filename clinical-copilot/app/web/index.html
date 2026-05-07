@@ -3051,18 +3051,27 @@
         setNewPatientFormVisible($selPatient.value === NEW_PATIENT_MARKER);
       });
 
-      // Auto-fill button — runs the intake-form extractor on the picked file
-      // and pre-fills the demographics fields. The user can edit before submit.
+      // Auto-fill button — runs the demographics extractor on the picked
+      // file and pre-fills the form fields. Supported on every doc-type
+      // whose schema captures patient identity (intake_form is required;
+      // workbook + hl7_message extract deterministically; fax_packet +
+      // referral_letter extract via vision when the document includes a
+      // patient header / face sheet — fields can come back blank when
+      // the document doesn't print them, and the user fills the rest in.
+      const _NEW_PATIENT_DOC_TYPES = new Set([
+        'intake_form', 'workbook', 'hl7_message', 'fax_packet', 'referral_letter',
+      ]);
       $newPatFill.addEventListener('click', async () => {
         if (!pickedFile) {
           $newPatStat.textContent = 'Pick a file first.';
           $newPatStat.className = 'status err';
           return;
         }
-        if ($selDocType.value !== 'intake_form') {
+        if (!_NEW_PATIENT_DOC_TYPES.has($selDocType.value)) {
           $newPatStat.textContent =
-            'Auto-fill requires the document type to be "Intake Form" — '
-            + 'lab reports don\'t carry the patient identity fields.';
+            'Auto-fill is only supported for intake forms, workbooks, '
+            + 'HL7 messages, fax packets, and referral letters. '
+            + 'Lab reports don\'t carry patient identity fields.';
           $newPatStat.className = 'status err';
           return;
         }
@@ -3071,7 +3080,7 @@
         $newPatStat.className = 'status';
         const fd = new FormData();
         fd.append('file', pickedFile, pickedFile.name);
-        fd.append('doc_type', 'intake_form');
+        fd.append('doc_type', $selDocType.value);
         try {
           const r = await fetch('/api/upload/extract-demographics', { method: 'POST', body: fd });
           if (!r.ok) {

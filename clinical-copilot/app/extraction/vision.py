@@ -82,17 +82,26 @@ if printed, plus the structured chart slice the letter exposes — past \
 medical history (with ICD-10 codes when printed), current medications, \
 allergies, and any pertinent lab values cited inline. Empty list-fields \
 are fine (a referral with NKDA, or a referral that omits PMH because it \
-folds it into the HPI paragraph).
+folds it into the HPI paragraph). When the letter prints a patient \
+header (name + DOB on letterhead, or a 'Re: <patient name>, DOB ...' \
+salutation), populate `patient_identity` with whatever fields are \
+visible (given_name, family_name, date_of_birth, sex, address, phone). \
+Omit `patient_identity` entirely when the letter only references the \
+patient anonymously ('the patient', 'this 55yo male').
 - For fax packets: a single fax bundles a transmittal cover sheet plus \
 1+ clinical pages (referral request, patient face sheet, lab report). \
 Extract the cover-sheet metadata (date, sender, recipient, urgency, the \
 free-text MESSAGE paragraph), the reason-for-consultation from the \
 referral page, the receiving specialty, and the structured chart slice \
 from the face sheet (active problems with ICD-10 when printed, current \
-medications, allergies). When a Laboratory Report page is included, \
-extract every result row into `lab_results` — these will be persisted as \
-a real lab encounter (the fax IS the source, not a quotation). Empty \
-list fields are fine for cover-only or referral-only faxes.
+medications, allergies). When the patient face sheet prints the \
+patient's name / DOB / sex / address / phone, populate \
+`patient_identity` from those values. Omit `patient_identity` entirely \
+on cover-only transmittals that carry no face sheet. When a Laboratory \
+Report page is included, extract every result row into `lab_results` — \
+these will be persisted as a real lab encounter (the fax IS the \
+source, not a quotation). Empty list fields are fine for cover-only or \
+referral-only faxes.
 - Citations: `page_or_section` is human-readable like 'page 1' or \
 'Allergies section'. `field_or_chunk_id` is a snake_case slug like \
 'results_table.hba1c' or 'medications.0' that uniquely identifies the \

@@ -41,6 +41,8 @@ from app.extraction.schemas import (
     Hl7LabPanel,
     Hl7Message,
     LabResult,
+    PatientIdentity,
+    Sex,
 )
 
 log = logging.getLogger("agent.extraction.hl7")
@@ -166,6 +168,101 @@ def _normalize_message_type(msh9: str) -> str:
     if msgtype and trigger:
         return f"{msgtype}^{trigger}"
     return msgtype or msh9 or ""
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# PID demographics — used by the "+ New patient from this HL7" UI flow
+# only. Phase-3 persistence ignores these (Hl7Message docstring explains
+# why we must not clobber demographics from a registration update).
+# ──────────────────────────────────────────────────────────────────────────
+
+# PID-8 emits a single character per HL7 v2 table 0001. Map to the
+# lowercase vocabulary the IntakeForm `Sex` literal uses so the
+# new-patient flow's downstream Pydantic accepts the value.
+_HL7_SEX_MAP: dict[str, str] = {
+    "M": "male",
+    "F": "female",
+    "O": "other",
+    "U": "unknown",
+    "A": "other",  # Ambiguous — closest co-pilot vocabulary slot.
+    "N": "unknown",  # "Not applicable" — same.
+}
+
+
+def _parse_pid_identity(
+    pid: list[str], *, source_document_id: str,
+) -> PatientIdentity | None:
+    """Pull PID-5 (name), PID-7 (DOB), PID-8 (sex), PID-11 (address),
+    PID-13 (phone) into an optional `PatientIdentity`.
+
+    Returns `None` when no PID-5..PID-13 component yields a usable
+    field — i.e. the segment is present but every demographic slot
+    was empty. The new-patient UI then shows blank fields for the
+    user to fill in manually.
+
+    Component breakdown (HL7 v2.5):
+      PID-5: Family^Given^Middle^Suffix^Prefix^Degree^Type
+      PID-7: YYYYMMDD[HHMM[SS]]
+      PID-8: Single-letter sex code (M/F/O/U/A/N)
+      PID-11: Street^Other^City^State^Zip^Country^...
+      PID-13: Repeating phone field; first occurrence's component 1
+              carries the area-code+number string.
+    """
+    pid5 = _seg_field(pid, 5)
+    pid7 = _seg_field(pid, 7).strip()
+    pid8 = _seg_field(pid, 8).strip().upper()
+    pid11 = _seg_field(pid, 11)
+    pid13 = _seg_field(pid, 13)
+
+    family_name = _component(pid5, 1).strip() or None
+    given_name = _component(pid5, 2).strip() or None
+    dob = _parse_hl7_date(pid7) if pid7 else None
+    sex_value = _HL7_SEX_MAP.get(pid8)
+    sex: Sex | None = sex_value  # type: ignore[assignment]
+
+    address_parts = []
+    if pid11:
+        # PID-11: Street^Other^City^State^Zip^Country
+        street = _component(pid11, 1).strip()
+        city = _component(pid11, 3).strip()
+        state = _component(pid11, 4).strip()
+        zip_code = _component(pid11, 5).strip()
+        if street:
+            address_parts.append(street)
+        cs_zip = " ".join(p for p in (city, state, zip_code) if p)
+        if cs_zip:
+            address_parts.append(cs_zip)
+    address = ", ".join(address_parts) or None
+
+    phone: str | None = None
+    if pid13:
+        # PID-13 may repeat (`~`). First occurrence's component 1 is
+        # the formatted number on most senders; component 12 carries
+        # area+number on stricter v2.5 senders. Take the first non-empty.
+        first_repeat = pid13.split("~", 1)[0]
+        phone_candidate = _component(first_repeat, 1).strip()
+        if not phone_candidate:
+            phone_candidate = _component(first_repeat, 12).strip()
+        phone = phone_candidate or None
+
+    if not any((given_name, family_name, dob, sex, address, phone)):
+        return None
+    return PatientIdentity(
+        given_name=given_name,
+        family_name=family_name,
+        date_of_birth=dob,
+        sex=sex,
+        address=address,
+        phone=phone,
+        source_citation=_hl7_citation(
+            source_document_id=source_document_id,
+            page_or_section="PID",
+            field_or_chunk_id="PID-5/7/8/11/13",
+            quote_or_value=" ".join(
+                p for p in (given_name or "", family_name or "") if p
+            ).strip() or "(name not printed)",
+        ),
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -422,6 +519,7 @@ def parse_hl7_message(
 
     pid = next((s for s in segments if s and s[0] == "PID"), None)
     patient_mrn: str | None = None
+    patient_identity: PatientIdentity | None = None
     if pid is not None:
         # PID-3 is the patient identifier list; first identifier's
         # first component is the MRN. Some implementations stuff the
@@ -429,6 +527,13 @@ def parse_hl7_message(
         pid3 = _seg_field(pid, 3)
         if pid3:
             patient_mrn = _component(pid3, 1).strip() or None
+        # PID-5 / -7 / -8 / -11 / -13 — surface as PatientIdentity for
+        # the new-patient-from-document UI flow only. Phase-3
+        # persistence intentionally ignores these (see Hl7Message
+        # docstring on why ADT-A08 must NOT clobber demographics).
+        patient_identity = _parse_pid_identity(
+            pid, source_document_id=source_document_id,
+        )
 
     if message_type == "ADT^A08":
         evn = next((s for s in segments if s and s[0] == "EVN"), None)
@@ -460,6 +565,7 @@ def parse_hl7_message(
             message_control_id=message_control_id,
             timestamp=timestamp,
             patient_mrn=patient_mrn,
+            patient_identity=patient_identity,
             event_reason=event_reason,
             allergies=allergies,
             lab_panels=[],
@@ -475,6 +581,7 @@ def parse_hl7_message(
         message_control_id=message_control_id,
         timestamp=timestamp,
         patient_mrn=patient_mrn,
+        patient_identity=patient_identity,
         event_reason=None,
         allergies=[],
         lab_panels=panels,

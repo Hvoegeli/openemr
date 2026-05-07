@@ -1109,54 +1109,175 @@ async def api_extract_demographics(
     POSTs here to pull demographics out of the file, and the user gets a
     populated form they confirm or edit before clicking "Create patient."
 
-    Only `intake_form` is supported — lab PDFs don't carry the
-    demographics fields needed to mint a Patient. Other doc-types return
-    400.
+    All five extracted doc-types are supported now:
+
+    - **intake_form**: required Demographics on the schema — every
+      field populated when on the form.
+    - **workbook**: deterministic openpyxl parse; `patient_name` is one
+      string the helper splits into given/family.
+    - **hl7_message**: deterministic PID-5/7/8/11/13 parse.
+    - **fax_packet** / **referral_letter**: vision-extracted optional
+      `patient_identity` — populated when the face sheet / letter
+      header carries the data, `null` otherwise.
+
+    Lab PDFs (`lab_pdf`) still 400 — the lab report header carries the
+    patient name/DOB but the LabReport schema deliberately doesn't
+    capture them as structured data, and rebuilding extraction for an
+    edge case isn't worth the LLM cost.
 
     Returns: `{"demographics": {given_name, family_name, date_of_birth,
-    sex, address, phone}, "chief_concern": str}`. Fields can be null when
-    the doc didn't carry that field.
+    sex, address, phone}, "chief_concern": str | null}`. Any field can
+    be null when the source document didn't print it; the user fills in
+    the rest on the create-patient form.
     """
-    if doc_type != "intake_form":
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "extract-demographics requires doc_type=intake_form; "
-                f"got {doc_type!r}. Lab reports don't carry the patient "
-                "identity fields needed to create a Patient."
-            ),
-        )
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="empty file upload")
-    mime_type = file.content_type or "application/pdf"
-    try:
-        from app.extraction.extract import extract_only
-        extracted = await extract_only(
-            file_bytes=file_bytes,
-            doc_type="intake_form",
-            mime_type=mime_type,
+    raw_ct = (file.content_type or "").lower()
+    filename = file.filename or "upload.bin"
+    if not raw_ct or raw_ct == "application/octet-stream":
+        fl = filename.lower()
+        if fl.endswith(".docx"):
+            raw_ct = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif fl.endswith(".pdf"):
+            raw_ct = "application/pdf"
+        elif fl.endswith(".hl7"):
+            raw_ct = "text/plain"
+        elif fl.endswith(".tiff") or fl.endswith(".tif"):
+            raw_ct = "image/tiff"
+        elif fl.endswith(".xlsx"):
+            raw_ct = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    mime_type = raw_ct or "application/pdf"
+
+    if doc_type not in DOC_TYPE_LABELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported doc_type {doc_type!r}; "
+                   f"expected one of {list(DOC_TYPE_LABELS)}",
         )
+
+    chief_concern: str | None = None
+    identity: dict[str, str | None]
+
+    try:
+        if doc_type == "intake_form":
+            from app.extraction.extract import extract_only  # noqa: PLC0415
+            extracted = await extract_only(
+                file_bytes=file_bytes,
+                doc_type="intake_form",
+                mime_type=mime_type,
+            )
+            demo = extracted.demographics
+            identity = {
+                "given_name": demo.given_name,
+                "family_name": demo.family_name,
+                "date_of_birth": demo.date_of_birth.isoformat() if demo.date_of_birth else None,
+                "sex": demo.sex,
+                "address": demo.address,
+                "phone": demo.phone,
+            }
+            chief_concern = extracted.chief_concern
+        elif doc_type == "hl7_message":
+            from app.extraction.hl7 import parse_hl7_message  # noqa: PLC0415
+            msg = parse_hl7_message(file_bytes, source_document_id="DocumentReference/preview")
+            identity = _identity_from_optional(msg.patient_identity)
+        elif doc_type == "workbook":
+            from app.extraction.workbook import parse_workbook  # noqa: PLC0415
+            wb = parse_workbook(file_bytes, source_document_id="DocumentReference/preview")
+            given_name, family_name = _split_full_name(wb.patient_name)
+            identity = {
+                "given_name": given_name,
+                "family_name": family_name,
+                "date_of_birth": wb.patient_dob.isoformat() if wb.patient_dob else None,
+                "sex": None,
+                "address": None,
+                "phone": None,
+            }
+        elif doc_type in ("fax_packet", "referral_letter"):
+            from app.extraction.extract import extract_only  # noqa: PLC0415
+            extracted = await extract_only(
+                file_bytes=file_bytes,
+                doc_type=doc_type,  # type: ignore[arg-type]
+                mime_type=mime_type,
+            )
+            identity = _identity_from_optional(
+                getattr(extracted, "patient_identity", None),
+            )
+        else:
+            # lab_pdf and any future doc_type without a demographics
+            # surface land here.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"extract-demographics doesn't support doc_type={doc_type!r}; "
+                    "the schema for that document type does not capture patient "
+                    "identity. Pick a different file or create the patient via "
+                    "the manual form."
+                ),
+            )
     except ValueError as e:
+        # Render-side errors (unsupported MIME, empty file) and
+        # Hl7ParseError (subclass of ValueError) both land here.
         raise HTTPException(status_code=400, detail=str(e)) from e
     except ExtractionError as e:
         raise HTTPException(
             status_code=502, detail=f"Document extraction failed: {e}",
         ) from e
-    # extracted is an IntakeForm; pull just the fields the create-patient
-    # form needs. Keep `chief_concern` so the UI can show context.
-    demo = extracted.demographics
+
     return {
-        "demographics": {
-            "given_name": demo.given_name,
-            "family_name": demo.family_name,
-            "date_of_birth": demo.date_of_birth.isoformat() if demo.date_of_birth else None,
-            "sex": demo.sex,
-            "address": demo.address,
-            "phone": demo.phone,
-        },
-        "chief_concern": extracted.chief_concern,
+        "demographics": identity,
+        "chief_concern": chief_concern,
     }
+
+
+def _identity_from_optional(p: object) -> dict[str, str | None]:
+    """Project an optional `PatientIdentity` (or None) into the
+    flat dict shape the create-patient UI expects."""
+    given = family = dob = sex = address = phone = None
+    if p is not None:
+        given = getattr(p, "given_name", None)
+        family = getattr(p, "family_name", None)
+        dob_obj = getattr(p, "date_of_birth", None)
+        dob = dob_obj.isoformat() if dob_obj else None
+        sex = getattr(p, "sex", None)
+        address = getattr(p, "address", None)
+        phone = getattr(p, "phone", None)
+    return {
+        "given_name": given,
+        "family_name": family,
+        "date_of_birth": dob,
+        "sex": sex,
+        "address": address,
+        "phone": phone,
+    }
+
+
+def _split_full_name(full: str | None) -> tuple[str | None, str | None]:
+    """Best-effort split a single 'patient_name' string into
+    `(given_name, family_name)`.
+
+    Workbook authors print the name in either of two conventions:
+    `"Last, First Middle"` (commas-separated, last-name-first — the
+    typical EHR display) or `"First Middle Last"` (space-separated,
+    Western convention). We disambiguate by looking for the comma; on
+    a comma-split, the chunk before the comma is family, after is
+    given. On a space-split, the LAST token is family and the
+    earlier tokens collapse into given. Returns `(None, None)` for
+    blank input."""
+    if not full or not full.strip():
+        return (None, None)
+    s = full.strip()
+    if "," in s:
+        family, _, given = s.partition(",")
+        return (given.strip() or None, family.strip() or None)
+    parts = s.split()
+    if len(parts) == 1:
+        # A single token is ambiguous — return as the family name and
+        # let the user disambiguate on the form. Family is the more
+        # commonly-known half (a chart card showing only "Smith" is
+        # informative; only "John" is not).
+        return (None, parts[0])
+    return (" ".join(parts[:-1]), parts[-1])
 
 
 class CreatePatientRequest(BaseModel):
