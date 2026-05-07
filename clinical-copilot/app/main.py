@@ -1219,6 +1219,32 @@ async def api_create_patient(
     app.state.active_patients.add(
         family=body.family_name, given=body.given_name, added_by=username,
     )
+    # Auto-assign the new patient to the creating practitioner so the
+    # immediately-following upload (and every subsequent chart fetch by
+    # the same doctor) passes the panel ACL. Admins skip — they have no
+    # Practitioner UUID and don't need a panel slot.
+    if not is_admin(username):
+        prac_id = await access_control.resolve_practitioner_id(
+            app.state.fhir, username,
+        )
+        if prac_id:
+            app.state.assignments.upsert(
+                patient_id=new_uuid,
+                practitioner_id=prac_id,
+                assigned_by=username,
+            )
+            access_control.invalidate_panel(username)
+            log.info(
+                "create_patient: auto-assigned %s to practitioner=%s "
+                "for user=%s",
+                new_uuid, prac_id, username,
+            )
+        else:
+            log.warning(
+                "create_patient: could not resolve practitioner for user=%s; "
+                "patient created but not auto-assigned (upload will 404)",
+                username,
+            )
     # Bust calendar caches so the dashboard re-fetches with the new
     # patient included on the next request.
     app.state.cache.invalidate_prefix("calendar:today:")
