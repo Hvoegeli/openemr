@@ -58,6 +58,41 @@ USERNAME_TO_USER_ID: dict[str, int] = {
     "Smith": 5,
 }
 
+# Demo allow-list: only these patients are surfaced anywhere the co-pilot
+# decides which patients exist (calendar, admin assignment list, upload
+# patient picker). Filtering here rather than deleting from OpenEMR's mysql
+# keeps the cut reversible and deploy-safe. Empty/None disables the filter
+# (admin still sees every Patient the FHIR layer returns).
+#
+# Decoded from `patient_data.uuid` on 2026-05-06. To add or remove names,
+# edit this set — no mysql changes required. Comment per line names the
+# patient so future-me can read the file without running a join.
+ACTIVE_PATIENTS: frozenset[str] = frozenset({
+    "a1b3cb94-4986-4c23-982d-e71c9f44cb17",  # Margaret Chen
+    "a1a6044b-c6af-40a4-80aa-4c5ce61014da",  # Nora Cohen
+    "a1b417c8-5256-43a3-b139-909373f584a6",  # Robert Kowalski
+    "a1b417c6-03ef-4c5e-852f-0c37c17fed39",  # Sofia Reyes
+    "a1a962d6-957a-42ae-9814-7ba2d14ca697",  # Liam Hale
+    "a1a9628f-90dc-4927-9770-59a89c4b3d95",  # Anjali Patel
+    "a1a9619a-ebe4-4c02-b928-3ea800ee15fd",  # Marcus Roberts
+    "a1a6044b-c6e3-4aef-87be-cbdc1c2337d7",  # Jason Binder    (empty shell)
+    "a1a6044b-c6fa-4655-b213-afb540f58e6e",  # Wallace Buckley (empty shell)
+    "a1a6044b-c6eb-4499-8816-99bbe522233b",  # Robert Dickey   (empty shell)
+})
+
+
+def filter_active(patients: list[dict]) -> list[dict]:
+    """Drop any Patient resource whose id isn't in `ACTIVE_PATIENTS`.
+
+    Used at the FHIR-fetch boundary in the calendar, admin-assignment, and
+    upload-picker paths. A safety net — the panel ACL filter still applies
+    on top for non-admin users.
+    """
+    if not ACTIVE_PATIENTS:
+        return patients
+    return [p for p in patients if p.get("id") in ACTIVE_PATIENTS]
+
+
 # In-memory cache: username -> (cached_at_epoch, panel_or_None). 5-minute TTL
 # matches the dashboard cache convention. Restarting the process drops this;
 # admin-driven assignment changes flush it via `invalidate_panel`.

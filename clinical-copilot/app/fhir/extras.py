@@ -85,6 +85,9 @@ async def get_calendar_today(
         patients = await _safe_search(client, "Patient", {"_count": 50})
         todays_appts = []
 
+    # Demo-cut allowlist (admin sees the cut too — see access_control.ACTIVE_PATIENTS).
+    from app import access_control
+    patients = access_control.filter_active(patients)
     if panel is not None:
         patients = [p for p in patients if p.get("id") in panel]
     if not patients:

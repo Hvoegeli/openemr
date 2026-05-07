@@ -80,6 +80,10 @@ async def warm_panel_cards_and_docs(
     Returns the number of patients whose `card:{pid}` and `docs:{pid}`
     cache slices were populated.
     """
+    # Honour the demo allow-list so prewarm doesn't burn FHIR calls on
+    # patients the UI will never display.
+    from app import access_control  # lazy: avoid import cycle on module load
+    patients = access_control.filter_active(patients)
     if not patients:
         return 0
 

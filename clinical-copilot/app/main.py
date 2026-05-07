@@ -225,6 +225,7 @@ async def _safe_search_patients(fhir: FhirClient, *, panel: frozenset[str] | Non
     paths see the same roster.
     """
     rows = await fhir.search("Patient", {"_count": 50})
+    rows = access_control.filter_active(rows)
     if panel is None:
         return rows
     return [p for p in rows if p.get("id") in panel]
@@ -1031,6 +1032,7 @@ async def api_upload_patients(
         patients = await app.state.fhir.search("Patient", {"_count": "200"})
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    patients = access_control.filter_active(patients)
     items: list[dict] = []
     for p in patients:
         pid = p.get("id")
@@ -2116,6 +2118,7 @@ async def admin_patient_assignments(_admin: str = Depends(require_admin)) -> dic
         patients = await app.state.fhir.search("Patient", {"_count": 200})
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
+    patients = access_control.filter_active(patients)
     current = app.state.assignments.all_assignments()  # patient_id -> prac_id
     items: list[dict] = []
     for p in patients:
