@@ -70,9 +70,14 @@ from app.fhir.client import FhirClient  # noqa: E402
 from app.fhir.extras import get_calendar_today, get_supporting_documents  # noqa: E402
 from app.fhir.writer import OpenEMRWriter, OpenEMRWriteError  # noqa: E402
 from app.extraction.extract import attach_and_extract, persist_extracted_facts  # noqa: E402
-from app.extraction.fingerprint import compute_fingerprint  # noqa: E402
+from app.extraction.fingerprint import (  # noqa: E402
+    compute_fingerprint,
+    namespace_text_fingerprint,
+    pdf_text_fingerprint,
+)
+from app.extraction.render import render_to_png_pages  # noqa: E402
 from app.extraction.schemas import DOC_TYPE_LABELS  # noqa: E402
-from app.extraction.vision import ExtractionError  # noqa: E402
+from app.extraction.vision import ExtractionError, extract_via_claude  # noqa: E402
 from app.observability import (  # noqa: E402
     TokenUsageCallback,
     init_langsmith,
@@ -1456,6 +1461,10 @@ async def api_upload(
                 skip_persistence=True,
             )
         else:
+            # Two-phase split so a Layer-1.5 text-fingerprint match can
+            # short-circuit before paying for a Claude vision call.
+            # Phase 1 (writer) runs unconditionally; Phase 2 (render +
+            # extract_via_claude) is gated below.
             result = await attach_and_extract(
                 file_bytes=file_bytes,
                 filename=filename,
@@ -1463,6 +1472,7 @@ async def api_upload(
                 patient_uuid=patient_uuid,
                 mime_type=mime_type,
                 writer=app.state.openemr_writer,
+                skip_extraction=True,
                 skip_persistence=True,
             )
     except ValueError as e:
@@ -1478,6 +1488,92 @@ async def api_upload(
             status_code=502, detail=f"Document extraction failed: {e}",
         ) from e
 
+    new_ref = result.reference_id
+    new_doc_id_only = new_ref.split("/", 1)[-1]
+
+    # Dedup Layer 1.5 — pre-extraction PDF text-layer fingerprint.
+    # Runs only for non-HL7/non-workbook docs (vision-bound paths). For
+    # text-bearing PDFs, hashing the embedded text layer lets us detect
+    # a re-uploaded document with different bytes but identical visible
+    # content and surface the dedup modal *without* spending Anthropic
+    # credits on extraction. Pure scanned-image PDFs return None here
+    # and fall through to Layer-2 (post-extraction structural match).
+    text_fp_namespaced: str | None = None
+    if (
+        doc_type not in ("hl7_message", "workbook")
+        and not acknowledge_existing
+        and mime_type.lower() == "application/pdf"
+    ):
+        raw_text_fp = pdf_text_fingerprint(file_bytes)
+        if raw_text_fp:
+            text_fp_namespaced = namespace_text_fingerprint(raw_text_fp)
+            text_match = app.state.fingerprints.find_match(
+                patient_id=patient_uuid, fingerprint=text_fp_namespaced,
+            )
+            if text_match is not None and text_match.document_id != new_doc_id_only:
+                log.info(
+                    "upload text-match (L1.5): user=%s patient=%s "
+                    "fp=%s prior=%s new=%s — skipping vision",
+                    username, patient_uuid, raw_text_fp[:12],
+                    text_match.document_id, new_doc_id_only,
+                )
+                prior_meta: dict = {
+                    "ref": f"DocumentReference/{text_match.document_id}",
+                }
+                try:
+                    prior_doc = await app.state.fhir.get(
+                        f"DocumentReference/{text_match.document_id}",
+                    )
+                    prior_attach = (prior_doc.get("content") or [{}])[0].get("attachment") or {}
+                    prior_meta.update({
+                        "title": prior_attach.get("title") or "",
+                        "filename": prior_attach.get("title") or "",
+                        "date": prior_doc.get("date"),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    log.info("text-match prior metadata fetch failed: %s", e)
+                # Same `content_match` shape Layer 2 raises — the
+                # frontend modal already handles Replace / Keep both /
+                # Cancel against the new doc id.
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "content_match",
+                        "message": (
+                            "A different file with the same visible text "
+                            "is already on this patient's chart. Choose "
+                            "Replace, Keep both, or Cancel."
+                        ),
+                        "fingerprint": raw_text_fp,
+                        "match_layer": "text",
+                        "prior": prior_meta,
+                        "new": {
+                            "ref": new_ref,
+                            "filename": filename,
+                        },
+                    },
+                )
+
+    # Phase 2 — render + extract. Deferred from `attach_and_extract`
+    # above so the Layer-1.5 short-circuit can skip it. ValueError /
+    # ExtractionError translate to the same 400/502 the orchestrator
+    # would have produced.
+    if doc_type not in ("hl7_message", "workbook"):
+        try:
+            page_pngs = render_to_png_pages(file_bytes, mime_type)
+            extracted = await extract_via_claude(
+                page_pngs=page_pngs,
+                doc_type=doc_type,  # type: ignore[arg-type]
+                source_document_id=new_ref,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except ExtractionError as e:
+            raise HTTPException(
+                status_code=502, detail=f"Document extraction failed: {e}",
+            ) from e
+        result.extracted = extracted
+
     # Dedup Layer 2 — content fingerprint match.
     # Compute the structural fingerprint of the extraction. If a prior
     # DocumentReference for this patient produced the same fingerprint
@@ -1486,8 +1582,6 @@ async def api_upload(
     # the user can pick Replace / Keep both / Cancel before we persist
     # facts. The new doc stays in OpenEMR either way; cancel
     # soft-hides it via the resolve-content-match endpoint.
-    new_ref = result.reference_id
-    new_doc_id_only = new_ref.split("/", 1)[-1]
     fingerprint = compute_fingerprint(result.extracted)
     if fingerprint and not acknowledge_existing:
         match = app.state.fingerprints.find_match(
@@ -1570,6 +1664,22 @@ async def api_upload(
             app.state.fingerprints.record(
                 patient_id=patient_uuid,
                 fingerprint=fingerprint,
+                document_id=new_doc_id_only,
+                recorded_by=username,
+            )
+    # Layer-1.5 text fingerprint recording. Same first-seen-wins
+    # semantics as the structural row above: only register when no
+    # prior doc on this patient owns the same text-fingerprint, so a
+    # subsequent upload of the same visible content prompts against
+    # the canonical doc rather than rotating the canonical owner.
+    if text_fp_namespaced:
+        existing_text_owner = app.state.fingerprints.find_match(
+            patient_id=patient_uuid, fingerprint=text_fp_namespaced,
+        )
+        if existing_text_owner is None:
+            app.state.fingerprints.record(
+                patient_id=patient_uuid,
+                fingerprint=text_fp_namespaced,
                 document_id=new_doc_id_only,
                 recorded_by=username,
             )
@@ -1941,14 +2051,33 @@ async def api_document_resolve_content_match(
     )
 
     fingerprint = compute_fingerprint(extracted)
+    # Layer-1.5 text fingerprint for the new doc — recorded for PDF
+    # uploads only (mirrors the upload endpoint's gating). The
+    # `forget_document` call below clears BOTH the structural and the
+    # text rows the prior doc owned, so re-recording both here keeps
+    # future uploads of the same content prompting against the new
+    # canonical doc.
+    text_fp_namespaced: str | None = None
+    if content_type.lower() == "application/pdf":
+        raw_text_fp = pdf_text_fingerprint(file_bytes)
+        if raw_text_fp:
+            text_fp_namespaced = namespace_text_fingerprint(raw_text_fp)
     if action == "replace":
         # Hide the prior doc and reassign its fingerprint to the new doc.
         app.state.hidden_docs.hide(document_id=prior_doc_id, hidden_by=username)
-        if fingerprint:
+        if fingerprint or text_fp_namespaced:
             app.state.fingerprints.forget_document(prior_doc_id)
+        if fingerprint:
             app.state.fingerprints.record(
                 patient_id=patient_id,
                 fingerprint=fingerprint,
+                document_id=new_doc_id,
+                recorded_by=username,
+            )
+        if text_fp_namespaced:
+            app.state.fingerprints.record(
+                patient_id=patient_id,
+                fingerprint=text_fp_namespaced,
                 document_id=new_doc_id,
                 recorded_by=username,
             )

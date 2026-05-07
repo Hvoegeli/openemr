@@ -70,10 +70,15 @@ class AttachAndExtractResult:
 
     def __init__(
         self,
-        extracted: ExtractedDocument,
+        extracted: ExtractedDocument | None,
         write_result: dict[str, Any],
         persistence: dict[str, Any] | None = None,
     ) -> None:
+        # `extracted` is `None` only when the caller passed
+        # `skip_extraction=True` — the writer ran (Phase 1) but the
+        # vision call was deferred so the caller can interpose a
+        # pre-extraction check (typically Layer-1.5 text-fingerprint
+        # dedup) and decide whether to incur Anthropic credits.
         self.extracted = extracted
         self.write_result = write_result
         # Persistence is the optional Phase-3 summary describing which
@@ -106,6 +111,7 @@ async def attach_and_extract(
     writer: OpenEMRWriter | None = None,
     anthropic_client: AsyncAnthropic | None = None,
     model: str = DEFAULT_MODEL,
+    skip_extraction: bool = False,
     skip_persistence: bool = False,
 ) -> AttachAndExtractResult:
     """Persist a clinical document to OpenEMR + extract its structured
@@ -153,6 +159,15 @@ async def attach_and_extract(
             mime_type=mime_type,
         )
         source_document_id = str(write_result["reference_id"])
+
+        # Caller is interposing a pre-extraction check (typically the
+        # Layer-1.5 PDF text-fingerprint dedup) and will run Phase 2 +
+        # Phase 3 itself if the check passes. We bail out here so a
+        # confirmed text-fingerprint hit doesn't pay for a vision call.
+        if skip_extraction:
+            return AttachAndExtractResult(
+                extracted=None, write_result=write_result, persistence=None,
+            )
 
         # Phase 2 — render + extract. Renderer will raise ValueError for
         # unsupported MIMEs; let it propagate (caller's bug to fix).
