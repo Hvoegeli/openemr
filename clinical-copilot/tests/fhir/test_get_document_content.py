@@ -23,7 +23,7 @@ import io
 import pytest
 from PIL import Image
 
-from app.fhir.adapter import get_document_content
+from app.fhir.adapter import get_document_content, get_document_pages
 
 
 def _tiny_png_bytes() -> bytes:
@@ -33,6 +33,20 @@ def _tiny_png_bytes() -> bytes:
     img = Image.new("RGB", (1, 1), color=(255, 255, 255))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _multi_page_pdf_bytes(num_pages: int) -> bytes:
+    """Build an N-page text PDF for multi-page-per-attachment tests."""
+    from reportlab.lib.pagesizes import LETTER  # noqa: PLC0415
+    from reportlab.pdfgen import canvas  # noqa: PLC0415
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=LETTER)
+    for i in range(num_pages):
+        c.drawString(72, 720, f"page {i + 1}")
+        c.showPage()
+    c.save()
     return buf.getvalue()
 
 
@@ -194,8 +208,222 @@ class TestMaxPagesTruncation:
         atts = result["data"]["attachments"]
         assert len(atts) == 2
         assert atts[0]["page_count"] == 1
+        assert atts[0]["page_start"] == 1
         assert atts[1]["page_count"] == 0
+        # Fully-truncated attachment keeps page_start=None — no global
+        # page belongs to it.
+        assert atts[1]["page_start"] is None
         assert sum(a["page_count"] for a in atts) == result["data"]["page_count"]
+
+
+class TestMultiAttachmentPageNumbering:
+    """Locks down the `page_start` mapping so a multi-attachment doc can
+    surface "Attachment N — page K" labels in the viewer without
+    re-walking the attachments list. Single-attachment docs always
+    have `page_start == 1` (or None on a render-error attachment)."""
+
+    async def test_two_attachments_two_pages_each(self) -> None:
+        png = _tiny_png_bytes()
+        client = FakeFhirClient(
+            documents={
+                "doc-multi": _doc(
+                    "doc-multi",
+                    attachments=[
+                        {
+                            "title": "cover.png",
+                            "contentType": "image/png",
+                            "data": _png_data_uri_b64(png),
+                        },
+                        {
+                            "title": "lab.png",
+                            "contentType": "image/png",
+                            "data": _png_data_uri_b64(png),
+                        },
+                    ],
+                ),
+            },
+        )
+
+        result = await get_document_content(
+            client,  # type: ignore[arg-type]
+            document_id="doc-multi",
+        )
+
+        assert result["data"]["page_count"] == 2
+        atts = result["data"]["attachments"]
+        assert len(atts) == 2
+        # First attachment's pages start at global page 1.
+        assert atts[0]["page_count"] == 1
+        assert atts[0]["page_start"] == 1
+        # Second attachment's pages start at global page 2 (since the
+        # first contributed 1 page).
+        assert atts[1]["page_count"] == 1
+        assert atts[1]["page_start"] == 2
+
+    async def test_render_error_attachment_keeps_page_start_none(self) -> None:
+        png = _tiny_png_bytes()
+        client = FakeFhirClient(
+            documents={
+                "doc-mid-fail": _doc(
+                    "doc-mid-fail",
+                    attachments=[
+                        {
+                            "title": "cover.png",
+                            "contentType": "image/png",
+                            "data": _png_data_uri_b64(png),
+                        },
+                        {
+                            # Unsupported MIME — render fails, attachment
+                            # surfaces as `error` with page_count=0.
+                            "title": "broken.docx",
+                            "contentType": "application/vnd.docx",
+                            "data": _png_data_uri_b64(png),
+                        },
+                        {
+                            "title": "report.png",
+                            "contentType": "image/png",
+                            "data": _png_data_uri_b64(png),
+                        },
+                    ],
+                ),
+            },
+        )
+
+        result = await get_document_content(
+            client,  # type: ignore[arg-type]
+            document_id="doc-mid-fail",
+        )
+
+        atts = result["data"]["attachments"]
+        assert len(atts) == 3
+        assert atts[0]["page_start"] == 1 and atts[0]["page_count"] == 1
+        # Failed attachment: zero pages, page_start=None. This
+        # disambiguates "the attachment that owns global page X" lookups.
+        assert atts[1]["page_start"] is None and atts[1]["page_count"] == 0
+        # Third attachment shifts to page 2 — failed-attachment "skips"
+        # the global numbering entirely, so the global → local lookup
+        # never resolves into the failed attachment.
+        assert atts[2]["page_start"] == 2 and atts[2]["page_count"] == 1
+
+    async def test_global_to_local_lookup_round_trips(self) -> None:
+        """Spec lock-in: for any global page in `pages_png_b64`, exactly
+        one attachment owns it, and `(attachment_index, local_page)`
+        recovers cleanly from `(page_start, page_count)`."""
+        png = _tiny_png_bytes()
+        client = FakeFhirClient(
+            documents={
+                "doc-multi3": _doc(
+                    "doc-multi3",
+                    attachments=[
+                        {"title": f"a{i}.png", "contentType": "image/png",
+                         "data": _png_data_uri_b64(png)}
+                        for i in range(3)
+                    ],
+                ),
+            },
+        )
+
+        result = await get_document_content(
+            client,  # type: ignore[arg-type]
+            document_id="doc-multi3",
+        )
+
+        atts = result["data"]["attachments"]
+        total = result["data"]["page_count"]
+        assert total == 3
+
+        for global_page in range(1, total + 1):
+            # Find the unique attachment that owns this page.
+            owning = [
+                a for a in atts
+                if a["page_start"] is not None
+                and a["page_start"] <= global_page
+                < a["page_start"] + a["page_count"]
+            ]
+            assert len(owning) == 1, (
+                f"global page {global_page} should belong to exactly one "
+                f"attachment, found {len(owning)}"
+            )
+
+    async def test_partial_truncation_keeps_page_start_correct(self) -> None:
+        """Partial truncation: a 3-page attachment that delivers only 2
+        because `max_pages` cuts off mid-attachment. `page_count`
+        reflects the delivered count; `page_start` still points at the
+        first delivered page (it was stamped before the cap fired)."""
+        # First attachment: 1-page PNG. Second attachment: 3-page PDF.
+        # max_pages=3 lets through all of attachment 0 + only the first
+        # 2 pages of attachment 1.
+        png = _tiny_png_bytes()
+        pdf = _multi_page_pdf_bytes(3)
+        client = FakeFhirClient(
+            documents={
+                "doc-partial": _doc(
+                    "doc-partial",
+                    attachments=[
+                        {"title": "cover.png", "contentType": "image/png",
+                         "data": _png_data_uri_b64(png)},
+                        {"title": "report.pdf", "contentType": "application/pdf",
+                         "data": _png_data_uri_b64(pdf)},
+                    ],
+                ),
+            },
+        )
+        result = await get_document_content(
+            client,  # type: ignore[arg-type]
+            document_id="doc-partial",
+            max_pages=3,
+        )
+
+        atts = result["data"]["attachments"]
+        assert result["data"]["page_count"] == 3
+        assert result["data"]["pages_truncated"] is True
+        assert atts[0]["page_count"] == 1
+        assert atts[0]["page_start"] == 1
+        # Partial: 2 of 3 pages delivered. page_start points at the
+        # first page we DID deliver — not at where the third (dropped)
+        # page would have been.
+        assert atts[1]["page_count"] == 2
+        assert atts[1]["page_start"] == 2
+
+    async def test_get_document_pages_exposes_attachment_context(self) -> None:
+        """The viewer endpoint should mirror the agent tool: each rendered
+        page carries `attachment_index` + `attachment_page` (1-indexed
+        local), and the top-level `attachments` summary carries
+        `page_start`/`page_count` for each attachment."""
+        png = _tiny_png_bytes()
+        client = FakeFhirClient(
+            documents={
+                "doc-viewer": _doc(
+                    "doc-viewer",
+                    attachments=[
+                        {"title": "cover.png", "contentType": "image/png",
+                         "data": _png_data_uri_b64(png)},
+                        {"title": "lab.png", "contentType": "image/png",
+                         "data": _png_data_uri_b64(png)},
+                    ],
+                ),
+            },
+        )
+        result = await get_document_pages(
+            client,  # type: ignore[arg-type]
+            document_id="doc-viewer",
+        )
+
+        pages = result["data"]["pages"]
+        assert len(pages) == 2
+        # First page belongs to attachment 0, page 1 within that attachment.
+        assert pages[0]["page"] == 1
+        assert pages[0]["attachment_index"] == 0
+        assert pages[0]["attachment_page"] == 1
+        # Second page belongs to attachment 1, page 1 within that attachment.
+        assert pages[1]["page"] == 2
+        assert pages[1]["attachment_index"] == 1
+        assert pages[1]["attachment_page"] == 1
+
+        atts = result["data"]["attachments"]
+        assert len(atts) == 2
+        assert atts[0]["page_start"] == 1 and atts[0]["page_count"] == 1
+        assert atts[1]["page_start"] == 2 and atts[1]["page_count"] == 1
 
 
 class TestPerAttachmentError:

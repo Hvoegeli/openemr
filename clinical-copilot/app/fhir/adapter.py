@@ -474,6 +474,13 @@ async def get_document_content(
     layer special-cases this tool to surface the pages as image blocks in
     a multimodal `ToolMessage` so Claude can actually see them.
 
+    Each entry in `data.attachments` carries `page_count` (delivered count)
+    and `page_start` — the 1-indexed global page number of that
+    attachment's FIRST delivered page, or `None` when the attachment
+    delivered zero pages (render error, fetch error, or fully truncated
+    by `max_pages`). Multi-attachment consumers can map a global page
+    back to `(attachment_index, local_page)` without re-walking the list.
+
     `max_pages` caps total page count across all attachments to keep the
     message under Anthropic's per-request limits; `data.pages_truncated`
     is true when the cap kicked in.
@@ -503,11 +510,18 @@ async def get_document_content(
         att = content_entry.get("attachment") or {}
         content_type = att.get("contentType") or ""
         title = att.get("title")
+        # `page_start` (1-indexed) is the global page number of this
+        # attachment's FIRST delivered page. None when the attachment
+        # delivered zero pages — render error, fetch error, or
+        # `max_pages` truncation hit before this attachment got a turn.
+        # Lets multi-attachment consumers map a global page back to
+        # `(attachment_index, local_page)` without re-walking the list.
         att_meta = {
             "index": idx,
             "title": title,
             "content_type": content_type,
             "page_count": 0,
+            "page_start": None,
         }
 
         file_bytes = await _fetch_attachment_bytes(client, att)
@@ -528,6 +542,11 @@ async def get_document_content(
             if len(pages_b64) >= max_pages:
                 truncated = True
                 break
+            if delivered == 0:
+                # Stamp `page_start` on the FIRST page we actually deliver
+                # so a fully-truncated attachment (every page dropped by
+                # the cap) keeps `page_start = None`.
+                att_meta["page_start"] = len(pages_b64) + 1
             pages_b64.append(_b64_png(png))
             delivered += 1
         att_meta["page_count"] = delivered
@@ -879,18 +898,30 @@ async def get_document_pages(
         raise PatientAccessDenied(patient_id or "")
 
     pages: list[dict] = []
+    attachments_meta: list[dict] = []
     truncated = False
 
-    for content_entry in doc.get("content") or []:
+    for idx, content_entry in enumerate(doc.get("content") or []):
         att = content_entry.get("attachment") or {}
         content_type = att.get("contentType") or ""
+        title = att.get("title")
+        att_meta: dict = {
+            "index": idx,
+            "title": title,
+            "content_type": content_type,
+            "page_count": 0,
+            "page_start": None,
+        }
         file_bytes = await _fetch_attachment_bytes(client, att)
         if file_bytes is None:
+            attachments_meta.append(att_meta)
             continue
         try:
             pngs = render_to_png_pages(file_bytes, content_type)
         except ValueError:
+            attachments_meta.append(att_meta)
             continue
+        delivered = 0
         for png in pngs:
             if len(pages) >= max_pages:
                 truncated = True
@@ -900,12 +931,23 @@ async def get_document_pages(
                     w, h = im.size
             except Exception:  # noqa: BLE001
                 w, h = 0, 0
+            if delivered == 0:
+                att_meta["page_start"] = len(pages) + 1
             pages.append({
                 "page": len(pages) + 1,
+                # Per-page attachment context. The viewer can label a
+                # rendered page as "Attachment N — page K of M" without
+                # re-deriving from the attachments summary. `attachment_page`
+                # is 1-indexed within the attachment.
+                "attachment_index": idx,
+                "attachment_page": delivered + 1,
                 "png_b64": _b64_png(png),
                 "width_px": w,
                 "height_px": h,
             })
+            delivered += 1
+        att_meta["page_count"] = delivered
+        attachments_meta.append(att_meta)
         if truncated:
             break
 
@@ -916,6 +958,7 @@ async def get_document_pages(
             "page_count": len(pages),
             "pages_truncated": truncated,
             "pages": pages,
+            "attachments": attachments_meta,
         },
         "sources": [_ref(doc)],
     }
