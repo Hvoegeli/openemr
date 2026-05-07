@@ -294,6 +294,22 @@ def build_graph(
         "cache_control": {"type": "ephemeral"},
     }])
 
+    # Anthropic's messages API rejects a conversation that ends in an
+    # assistant turn ("This model does not support assistant message
+    # prefill. The conversation must end with a user message."). On the
+    # first hop the message tail IS the user's HumanMessage and we're
+    # fine, but on subsequent hops a worker has just yielded with an
+    # AIMessage (or a ToolMessage that LangChain renders as user-role,
+    # which is fine — but a non-tool AIMessage trips the 400). Every
+    # node that invokes the LLM with `state["messages"]` runs this pad
+    # so the message tail is always a HumanMessage. The pad is local to
+    # the LLM call and never persisted to graph state, so workers
+    # downstream still see the un-padded history.
+    def _pad_for_anthropic(messages: list, *, prompt: str) -> list:
+        if not messages or not isinstance(messages[-1], HumanMessage):
+            return [*messages, HumanMessage(content=prompt)]
+        return list(messages)
+
     async def supervisor_node(state: AgentState) -> dict:
         rc = state.get("route_count", 0) + 1
         if rc > MAX_SUPERVISOR_ROUTES:
@@ -311,24 +327,14 @@ def build_graph(
             return {"worker_route": "answer", "route_count": rc}
 
         t0 = time.time()
-        # Anthropic's messages API rejects a conversation that ends in an
-        # assistant turn ("This model does not support assistant message
-        # prefill. The conversation must end with a user message."). On the
-        # first hop the message tail IS the user's HumanMessage and we're
-        # fine, but on subsequent hops a worker has just yielded with an
-        # AIMessage carrying no tool_calls — that trailing AIMessage trips
-        # the 400. Pad the supervisor's input with a synthetic prompt
-        # whenever the conversation doesn't already end in a HumanMessage.
-        history = list(state["messages"])
-        if not history or not isinstance(history[-1], HumanMessage):
-            history = [
-                *history,
-                HumanMessage(content=(
-                    "Choose the next worker (intake_extractor, "
-                    "evidence_retriever, or answer) and call the routing "
-                    "tool with your decision."
-                )),
-            ]
+        history = _pad_for_anthropic(
+            list(state["messages"]),
+            prompt=(
+                "Choose the next worker (intake_extractor, "
+                "evidence_retriever, or answer) and call the routing "
+                "tool with your decision."
+            ),
+        )
         decision = await supervisor_chain.ainvoke([sys_supervisor, *history])
         # `with_structured_output` returns a Pydantic instance.
         next_worker = decision.next_worker
@@ -347,18 +353,34 @@ def build_graph(
         return {"worker_route": next_worker, "route_count": rc}
 
     async def intake_extractor(state: AgentState) -> dict:
-        messages = [sys_intake, *state["messages"]]
+        history = _pad_for_anthropic(
+            list(state["messages"]),
+            prompt="Continue the intake-extraction work. Call a tool or finish.",
+        )
+        messages = [sys_intake, *history]
         response = await intake_model.ainvoke(messages)
         return {"messages": [response]}
 
     async def evidence_retriever(state: AgentState) -> dict:
-        messages = [sys_evidence, *state["messages"]]
+        history = _pad_for_anthropic(
+            list(state["messages"]),
+            prompt="Continue the evidence-retrieval work. Call a tool or finish.",
+        )
+        messages = [sys_evidence, *history]
         response = await evidence_model.ainvoke(messages)
         return {"messages": [response]}
 
     async def answerer(state: AgentState) -> dict:
         sys_msg = sys_answerer_advisor if state.get("advisor_mode") else sys_answerer_default
-        messages = [sys_msg, *state["messages"]]
+        history = _pad_for_anthropic(
+            list(state["messages"]),
+            prompt=(
+                "Compose the final answer for the doctor using the chart "
+                "facts gathered so far. Cite each clinical claim with an "
+                "inline `[ResourceType/ID]` from the tool results."
+            ),
+        )
+        messages = [sys_msg, *history]
         response = await answerer_model.ainvoke(messages)
         return {"messages": [response]}
 
