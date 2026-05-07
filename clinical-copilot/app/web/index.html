@@ -3282,6 +3282,12 @@
               const data = await r.json();
               docsList.innerHTML = renderDocs(data);
               docsCount.textContent = (data.items || []).length || '·';
+              // Update the prefetch buffer so a later tab-switch (which
+              // re-renders from buffer) doesn't overwrite the fresh
+              // post-upload docs with the pre-upload snapshot.
+              const entry = buffer.get(activePatientId) || {};
+              entry.docs = data;
+              buffer.set(activePatientId, entry);
             }
           } catch {}
         }
