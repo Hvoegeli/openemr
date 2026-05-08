@@ -834,6 +834,26 @@
       display: none;
     }
     .schedule-btn:hover { filter: brightness(1.1); }
+    /* Persistent prompt that surfaces on the patient header when sex is
+       unknown — typically because the patient was created from a document
+       (.docx, .xlsx) that didn't print sex and the create defaulted to
+       "Unknown" so OpenEMR's required-field validator would accept it. */
+    .sex-set-banner {
+      margin: 0.5rem 0 0.85rem;
+      padding: 0.55rem 0.75rem;
+      background: #fff7ed; border: 1px solid #fed7aa;
+      border-radius: 6px;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.55rem;
+      font-size: 0.85rem; color: #7c2d12;
+    }
+    .sex-set-banner select { font: inherit; padding: 0.15rem 0.35rem; }
+    .sex-set-banner button {
+      background: var(--accent); color: white; border: 0;
+      border-radius: 4px; padding: 0.3rem 0.7rem;
+      font: inherit; font-size: 0.78rem; cursor: pointer;
+    }
+    .sex-set-banner button:hover { filter: brightness(1.1); }
+    .sex-set-banner button:disabled { opacity: 0.6; cursor: progress; }
     .schedule-time-row { display: flex; gap: 0.5rem; }
     .schedule-time-row > div { flex: 1; }
     #schedule-patient-name {
@@ -1481,6 +1501,21 @@
             }).join('') + '</ul>'
           : '<div class="empty">' + emptyText + '</div>';
 
+      const sexNorm = (d.sex || '').toString().toLowerCase();
+      const needsSex = !sexNorm || sexNorm === 'unknown';
+      const sexBanner = needsSex
+        ? '<div class="sex-set-banner" data-patient-uuid="' + escapeHtml(d.mrn || '') + '">'
+            + '<span>Sex was not detected when this patient was created — set it now:</span>'
+            + '<select class="sex-set-select">'
+              + '<option value="">—</option>'
+              + '<option value="Male">Male</option>'
+              + '<option value="Female">Female</option>'
+              + '<option value="Other">Other</option>'
+              + '<option value="Unknown">Confirm Unknown</option>'
+            + '</select>'
+            + '<button type="button" class="sex-set-btn">Save</button>'
+          + '</div>'
+        : '';
       return [
         '<div class="patient-header">',
           '<div>',
@@ -1493,6 +1528,7 @@
           '</div>',
           '<button type="button" id="btn-schedule" class="schedule-btn">＋ Schedule</button>',
         '</div>',
+        sexBanner,
         '<h3 data-section="AllergyIntolerance">Allergies</h3>',
         list(d.allergies, 'AllergyIntolerance', a =>
           escapeHtml(a.substance || '?') +
@@ -1871,12 +1907,43 @@
     // Delegated click handler for the patient-card panel — handles the
     // "View Vital Trends →" / "← Back to patient card" toggles AND
     // clicks on individual chart data-points (which open the detail row).
-    tabCard.addEventListener('click', (e) => {
+    tabCard.addEventListener('click', async (e) => {
       const openBtn   = e.target.closest('#open-trends');
       const closeBtn  = e.target.closest('#close-trends');
       const dot       = e.target.closest('circle[data-vital-key]');
       const row       = e.target.closest('.vc-list li[data-vital-key]');
       const sourceRef = e.target.closest('.source-ref[data-fhir-ref]');
+      const sexSave   = e.target.closest('.sex-set-btn');
+      if (sexSave) {
+        const banner = sexSave.closest('.sex-set-banner');
+        const sel = banner && banner.querySelector('.sex-set-select');
+        const pid = banner && banner.getAttribute('data-patient-uuid');
+        const value = sel && sel.value;
+        if (!pid || !value) {
+          if (sel) sel.focus();
+          return;
+        }
+        sexSave.disabled = true;
+        try {
+          const r = await fetch('/api/patient/' + encodeURIComponent(pid) + '/sex', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ sex: value }),
+          });
+          if (!r.ok) {
+            const body = await r.json().catch(() => ({}));
+            alert('Sex update failed (HTTP ' + r.status + '): ' + (body.detail || ''));
+            sexSave.disabled = false;
+            return;
+          }
+          await refreshCard(pid);
+        } catch (err) {
+          alert('Network error during sex update: ' + err);
+          sexSave.disabled = false;
+        }
+        return;
+      }
       if (!activePatientId) return;
       if (openBtn)  { showVitalTrends(activePatientId); return; }
       if (closeBtn) {
@@ -3076,7 +3143,7 @@
           return;
         }
         $newPatFill.disabled = true;
-        $newPatStat.textContent = 'Extracting demographics from the file (5–15s)…';
+        $newPatStat.textContent = 'Extracting demographics from the file (2–4s)…';
         $newPatStat.className = 'status';
         const fd = new FormData();
         fd.append('file', pickedFile, pickedFile.name);

@@ -312,6 +312,47 @@ class OpenEMRWriter:
                 continue
         return None
 
+    async def update_patient_sex(self, *, patient_uuid: str, sex: str) -> bool:
+        """PUT /api/patient/{uuid} with a new `sex` value.
+
+        Returns True when the standard API accepts the update, False on any
+        non-2xx OR an invalid sex value. Used by the create-from-upload
+        follow-up flow: when a patient was created with sex="Unknown"
+        because the source doc didn't print one, a subsequent doc that DOES
+        print sex auto-corrects the record. Failures are non-fatal — the
+        upload still succeeds and the banner stays visible until the next
+        attempt.
+
+        Input guard: OpenEMR's standard `/api/patient/{uuid}` PUT silently
+        accepts arbitrary sex strings and FHIR coerces unrecognized values
+        to `gender="other"`. We refuse anything outside the four canonical
+        values up front so a stray caller can't pollute a patient's record
+        through this method.
+        """
+        if sex not in ("Male", "Female", "Other", "Unknown"):
+            log.warning(
+                "update_patient_sex %s rejected invalid sex=%r (must be "
+                "Male/Female/Other/Unknown)", patient_uuid, sex,
+            )
+            return False
+        token = await self._ensure_token()
+        r = await self._http.put(
+            f"{self._api_base}/patient/{patient_uuid}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={"sex": sex},
+        )
+        if r.status_code >= 400:
+            log.warning(
+                "update_patient_sex %s sex=%s failed: %s %s",
+                patient_uuid, sex, r.status_code, r.text[:200],
+            )
+            return False
+        log.info("update_patient_sex: %s -> %s", patient_uuid, sex)
+        return True
+
     async def _patient_numeric_pid(self, token: str, patient_uuid: str) -> int:
         """Resolve a FHIR Patient UUID to OpenEMR's internal numeric pid."""
         r = await self._http.get(

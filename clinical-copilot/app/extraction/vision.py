@@ -46,12 +46,38 @@ from app.extraction.schemas import (
     FaxPacket,
     IntakeForm,
     LabReport,
+    PatientIdentity,
     ReferralLetter,
 )
 
 log = logging.getLogger("agent.extraction.vision")
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
+# Demographics-only auto-fill on the create-patient flow uses Haiku for the
+# preview: the doctor reviews and corrects the result on the form before
+# submitting, and the full upload re-extracts with Sonnet over all pages.
+# Haiku is roughly 3× faster than Sonnet on vision and dramatically cheaper.
+DEMOGRAPHICS_MODEL = "claude-haiku-4-5"
+
+_DEMOGRAPHICS_SYSTEM_PROMPT = """\
+You are a precise clinical-document patient-identity extractor. Look at the \
+supplied document image(s) and call `record_patient_identity` with whatever \
+identity fields the document prints (given_name, family_name, date_of_birth, \
+sex, address, phone). Skip any field the document does not state — never \
+invent values.
+
+Sex inference: when the document does NOT print an explicit Sex/Gender field \
+but DOES carry an honorific next to the patient's name, infer sex from it \
+(Mr.→male, Mrs./Ms./Miss→female, Mx.→other). Honorifics carrying no sex \
+signal (Dr., Prof., Rev., Hon.) do NOT trigger inference; leave sex null. \
+When neither an explicit field nor a sex-carrying honorific is present, \
+leave sex null.
+
+Citations: `source_citation` is OPTIONAL on PatientIdentity; this is a \
+preview-only extraction that never gets persisted, so leave \
+`source_citation` null and skip filling it. The downstream UI displays \
+only the identity fields, not the citation.
+"""
 
 _SYSTEM_PROMPT = """\
 You are a precise clinical-document extraction service. Your only job is \
@@ -107,6 +133,13 @@ referral-only faxes.
 'results_table.hba1c' or 'medications.0' that uniquely identifies the \
 field within the document. `quote_or_value` is the literal text or \
 value as printed (the value, not your interpretation).
+- Sex inference from honorifics: when the document does NOT print an \
+explicit Sex/Gender field but DOES carry a courtesy title next to the \
+patient's name, infer `sex` from the honorific: Mr.→male, \
+Mrs./Ms./Miss→female, Mx.→other. Honorifics carrying no sex signal \
+(Dr., Prof., Rev., Hon.) do NOT trigger inference; leave `sex` null. \
+When neither an explicit field nor a sex-carrying honorific is \
+present, leave `sex` null and let the doctor confirm post-create.
 """
 
 
@@ -281,3 +314,87 @@ async def extract_via_claude(
         doc_type, source_document_id, len(page_pngs),
     )
     return extracted  # type: ignore[return-value]
+
+
+async def extract_patient_identity(
+    *,
+    page_pngs: list[bytes],
+    client: AsyncAnthropic | None = None,
+    model: str = DEMOGRAPHICS_MODEL,
+    max_tokens: int = 1024,
+) -> PatientIdentity | None:
+    """Fast Haiku-based extraction of just patient identity for auto-fill.
+
+    Used by `/api/upload/extract-demographics` on vision-bound doc types
+    (intake_form, fax_packet, referral_letter) to preview demographics on
+    the create-patient form without paying for a full Sonnet extraction.
+    The full upload step still re-extracts every page with Sonnet — this
+    function is preview-only and never persisted.
+
+    Returns None if the model declines to call the tool (some docs carry
+    no identity at all). Raises ExtractionError on schema validation
+    failure so the caller can fall back to manual entry.
+    """
+    if not page_pngs:
+        raise ExtractionError("extract_patient_identity: no pages to send")
+    tool = {
+        "name": "record_patient_identity",
+        "description": (
+            "Record the patient identity (name, DOB, sex, address, phone) "
+            "from the document header / face sheet. Use null for fields "
+            "the document does not state."
+        ),
+        "input_schema": PatientIdentity.model_json_schema(),
+    }
+
+    anthropic = client if client is not None else AsyncAnthropic()
+    user_blocks: list[dict[str, Any]] = []
+    for png in page_pngs:
+        user_blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": base64.standard_b64encode(png).decode("ascii"),
+            },
+        })
+    user_blocks.append({
+        "type": "text",
+        "text": (
+            "Extract the patient identity into the record_patient_identity "
+            "tool. Leave source_citation null — this is a preview-only "
+            "extraction."
+        ),
+    })
+
+    response = await anthropic.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=_DEMOGRAPHICS_SYSTEM_PROMPT,
+        tools=[tool],
+        tool_choice={"type": "tool", "name": "record_patient_identity"},
+        messages=[{"role": "user", "content": user_blocks}],
+    )
+
+    tool_block: ToolUseBlock | None = None
+    for block in response.content:
+        if isinstance(block, ToolUseBlock) and block.name == "record_patient_identity":
+            tool_block = block
+            break
+    if tool_block is None:
+        log.info("extract_patient_identity: no tool call returned (no identity in doc)")
+        return None
+
+    raw = tool_block.input
+    if not isinstance(raw, dict):
+        raise ExtractionError(
+            f"record_patient_identity tool input was not a dict: "
+            f"type={type(raw).__name__}"
+        )
+    try:
+        return PatientIdentity.model_validate(raw)
+    except Exception as exc:
+        raise ExtractionError(
+            f"record_patient_identity input failed schema validation: {exc}\n"
+            f"raw={json.dumps(raw)[:500]}"
+        ) from exc

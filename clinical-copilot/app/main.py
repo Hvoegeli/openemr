@@ -957,6 +957,40 @@ async def patient_card(
     return {**decorated, "current_vitals": trends_data["current"]}
 
 
+@app.put("/api/patient/{patient_id}/sex")
+async def api_update_patient_sex(
+    patient_id: str,
+    request: Request,
+    username: str = Depends(current_user),
+) -> dict:
+    """Set a patient's `sex` field. Used by the patient-header "Set sex"
+    banner that surfaces when a patient was created from a document that
+    didn't carry a sex value (so the create defaulted to "Unknown").
+
+    Body: `{"sex": "Male" | "Female" | "Other" | "Unknown"}`. Returns
+    `{"ok": true, "sex": "..."}` on success, 400 on invalid value, 502
+    on OpenEMR rejection.
+    """
+    await _check_patient_access(request, username, patient_id)
+    try:
+        body = await request.json()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"invalid JSON body: {e}") from e
+    sex = (body or {}).get("sex")
+    if sex not in ("Male", "Female", "Other", "Unknown"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"sex must be one of Male/Female/Other/Unknown, got {sex!r}",
+        )
+    ok = await app.state.openemr_writer.update_patient_sex(
+        patient_uuid=patient_id, sex=sex,
+    )
+    if not ok:
+        raise HTTPException(status_code=502, detail="sex update failed at OpenEMR")
+    app.state.cache.invalidate(f"card:{patient_id}")
+    return {"ok": True, "sex": sex}
+
+
 @app.get("/api/patient/{patient_id}/vital-trends")
 async def patient_vital_trends(
     patient_id: str,
@@ -1159,25 +1193,19 @@ async def api_extract_demographics(
     chief_concern: str | None = None
     identity: dict[str, str | None]
 
+    # First-page (or first-2-pages on fax packets) cap on the auto-fill
+    # render: identity reliably appears in the first 1–2 pages, and the
+    # full upload step still re-renders every page with Sonnet for the
+    # authoritative extraction. This trims auto-fill latency on
+    # multi-page docs.
+    _MAX_AUTOFILL_PAGES = {
+        "intake_form": 1,
+        "referral_letter": 1,
+        "fax_packet": 2,
+    }
+
     try:
-        if doc_type == "intake_form":
-            from app.extraction.extract import extract_only  # noqa: PLC0415
-            extracted = await extract_only(
-                file_bytes=file_bytes,
-                doc_type="intake_form",
-                mime_type=mime_type,
-            )
-            demo = extracted.demographics
-            identity = {
-                "given_name": demo.given_name,
-                "family_name": demo.family_name,
-                "date_of_birth": demo.date_of_birth.isoformat() if demo.date_of_birth else None,
-                "sex": demo.sex,
-                "address": demo.address,
-                "phone": demo.phone,
-            }
-            chief_concern = extracted.chief_concern
-        elif doc_type == "hl7_message":
+        if doc_type == "hl7_message":
             from app.extraction.hl7 import parse_hl7_message  # noqa: PLC0415
             msg = parse_hl7_message(file_bytes, source_document_id="DocumentReference/preview")
             identity = _identity_from_optional(msg.patient_identity)
@@ -1193,16 +1221,21 @@ async def api_extract_demographics(
                 "address": None,
                 "phone": None,
             }
-        elif doc_type in ("fax_packet", "referral_letter"):
-            from app.extraction.extract import extract_only  # noqa: PLC0415
-            extracted = await extract_only(
-                file_bytes=file_bytes,
-                doc_type=doc_type,  # type: ignore[arg-type]
-                mime_type=mime_type,
-            )
-            identity = _identity_from_optional(
-                getattr(extracted, "patient_identity", None),
-            )
+        elif doc_type in ("intake_form", "fax_packet", "referral_letter"):
+            # Vision-bound preview: render to PNG, cap pages, run a fast
+            # Haiku extraction that targets just PatientIdentity. Doctor
+            # reviews/corrects on the form before submit; full upload
+            # re-extracts with Sonnet over every page.
+            from app.extraction.render import render_to_png_pages  # noqa: PLC0415
+            from app.extraction.vision import extract_patient_identity  # noqa: PLC0415
+            try:
+                pages = render_to_png_pages(file_bytes, mime_type)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            cap = _MAX_AUTOFILL_PAGES.get(doc_type, 1)
+            pages = pages[:cap]
+            ident = await extract_patient_identity(page_pngs=pages)
+            identity = _identity_from_optional(ident)
         else:
             # lab_pdf and any future doc_type without a demographics
             # surface land here.
@@ -1280,6 +1313,43 @@ def _split_full_name(full: str | None) -> tuple[str | None, str | None]:
     return (" ".join(parts[:-1]), parts[-1])
 
 
+def _extracted_sex(extracted: object) -> str | None:
+    """Pull a `sex` value out of any extraction shape, lower-cased.
+
+    The four extraction variants that carry sex put it in one of two
+    places: `IntakeForm.demographics.sex` (required-ish on intake forms)
+    or `<X>.patient_identity.sex` (optional on referral_letter,
+    fax_packet, hl7_message). Workbooks and lab reports have no sex
+    field. Returns None when no sex is present in any expected slot.
+    """
+    if extracted is None:
+        return None
+    demo = getattr(extracted, "demographics", None)
+    if demo is not None:
+        s = getattr(demo, "sex", None)
+        if s:
+            return str(s).lower()
+    ident = getattr(extracted, "patient_identity", None)
+    if ident is not None:
+        s = getattr(ident, "sex", None)
+        if s:
+            return str(s).lower()
+    return None
+
+
+def _normalize_name_case(s: str) -> str:
+    """Title-case a name when it's fully uppercase; otherwise leave it alone.
+
+    HL7 v2 senders conventionally print PID-5 in ALL CAPS ("NGUYEN^OLIVIA")
+    by legacy convention, and that uppercased value flows through auto-fill
+    → form fields → OpenEMR's database → calendar display. Rather than
+    title-casing every name (which would mangle "McDonald" → "Mcdonald"),
+    only normalize when the input has no lowercase letters at all — names
+    that already carry case information stay untouched.
+    """
+    return s.title() if s and s.isupper() else s
+
+
 class CreatePatientRequest(BaseModel):
     """Demographics body for `/api/admin/patient` (create-from-upload)."""
     given_name: str
@@ -1318,8 +1388,17 @@ async def api_create_patient(
             status_code=400,
             detail="given_name and family_name are required to create a patient",
         )
-    given_clean = body.given_name.strip()
-    family_clean = body.family_name.strip()
+    given_clean = _normalize_name_case(body.given_name.strip())
+    family_clean = _normalize_name_case(body.family_name.strip())
+    # OpenEMR's standard `/api/patient` rejects creates without `sex`. When
+    # the source document didn't print one (.docx with only an honorific,
+    # workbook, etc.), default to "Unknown" so the patient is still created
+    # and let the post-create banner prompt the doctor to fill it in.
+    sex_was_inferred = False
+    sex_for_create = (body.sex or "").strip()
+    if not sex_for_create:
+        sex_for_create = "Unknown"
+        sex_was_inferred = True
 
     # Idempotent create — match the seed-script convention. Search FHIR for
     # an existing Patient with the same family + given + birthdate before
@@ -1367,7 +1446,7 @@ async def api_create_patient(
                 given_name=given_clean,
                 family_name=family_clean,
                 date_of_birth=body.date_of_birth,
-                sex=body.sex,
+                sex=sex_for_create,
                 street=body.street,
                 city=body.city,
                 state=body.state,
@@ -1427,8 +1506,13 @@ async def api_create_patient(
     return {
         "patient_uuid": new_uuid,
         "pid": new_pid,
-        "given_name": body.given_name,
-        "family_name": body.family_name,
+        "given_name": given_clean,
+        "family_name": family_clean,
+        # When True, the document didn't carry a sex and the server defaulted
+        # to "Unknown" to satisfy OpenEMR's required-field validator. The
+        # frontend uses this to render a persistent "set sex" banner on the
+        # patient header until the field is updated.
+        "sex_was_inferred": sex_was_inferred,
     }
 
 
@@ -1469,7 +1553,6 @@ async def api_upload(
                         "sha256": "..."}}
       502 — OpenEMR write failure or extractor failure
     """
-    await _check_patient_access(request, username, patient_uuid)
     if doc_type not in DOC_TYPE_LABELS:
         raise HTTPException(
             status_code=400,
@@ -1479,6 +1562,27 @@ async def api_upload(
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="empty file upload")
+    # Run the panel-access check + SHA-256 dedup precheck concurrently —
+    # both are FHIR round-trips (~300 ms each) and share no dependency.
+    # The access check raises HTTPException(404) on miss; gather() will
+    # propagate it as the first failed task and we'll discard the SHA
+    # result. acknowledge_existing=True path skips the SHA check.
+    sha_hex = hashlib.sha256(file_bytes).hexdigest() if not acknowledge_existing else None
+    async def _sha_precheck() -> str | None:
+        if acknowledge_existing or sha_hex is None:
+            return None
+        try:
+            return await app.state.openemr_writer.find_document_reference_by_sha(
+                patient_uuid, sha_hex,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("dedup precheck failed; proceeding without it: %s", e)
+            return None
+
+    _, existing_ref = await asyncio.gather(
+        _check_patient_access(request, username, patient_uuid),
+        _sha_precheck(),
+    )
     raw_ct = (file.content_type or "").lower()
     filename = file.filename or "upload.bin"
     # Some browsers send `application/octet-stream` for .docx / .hl7 /
@@ -1502,54 +1606,45 @@ async def api_upload(
 
     # Dedup Layer 1 — SHA-256 prompt. The writer will idempotently
     # return the existing reference if we proceed; what's missing today
-    # is the user-visible "you already uploaded this" surface. Run the
-    # SHA lookup before attach_and_extract so a confirmed-duplicate
-    # upload doesn't re-spend Anthropic credits on a re-extraction
-    # whose facts are already persisted.
-    if not acknowledge_existing:
-        sha_hex = hashlib.sha256(file_bytes).hexdigest()
+    # is the user-visible "you already uploaded this" surface. The SHA
+    # precheck already ran in parallel with the access check above; we
+    # only handle the result here. `existing_ref` is None when
+    # acknowledge_existing was set or the precheck found no match.
+    if existing_ref:
+        existing_meta: dict = {"ref": existing_ref}
+        # Best-effort: pull title + date for the prompt body. A 502
+        # here would be silly — fall back to the bare ref so the UI
+        # can still ask the user to confirm.
         try:
-            existing_ref = await app.state.openemr_writer.find_document_reference_by_sha(
-                patient_uuid, sha_hex,
+            doc_id_only = existing_ref.split("/", 1)[-1]
+            existing_doc = await app.state.fhir.get(
+                f"DocumentReference/{doc_id_only}",
             )
+            attach = (existing_doc.get("content") or [{}])[0].get("attachment") or {}
+            existing_meta.update({
+                "title": attach.get("title") or "",
+                "filename": attach.get("title") or "",
+                "date": existing_doc.get("date"),
+                "status": existing_doc.get("status"),
+            })
         except Exception as e:  # noqa: BLE001
-            log.warning("dedup precheck failed; proceeding without it: %s", e)
-            existing_ref = None
-        if existing_ref:
-            existing_meta: dict = {"ref": existing_ref}
-            # Best-effort: pull title + date for the prompt body. A 502
-            # here would be silly — fall back to the bare ref so the UI
-            # can still ask the user to confirm.
-            try:
-                doc_id_only = existing_ref.split("/", 1)[-1]
-                existing_doc = await app.state.fhir.get(
-                    f"DocumentReference/{doc_id_only}",
-                )
-                attach = (existing_doc.get("content") or [{}])[0].get("attachment") or {}
-                existing_meta.update({
-                    "title": attach.get("title") or "",
-                    "filename": attach.get("title") or "",
-                    "date": existing_doc.get("date"),
-                    "status": existing_doc.get("status"),
-                })
-            except Exception as e:  # noqa: BLE001
-                log.info("dedup metadata fetch failed: %s", e)
-            log.info(
-                "upload dedup-prompt: user=%s patient=%s sha256=%s -> %s",
-                username, patient_uuid, sha_hex[:12], existing_ref,
-            )
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "duplicate_file",
-                    "message": (
-                        "This file is already on the patient's chart. "
-                        "Use the existing copy or cancel this upload."
-                    ),
-                    "existing": existing_meta,
-                    "sha256": sha_hex,
-                },
-            )
+            log.info("dedup metadata fetch failed: %s", e)
+        log.info(
+            "upload dedup-prompt: user=%s patient=%s sha256=%s -> %s",
+            username, patient_uuid, sha_hex[:12], existing_ref,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "duplicate_file",
+                "message": (
+                    "This file is already on the patient's chart. "
+                    "Use the existing copy or cancel this upload."
+                ),
+                "existing": existing_meta,
+                "sha256": sha_hex,
+            },
+        )
 
     try:
         # Skip persistence on the initial extract — we want to interpose
@@ -1804,6 +1899,34 @@ async def api_upload(
                 document_id=new_doc_id_only,
                 recorded_by=username,
             )
+
+    # Auto-update sex when an earlier upload created the patient with
+    # sex="Unknown" because the source doc didn't print one, and this
+    # later doc DOES carry a sex. Best-effort: a lookup or PUT failure
+    # logs and moves on rather than failing the upload.
+    extracted_sex = _extracted_sex(result.extracted)
+    if extracted_sex:
+        try:
+            current_patient = await app.state.fhir.get(f"Patient/{patient_uuid}")
+            current_gender = (current_patient.get("gender") or "").lower()
+        except Exception as e:  # noqa: BLE001
+            log.warning("sex-backfill: patient lookup failed for %s: %s", patient_uuid, e)
+            current_gender = ""
+        # Skip the no-op when both sides are already Unknown — saves a
+        # round-trip and a noisy log line. Backfill triggers only when
+        # the patient is currently Unknown/missing AND the new doc has
+        # a real sex value.
+        if current_gender in ("", "unknown") and extracted_sex != "unknown":
+            try:
+                await app.state.openemr_writer.update_patient_sex(
+                    patient_uuid=patient_uuid,
+                    sex=extracted_sex.capitalize(),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "sex-backfill: PUT failed for %s sex=%s: %s",
+                    patient_uuid, extracted_sex, e,
+                )
 
     # Invalidate every cache slice that could now hold stale data:
     #   docs:{pid}    — Supporting Documents tab needs the new
