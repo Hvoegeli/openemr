@@ -1,6 +1,6 @@
 """Retrieval A/B evidence harness for the hybrid retrieval pipeline.
 
-Runs each case in `evals/cases/retrieval.yaml` through three retrieval
+Runs each case in `evals/retrieval_cases.yaml` through three retrieval
 configurations and reports `hit@3` (the fraction of expected chunk_ids
 the retriever surfaced in its top-3):
 
@@ -29,7 +29,7 @@ import yaml
 from app.guidelines.retrieve import retrieve_guidelines
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CASES_PATH = REPO_ROOT / "evals" / "cases" / "retrieval.yaml"
+CASES_PATH = REPO_ROOT / "evals" / "retrieval_cases.yaml"
 
 
 def load_cases(path: Path = CASES_PATH) -> list[dict]:
@@ -94,7 +94,7 @@ def render_markdown(
     lines: list[str] = []
     lines.append("### Retrieval A/B evidence")
     lines.append("")
-    lines.append("Hit@3 = fraction of expected chunk_ids that appeared in the retriever's top-3 results, averaged across the cases in [`evals/cases/retrieval.yaml`](cases/retrieval.yaml).")
+    lines.append("Hit@3 = fraction of expected chunk_ids that appeared in the retriever's top-3 results, averaged across the cases in [`evals/retrieval_cases.yaml`](retrieval_cases.yaml).")
     lines.append("")
     lines.append("| Configuration | Mean hit@3 |")
     lines.append("|---|---|")

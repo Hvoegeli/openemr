@@ -101,7 +101,7 @@ the gate. Re-recording the snapshot will close it; tracked as a follow-up.
 
 The W2 review feedback asked for "clearer reranker evidence" — proof that the rerank stage is doing real work, not just that the function executes. Together with the hybrid sparse+dense retrieval upgrade (W2_ARCHITECTURE.md §3), we now run six hand-curated retrieval queries through three retrieval configurations and report `hit@3` (the fraction of expected chunk_ids that appear in the retriever's top-3, averaged across cases).
 
-Cases live in [`cases/retrieval.yaml`](cases/retrieval.yaml). Harness is [`retrieval_ab.py`](retrieval_ab.py). Run with `uv run python -m evals.retrieval_ab` (the dense stage requires `sentence-transformers`; the rerank stage requires `ANTHROPIC_API_KEY`).
+Cases live in [`retrieval_cases.yaml`](retrieval_cases.yaml). Harness is [`retrieval_ab.py`](retrieval_ab.py). Run with `uv run python -m evals.retrieval_ab` (the dense stage requires `sentence-transformers`; the rerank stage requires `ANTHROPIC_API_KEY`).
 
 | Configuration | Mean hit@3 (local, BM25-only deps) |
 |---|---|
