@@ -37,6 +37,17 @@ dependencies = [
     "pillow>=11.0",
     "python-multipart>=0.0.10",
     "rank-bm25>=0.2.2",
+    # Dense embeddings for the guideline retriever's hybrid (sparse +
+    # dense) stage. BGE-small-en-v1.5 is a 384-dim retrieval-tuned model
+    # (~130MB on disk) that runs comfortably on Hetzner's CPU. Pulls in
+    # torch (CPU-only wheels by default on Linux x86_64). Marker excludes
+    # macOS x86_64 (Intel Mac dev boxes) where modern torch wheels don't
+    # exist — local dev on Intel Mac runs without the dense stage and
+    # `app/guidelines/retrieve.py` falls back to BM25-only with a
+    # warning. Hetzner (linux_x86_64) and Apple-Silicon Macs install
+    # the dep normally. See app/guidelines/embed.py for the rationale
+    # on staying local instead of routing through Bedrock/OpenAI/Voyage.
+    "sentence-transformers>=3.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     # .xlsx workbook parser. Pure-Python, no native deps. Used by the
     # workbook doc-type ingest path — deterministic, zero LLM credit.
     "openpyxl>=3.1",

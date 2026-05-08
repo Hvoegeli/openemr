@@ -93,3 +93,29 @@ the gate. Re-recording the snapshot will close it; tracked as a follow-up.
   in a Claude version bump" — that requires re-recording.
 - Latency — measured separately via LangSmith dashboard.
 - Cost — measured separately via the in-app trace store + LangSmith.
+
+
+---
+
+## Retrieval A/B evidence
+
+The W2 review feedback asked for "clearer reranker evidence" — proof that the rerank stage is doing real work, not just that the function executes. Together with the hybrid sparse+dense retrieval upgrade (W2_ARCHITECTURE.md §3), we now run six hand-curated retrieval queries through three retrieval configurations and report `hit@3` (the fraction of expected chunk_ids that appear in the retriever's top-3, averaged across cases).
+
+Cases live in [`cases/retrieval.yaml`](cases/retrieval.yaml). Harness is [`retrieval_ab.py`](retrieval_ab.py). Run with `uv run python -m evals.retrieval_ab` (the dense stage requires `sentence-transformers`; the rerank stage requires `ANTHROPIC_API_KEY`).
+
+| Configuration | Mean hit@3 (local, BM25-only deps) |
+|---|---|
+| BM25 only (sparse) | **0.833** |
+| BM25 + dense (hybrid, no rerank) | *to fill from Hetzner run* |
+| Full pipeline (BM25 + dense + rerank) | *to fill from Hetzner run* |
+
+The single BM25-only miss is `starting_statin_diabetic` — the query "when do we start a statin for someone with type 2 diabetes" doesn't share enough tokens with the corpus's `ada_lipid_management_diabetes_2024` chunk to trigger BM25, but the semantic content is a direct match. This is the textbook case where the dense stage adds recall.
+
+> **Note**: dense + rerank numbers will be filled in from a Hetzner run after deploy. Local (Intel Mac) doesn't have sentence-transformers wheels; the harness gracefully degrades but doesn't exercise the full pipeline.
+
+### What the deltas mean
+
+- **BM25 → hybrid (dense added):** measures how much keyword-only retrieval misses. Dense should pull in chunks that match semantically but not lexically (e.g. "blood thinner" → aspirin chunk).
+- **Hybrid → full pipeline (rerank added):** measures how much the LLM rerank adds on top of dense. When both retrieval stages over-recall, the reranker lifts the most relevant chunk to the top.
+
+A delta of zero on either step means that stage isn't earning its keep on this set of cases. Negative deltas would be a regression and would block submission.

@@ -27,8 +27,8 @@ section below):
 | Area | MVP-shipped decision | PRD-faithful target | Section |
 |---|---|---|---|
 | VLM | Claude Sonnet 4.6 vision, tool-use forced JSON output | + bounding-box overlay UI (deferred) | §4 |
-| Retrieval | **BM25 + LLM-rerank** (`rank-bm25` + Claude Haiku) | + FAISS dense (deferred) | §3 |
-| Vector store | none (BM25 only) | FAISS in-memory | §3 |
+| Retrieval | **Hybrid sparse + dense + LLM-rerank** (`rank-bm25` + `BAAI/bge-small-en-v1.5` ∪ → Claude Haiku rerank) | (production: swap local BGE for Bedrock Titan / Voyage when AWS BAA is configured) | §3 |
+| Vector store | in-process numpy matrix (12 × 384, ~18KB) cached on disk; rebuild on corpus-hash mismatch | FAISS in-memory once corpus grows past ~1000 chunks | §3 |
 | Guideline corpus | hand-curated YAML, **12 chunks** USPSTF + ADA | + AHA cardiology corpus (deferred) | §3 |
 | Document persistence | OpenEMR multipart upload + FHIR-GET resolve; SHA-256 dedupe | (no change planned) | §4.5 |
 | Recommendation tone | guideline-grounded recs permitted under R2 carve-out (always-on; not toggle-gated) | per-conversation toggle (deferred) | §6 |
@@ -183,40 +183,53 @@ zero transitives), built eagerly at module import in
 - **Tokenization:** `re.findall(r"[a-z0-9]+", text.lower())`. Drops
   punctuation, preserves alphanumerics. Locked in by tests
   ([`tests/guidelines/test_retrieve.py::TestTokenize`](clinical-copilot/tests/guidelines/test_retrieve.py)).
-- **Module-level eager load** means a malformed YAML or duplicate
-  `chunk_id` fails loudly at import (not at first query). For 12 chunks
-  this is essentially free; for thousands it would move to lazy load.
-- **No vector store, no embedding model.** The PRD-faithful design (FAISS
-  + dense embeddings + BGE rerank, see §3.3 deferred) is post-MVP.
+- **Module-level eager load** for the corpus + BM25 index means a
+  malformed YAML or duplicate `chunk_id` fails loudly at import (not at
+  first query). For 12 chunks this is essentially free; for thousands it
+  would move to lazy load.
+- **Dense embedding index is lazy** (built on first retrieval call) so
+  module import stays cheap for tests that don't need the model.
+  Embeddings are cached on disk under `data/guidelines/corpus_embeddings.npy`
+  keyed by a hash of the corpus content; subsequent process starts hit
+  the cache instead of re-embedding.
 
-### 3.2.1 Indexing — deferred post-MVP (PRD-faithful target)
-
-- **Embedding model:** local sentence-transformer
-  (`all-MiniLM-L6-v2`, ~80 MB) so we don't add a vendor dep / BAA.
-  Encode + index at startup, persist to disk.
-- **FAISS in-memory** (`faiss-cpu`) for dense vectors. Rebuild
-  on-startup is sub-second for corpus sizes well past 12 chunks.
-- **Hybrid retrieve** layered over the existing BM25 — see §3.3
-  deferred.
-
-### 3.3 Retrieval — MVP-shipped
+### 3.3 Retrieval — MVP-shipped (hybrid sparse + dense + LLM rerank)
 
 **Public surface:** `retrieve_guidelines(query: str, k: int = 3)
--> list[RetrievalHit]`. Two-stage pipeline behind one function:
+-> list[RetrievalHit]`. Three-stage pipeline behind one function:
 
-- **Stage 1 (BM25 recall filter):** tokenize the query, score every
-  chunk, take the top `BM25_CANDIDATE_POOL = 8` with score > 0. This is
-  the cheap exhaustive pass that makes sure no relevant chunk gets
-  silently dropped before the rerank sees it.
-- **Stage 2 (LLM rerank):** Claude Haiku scores each candidate's
-  semantic relevance to the query 0.0–1.0. Top-`k` by rerank score is
-  returned. Implementation in [`app/guidelines/rerank.py`](clinical-copilot/app/guidelines/rerank.py).
+- **Stage 1a (BM25 sparse recall):** tokenize the query, score every
+  chunk, take the top `BM25_CANDIDATE_POOL = 8` with score > 0. The
+  cheap exhaustive pass that catches keyword-overlap matches.
+- **Stage 1b (dense semantic recall):** embed the query via local
+  `BAAI/bge-small-en-v1.5` (384-dim, retrieval-tuned, runs on CPU),
+  cosine-similarity over a precomputed corpus matrix, take the top
+  `DENSE_CANDIDATE_POOL = 8`. Catches the cases where wording diverges
+  from the chunks ("blood thinner for stroke prevention" surfaces the
+  warfarin/AF chunk despite zero token overlap). Implementation in
+  [`app/guidelines/embed.py`](clinical-copilot/app/guidelines/embed.py).
+- **Stage 2 (LLM rerank):** the union of 1a + 1b (deduped by chunk_id)
+  is passed to Claude Haiku, which scores each candidate's semantic
+  relevance 0.0–1.0. Top-`k` by rerank score is returned. Implementation
+  in [`app/guidelines/rerank.py`](clinical-copilot/app/guidelines/rerank.py).
 
 `RetrievalHit.score` is the rerank score (the authoritative ordering
-signal); `RetrievalHit.bm25_score` carries the stage-1 score for
-debugging. Empty/whitespace queries return `[]`. `k <= 0` returns `[]`.
-A test-only `enable_rerank=False` kwarg skips the API call and falls
-back to BM25 ordering — used by the corpus-shape tests.
+signal); `RetrievalHit.bm25_score` carries the stage-1a BM25 score for
+debugging (zero when the chunk surfaced via the dense path only).
+Empty/whitespace queries return `[]`. `k <= 0` returns `[]`.
+The test/eval kwargs `enable_rerank=False` and `enable_dense=False`
+let the A/B harness in `evals/` measure each stage's contribution
+([`evals/retrieval_ab.py`](clinical-copilot/evals/retrieval_ab.py)).
+
+**Why local sentence-transformers instead of Bedrock Titan / OpenAI /
+Voyage embeddings.** All three are viable upgrades documented in §3.3.1.
+We picked local because (a) zero credentials needed — works on Hetzner
+without provisioning AWS or signing up with a new vendor; (b) zero
+PHI-leak surface — the embedding never leaves the box; (c) the Hetzner
+CPX21 has the RAM headroom (~150-200MB resident) and CPU latency is
+~50-100ms per query — fast enough that the rerank stage remains the
+dominant cost. Production swap to Bedrock Titan v2 (BAA-covered) is one
+class implementing the `Embedder` protocol in `embed.py`.
 
 The agent's tool wrapper
 ([`app/agent/tools.py::_retrieve_guidelines_impl`](clinical-copilot/app/agent/tools.py))
@@ -224,37 +237,38 @@ emits `sources: ["Guideline/<chunk_id>", ...]` so the existing citation
 validator accepts inline `[Guideline/<chunk_id>]` references.
 
 **Why LLM-as-reranker (Claude Haiku) instead of a cross-encoder
-(BGE / Cohere).** The PRD allows "Cohere Rerank or an equivalent
-reranker." We chose LLM-as-reranker for three reasons:
+(BGE-reranker / Cohere Rerank).** The PRD allows "Cohere Rerank or an
+equivalent reranker." We chose LLM-as-reranker for two reasons:
 
-1. **Dependency footprint.** A cross-encoder requires
-   `sentence-transformers` + `torch` + ~300MB of model weights.
-   PyPI has no torch wheel that is both CPython-3.14-compatible AND
-   macOS-x86\_64-compatible right now (the dev box's stack), so
-   committing to that path forces either a Python downgrade or a
-   Linux-only Hetzner-only retrieval stage. We already pay for a
-   Claude API key — adding a Haiku call costs nothing new in setup.
-2. **Cost.** Haiku rerank costs ~$0.001 per query (vs. Cohere's $2/1k).
-   The per-request budget allows it comfortably.
-3. **Latency.** ~500–800ms per rerank call, in the same order of
-   magnitude as a hosted cross-encoder API. Local cross-encoder is
-   faster but requires the model download and warm-up.
+1. **Cost.** Haiku rerank costs ~$0.001 per query (vs. Cohere's
+   $2/1k). The per-request budget allows it comfortably.
+2. **Latency.** ~500–800ms per rerank call, in the same order of
+   magnitude as a hosted cross-encoder API. A local cross-encoder
+   would be faster but adds a second model into memory on Hetzner —
+   we already carry BGE-small for the dense stage and don't want to
+   double the resident model footprint.
 
-A swap to BGE / Cohere Rerank is a single-module replacement (the
-`rerank()` function signature is the contract); the choice is reversible
-when corpus size or quality bar warrants it.
+A swap to BGE-reranker / Cohere Rerank is a single-module replacement
+(the `rerank()` function signature is the contract); the choice is
+reversible when corpus size or quality bar warrants it.
 
-### 3.3.1 Retrieval — deferred post-MVP (PRD-faithful target)
+### 3.3.1 Retrieval — production-shape upgrades
 
-Dense embeddings (BGE-small or text-embedding-3-small over the same
-corpus, cosine merged with BM25 before rerank) is the next iteration.
-For a 12-chunk corpus the recall benefit over BM25-alone is marginal
-because keyword overlap is essentially exhaustive — BM25 + rerank
-already covers 8/12 candidates per query. Dense pays off when the
-corpus grows past ~100 chunks where some clinically-relevant chunks
-share no keywords with the query. The retrieval-stage interface
-already accommodates a dense layer (we'd union BM25 candidates with
-dense candidates before passing to the existing rerank).
+The current pipeline runs entirely locally for embeddings and calls
+Claude Haiku for rerank. Three upgrades to consider for production
+deployment, none of which require code beyond a class swap:
+
+1. **Bedrock Titan Embed v2** for the dense stage when an AWS BAA is
+   in place. Same dimensions (configurable; default 1024) as the local
+   model is approximately, similar quality on retrieval benchmarks,
+   network latency in the same order as Haiku rerank. `BedrockEmbedder`
+   would implement the existing `Embedder` protocol.
+2. **Voyage AI** as a vendor-neutral alternative; `voyage-medical-3` is
+   a clinical-domain model with separate BAA. Same swap point.
+3. **FAISS** instead of the in-process numpy matrix once corpus size
+   passes ~1000 chunks. The `(N × dim)` matrix multiply is currently
+   trivial (12 × 384 → 384 ops); past ~10k chunks it becomes the
+   bottleneck and FAISS HNSW indexes pay for themselves.
 
 ### 3.4 Citation contract for retrieved evidence
 
@@ -759,16 +773,58 @@ with — extending the Week 1 schema:
 - Eval outcome (new): which rubric categories passed/failed for this
   encounter when run against the eval gate.
 
-### 8.2 PHI hygiene
+### 8.2 PHI hygiene — implemented 2026-05-08
 
-Logs must not contain raw PHI. The existing Week 1 audit-log writer already
-strips obvious PHI shapes; Week 2 adds:
+Logs must not contain raw PHI. Implementation lives in
+[`app/safe_log.py`](clinical-copilot/app/safe_log.py) plus an audit pass
+over every log call site in `app/`. Tests are at
+[`tests/test_safe_log.py`](clinical-copilot/tests/test_safe_log.py).
 
-- **Document images are never logged.** Only structured extraction output +
-  citation pointers.
-- **Patient names redacted** in trace narration; replaced with PUUIDs.
-- **TODO:** SaaS observability (LangSmith) gets only structural events, not
-  document content. Audit the existing LangSmith call sites for compliance.
+**Layered defense:**
+
+1. **Audited call sites — no PHI logged in the first place.** Every
+   `log.info` / `log.warning` / `log.error` site that previously
+   interpolated patient names, DOBs, addresses, or phone numbers now
+   logs the patient UUID instead. Sites rewritten in this pass:
+   `app/main.py:1444-1447` (idempotent-create log), `app/main.py:1510-1513`
+   (create-patient success log), `app/active_patients_db.py:72`
+   (active-patients add log), `app/fhir/writer.py:250-258`
+   (write_patient label + log line). `username` is preserved — it's a
+   clinician login, not patient PHI.
+
+2. **`PHIRedactFilter` on the root logger** as a backstop. Installed at
+   process startup via `install_phi_filter()` in `app/main.py:53`. The
+   filter applies a conservative regex bank (SSN-shaped strings, US phone
+   numbers, ISO DOB in DOB-context) over every formatted log message
+   before handlers see it. Idempotent, low overhead.
+
+3. **Document images are never logged** — only structured extraction
+   output + citation pointers. Existing behavior; no changes needed.
+
+4. **LangSmith tracing disabled in production** (Hetzner). LangChain's
+   auto-instrumentation, when enabled, captures the entire
+   `model.ainvoke` payload — including raw FHIR tool results
+   (`Patient.name`, `AllergyIntolerance.code`, addresses, DOBs, phone
+   numbers from chart fetches). That contradicts the "structural events
+   only" guarantee. Until a sanitizing run-tree callback is in place
+   (deferred to post-submission), we set `LANGSMITH_TRACING=false` on
+   the Hetzner box. The in-process trace store at
+   `app/observability.py:RequestTrace` continues to work for local
+   debugging — that table lives only in SQLite on the box and is
+   covered by HIPAA-equivalent local-storage controls.
+
+**Limits of the regex backstop** (called out so future engineers don't
+treat it as a substitute for clean call sites):
+
+- Patient names are NOT regex-redacted. There is no reliable shape for
+  a name at log-emission time. Names must be dropped at the call site.
+- The DOB pattern requires DOB-shape context (`dob:`, `birthdate=`, etc.)
+  to fire; arbitrary ISO dates that aren't paired with a DOB context
+  word are left alone. This is intentional — encounter dates and log
+  timestamps are not PHI on their own.
+- The filter does NOT redact PHI inside structured args passed to
+  LangSmith / LangChain auto-tracing. Disabling auto-tracing in prod is
+  the production fix until a sanitizing callback is in place.
 
 ---
 
@@ -783,9 +839,10 @@ Initial entries:
 | VLM | Claude Sonnet 4.6 vision | GPT-4V, Gemini | Stack coherence with Week 1; same vendor BAA |
 | Structured output | Anthropic tool-use forced JSON | Free-text JSON + `json.loads` | Schema-validated input by construction; eliminates parse-then-repair |
 | PDF→image | `pypdfium2` (Google PDFium) | `pdf2image` (Poppler), Tesseract | Pure-Python, no system deps — works on Hetzner without an extra apt install |
-| Retrieval (MVP) | BM25 only via `rank-bm25` | FAISS+dense+BGE rerank (deferred) | 12-chunk hand-curated corpus → BM25 returns clinically-relevant top-1; deps stay tiny; PRD-faithful shape lives behind the same public API |
-| Reranker (deferred) | BGE open-source | Cohere, Voyage | No new vendor BAA, no API key, runs on Hetzner |
-| Vector store (deferred) | FAISS in-memory | Chroma, Qdrant, pgvector | Zero ops at MVP scale; corpus small; rebuild fast |
+| Retrieval (MVP) | Hybrid BM25 + dense BGE-small + LLM rerank | Bedrock Titan / Voyage / OpenAI dense | Local sentence-transformers needs zero credentials and zero PHI-leak surface; Hetzner has the RAM headroom; production swap is a class implementing the `Embedder` protocol |
+| Embedding model (MVP) | `BAAI/bge-small-en-v1.5` (sentence-transformers, 130MB) | Bedrock Titan Embed v2, OpenAI text-embedding-3-small, Voyage | Local-only avoids the AWS-creds blocker we hit during planning; quality is competitive on MTEB retrieval; Bedrock/Voyage become production-shape upgrades once BAA is signed |
+| Reranker | Claude Haiku (`record_relevance` tool) | Cohere Rerank, BGE-reranker cross-encoder | Already pay for Claude API; per-call cost ~$0.001; avoids loading a second local model alongside the BGE-small embedder |
+| Vector store (MVP) | in-process `numpy` matrix (12 × 384, ~18 KB) cached on disk | FAISS in-memory once corpus > 1000 chunks | Trivial matrix-multiply at this scale; FAISS pays off only when the matrix multiply becomes the bottleneck (~10k+ chunks) |
 | Guideline corpus | USPSTF + ADA, 12 hand-curated chunks | "everything", PDF ingestion at MVP | Two-source rule from PRD pitfall list; hand-curate while small + readable; AHA + PDF ingestion deferred |
 | DocumentReference write path | OpenEMR multipart `/api/patient/{pid}/document` | FHIR `POST /DocumentReference` | OpenEMR doesn't actually route the FHIR POST despite advertising `create` in CapabilityStatement — discovered live, pivoted same session |
 | Idempotency key | SHA-256 prepended to filename | Parallel local hash table | OpenEMR stays single source of truth; no consistency-with-DB bug class to manage |

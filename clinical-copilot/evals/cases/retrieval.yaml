@@ -1,0 +1,79 @@
+# Retrieval-quality eval cases for the hybrid retrieval A/B harness.
+#
+# Each case is a clinician-style query plus the chunk_ids that should
+# appear in the top-3 of an ideal retriever. The harness runs each query
+# in three modes (BM25-only, BM25+dense hybrid, full pipeline with
+# rerank) and reports hit@3 — the fraction of expected chunks the
+# retriever actually surfaced in its top-3.
+#
+# Curation principles:
+#   - Queries are paraphrases of the chunk content (test recall, not
+#     verbatim matching). BM25 should win on direct keyword overlap;
+#     dense should help when the query uses different words for the
+#     same concept; rerank should help when both retrieval stages
+#     over-recall and the most relevant chunk needs to be lifted.
+#   - Each case has 1-2 expected chunks, never the full corpus —
+#     hit@3 with 12-chunk corpus is too easy if expected_top is large.
+#   - Coverage spans both sources (USPSTF, ADA) and several conditions.
+#
+# Schema (one entry per case):
+#   case_id: unique slug
+#   query: the user's paraphrased question (no patient identifiers)
+#   expected_top_3: chunk_ids that SHOULD appear in the retriever's
+#                   top-3 for this query (order doesn't matter)
+#   notes: rationale for the curation, useful when re-evaluating
+
+- case_id: aspirin_primary_prevention_paraphrase
+  query: should we recommend low-dose aspirin to prevent heart attack and stroke in a 60-year-old male
+  expected_top_3:
+    - uspstf_aspirin_primary_prevention_2022
+  notes: |
+    Direct hit on USPSTF aspirin primary-prevention. The paraphrase
+    uses "low-dose aspirin" + "heart attack and stroke" rather than the
+    chunk's "cardiovascular disease" wording — dense should help when
+    the query phrasing diverges from the corpus.
+
+- case_id: blood_thinner_diabetes_synonym
+  query: blood thinner recommendation for a diabetic patient with cardiovascular risk
+  expected_top_3:
+    - ada_aspirin_diabetes_2024
+  notes: |
+    "Blood thinner" is a colloquial synonym for aspirin/anticoagulants
+    that BM25 won't catch — the corpus uses "aspirin" verbatim. This is
+    the canonical case where dense embeddings should beat BM25-alone.
+
+- case_id: starting_statin_diabetic
+  query: when do we start a statin for someone with type 2 diabetes
+  expected_top_3:
+    - ada_lipid_management_diabetes_2024
+    - uspstf_statin_primary_prevention_2022
+  notes: |
+    Two relevant chunks (the ADA one is more specific to diabetics; the
+    USPSTF one covers statins for general primary prevention). Either
+    is a valid hit — testing recall, not single-best.
+
+- case_id: kidney_protection_diabetic
+  query: kidney protection medication choice for a diabetic with declining renal function
+  expected_top_3:
+    - ada_ckd_diabetes_2024
+  notes: |
+    "Kidney protection" + "renal function" maps to the ADA CKD chunk.
+    BM25 should catch "kidney" / "renal" / "diabetes" overlap. Dense
+    should also catch via semantic match on "protection" → SGLT2/ACE.
+
+- case_id: when_to_check_for_diabetes
+  query: at what age and BMI should we start screening adults for diabetes
+  expected_top_3:
+    - uspstf_diabetes_screening_2021
+  notes: |
+    Direct match for the USPSTF diabetes-screening chunk. Tests that
+    the retriever still wins on cases where BM25 alone is sufficient
+    — the dense + rerank stages should NOT regress easy queries.
+
+- case_id: bp_target_diabetic
+  query: what is the recommended blood pressure goal for a hypertensive diabetic patient
+  expected_top_3:
+    - ada_hypertension_diabetes_2024
+  notes: |
+    "Blood pressure goal" is paraphrase for "target"; dense helps when
+    the corpus says "target" but the query says "goal".

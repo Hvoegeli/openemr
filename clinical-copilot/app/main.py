@@ -51,6 +51,14 @@ logging.basicConfig(
 )
 logging.getLogger("agent").setLevel(logging.INFO)
 
+# Install the PHI redaction filter on the root logger so SSN / phone / DOB
+# shapes never reach stdout, files, or the in-process trace store. The
+# filter is a backstop — every audited call site in this app drops PHI
+# fields explicitly (we log patient_uuid, not patient_name). See
+# `app/safe_log.py` and W2_ARCHITECTURE.md §8.2.
+from app.safe_log import install_phi_filter  # noqa: E402
+install_phi_filter()
+
 from app.agent.graph import MAX_VALIDATION_ATTEMPTS, active_model_label, build_graph, message_text  # noqa: E402
 from app.agent.input_guard import JAILBREAK_REFUSAL, detect_jailbreak  # noqa: E402
 from app.agent.intent_router import route_intent  # noqa: E402
@@ -1434,8 +1442,8 @@ async def api_create_patient(
     if existing_match is not None:
         new_uuid = existing_match.get("id")
         log.info(
-            "create_patient: idempotent hit, reusing existing uuid=%s for %s, %s",
-            new_uuid, family_clean, given_clean,
+            "create_patient: idempotent hit, reusing existing uuid=%s",
+            new_uuid,
         )
         # Auto-assign + active-patients add still run below via the
         # shared post-create code path.
@@ -1500,8 +1508,8 @@ async def api_create_patient(
     # patient included on the next request.
     app.state.cache.invalidate_prefix("calendar:today:")
     log.info(
-        "create_patient: user=%s pid=%s uuid=%s name=%s, %s",
-        username, new_pid, new_uuid, body.family_name, body.given_name,
+        "create_patient: user=%s pid=%s uuid=%s",
+        username, new_pid, new_uuid,
     )
     return {
         "patient_uuid": new_uuid,

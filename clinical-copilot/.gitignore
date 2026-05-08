@@ -26,3 +26,15 @@ build/
 # Local eval-run history (LangSmith is the cloud system of record;
 # the JSON files here are just a local fallback view)
 evals/history/*.json
+
+# Dense-retrieval embedding cache. Rebuilt on demand from the corpus
+# YAML; pointless to track in git (binary, regenerable, hash-keyed
+# invalidation handles edits automatically).
+data/guidelines/corpus_embeddings.npy
+data/guidelines/corpus_embeddings.meta.json
+
+# Working-tree state for the in-process trace + clinical-notes stores.
+# Both are dev-only artifacts; the production deploy uses the same
+# paths but the files don't belong in git history.
+data/clinical_notes.json
+data/traces.db

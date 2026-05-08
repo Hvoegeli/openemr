@@ -69,7 +69,7 @@ class ActivePatientsStore:
                 (f, g, added_by, now),
             )
             self._conn.commit()
-        log.info("active-patients add: family=%s given=%s by=%s", f, g, added_by)
+        log.info("active-patients add: by=%s", added_by)
 
     def remove(self, *, family: str, given: str) -> bool:
         """Remove a (family, given) override. Returns True if a row was deleted."""

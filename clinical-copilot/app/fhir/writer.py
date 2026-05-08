@@ -247,14 +247,17 @@ class OpenEMRWriter:
             body["postal_code"] = postal_code
         if phone:
             body["phone_contact"] = phone
+        # `label` flows into _post_standard_api's validation-error log
+        # path. Keep it generic — drop the patient name so a 400 from
+        # OpenEMR doesn't leak a name into the audit trail.
         result = await self._post_standard_api(
             path="/patient",
             body=body,
-            label=f"create_patient {family_name}, {given_name}",
+            label="create_patient",
         )
         log.info(
-            "write_patient: created %s, %s pid=%s uuid=%s",
-            family_name, given_name, result.get("pid"), result.get("uuid"),
+            "write_patient: created pid=%s uuid=%s",
+            result.get("pid"), result.get("uuid"),
         )
         return result
 
