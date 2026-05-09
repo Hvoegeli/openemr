@@ -21,8 +21,19 @@ from app.guidelines.retrieve import (
 
 
 def _bm25_only(query: str, k: int = 3):
-    """Convenience wrapper — every test below wants the BM25-only path."""
-    return retrieve_guidelines(query, k=k, enable_rerank=False)
+    """Convenience wrapper — every test below wants the BM25-only path.
+
+    Disables BOTH the rerank stage (no LLM calls) AND the dense stage
+    (no embedding fan-in). The dense stage was added after these tests
+    were written; without `enable_dense=False` it pulls cosine-closest
+    chunks into the result set with `score=0.0`, which makes the
+    "zero-score chunks are dropped" and "all clamped-k hits have
+    positive scores" assertions wrong by construction. Live hybrid
+    behavior is exercised separately by `tests/guidelines/test_hybrid.py`.
+    """
+    return retrieve_guidelines(
+        query, k=k, enable_rerank=False, enable_dense=False,
+    )
 
 
 # Mirror of `app/agent/validator.py::CITATION_RE` — the regex the response

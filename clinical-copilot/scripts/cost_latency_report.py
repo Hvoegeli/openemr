@@ -234,7 +234,7 @@ def _render_report(traces, model_name: str, run_started_at: datetime) -> str:
     lines.append("")
     lines.append(f"Sample size: **{len(successful)} cases** "
                  f"({len(failed)} failed). The cases are a curated subset of the")
-    lines.append("150-run eval suite that exercise every major code path ")
+    lines.append("150-run eval suite that exercise every major code path")
     lines.append("(chart summary, lab/vital pulls, drug-interaction RAG, refusals,")
     lines.append("ACL, multi-turn).")
     lines.append("")

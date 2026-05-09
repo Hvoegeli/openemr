@@ -53,13 +53,17 @@ class TestPdfToPngPages:
         assert _png_signature_ok(pages[0])
 
     def test_render_resolution_is_legible_for_typed_text(self) -> None:
-        # 150 DPI on a Letter page (8.5" x 11") -> 1275 x 1650 nominal.
-        # Render variance ±5px from PDFium font hinting; just sanity-check
-        # we're at "readable" scale, not a thumbnail.
+        # 150 DPI on a Letter page (8.5" x 11") -> 1275 x 1650 nominal,
+        # then post-resized in `render.py` so the longest edge fits within
+        # `_VISION_MAX_EDGE = 1500` (the bbox coordinate-space anchor for
+        # Claude vision). After the resize, Letter renders at ≈1158 x 1500.
+        # The original `>= 1200` threshold predates the vision-consistency
+        # resize; loosened to ≥1100 so we still catch a thumbnail-scale
+        # regression without flagging the intentional downscale.
         pages = pdf_to_png_pages(COHEN_LAB_PDF.read_bytes())
         w, h = _png_dimensions(pages[0])
-        assert w >= 1200
-        assert h >= 1500
+        assert w >= 1100
+        assert h >= 1400
 
     def test_empty_bytes_rejected(self) -> None:
         with pytest.raises(ValueError, match="empty input"):

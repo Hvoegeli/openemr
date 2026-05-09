@@ -147,6 +147,11 @@ REFUSAL_PHRASES = [
     r"no .{0,40}(?:found|recorded|charted|documented)",
     r"(?:cannot|can'?t) confirm",
     r"don'?t have .{0,40}(?:in the chart|on file|in this chart|recorded)",
+    # "Cannot answer from training knowledge — needs a verified source"
+    # is a refusal shape the agent emits for clinical-reasoning questions
+    # that have no in-chart answer (R2 guardrail). Distinct from the
+    # "not in the chart" shape above; accepted as a valid refusal.
+    r"verified clinical source",
 ]
 
 
