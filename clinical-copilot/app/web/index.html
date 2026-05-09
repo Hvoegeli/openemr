@@ -261,6 +261,12 @@
     .vc-svg circle { fill: var(--accent); cursor: pointer; }
     .vc-svg circle.from-note { fill: #16a34a; }
     .vc-svg circle.selected { stroke: #0f172a; stroke-width: 1.5; r: 4; }
+    .vc-svg .vc-point-label {
+      font-size: 9px;
+      fill: #4b5563;
+      font-weight: 500;
+      pointer-events: none;
+    }
     .vc-svg .axis-label {
       font-size: 8px; fill: #64748b; font-family: inherit;
     }
@@ -333,6 +339,18 @@
     }
     ul.kv { margin: 0; padding-left: 1.25rem; }
     ul.kv li { margin-bottom: 0.32rem; line-height: 1.45; }
+    /* Chart-card list items deep-link to source via the same path
+       chat citations use. Cursor + hover hint that they're clickable. */
+    ul.kv li[data-fhir-ref] {
+      cursor: pointer;
+      border-radius: 4px;
+      padding: 0.05rem 0.35rem;
+      margin-left: -0.35rem;
+      transition: background 0.12s;
+    }
+    ul.kv li[data-fhir-ref]:hover {
+      background: rgba(255, 200, 0, 0.18);
+    }
     code { background: rgba(0,0,0,0.05); padding: 0 0.3em; border-radius: 3px; font-size: 0.85em; }
 
     /* ── Calendar list ──────────────────────────────────────────────── */
@@ -502,44 +520,64 @@
       width: 100%;
       height: auto;
     }
+    /* Bbox overlays render as highlighter strokes over the source
+       page — translucent yellow, no border, no inline label. The
+       intent is to look like a marker pen passing over the cited
+       words, not a UI box hovering above the page. The label sits
+       OFF the page in a tooltip on hover; it never overlaps the
+       actual text. */
     #doc-viewer-body .doc-page .bbox-overlay {
       position: absolute;
-      background: rgba(255, 230, 0, 0.28);
-      border: 2px solid rgba(214, 160, 0, 0.85);
-      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6) inset;
+      background: rgba(255, 235, 59, 0.42);
+      border: 0;
       border-radius: 2px;
       pointer-events: auto;
       cursor: pointer;
-      transition: background 0.12s, border-color 0.12s;
+      mix-blend-mode: multiply;
+      transition: background 0.12s;
     }
     #doc-viewer-body .doc-page .bbox-overlay:hover,
     #doc-viewer-body .doc-page .bbox-overlay.bbox-active {
-      background: rgba(255, 200, 0, 0.45);
-      border-color: rgba(190, 130, 0, 1);
+      background: rgba(255, 200, 0, 0.62);
     }
     /* Bbox v1: when a chat citation deep-links into the doc viewer
-       with a focus target, every NON-focus overlay gets dimmed so the
-       grader's eye is drawn to the cited region. The focus overlay
-       still gets `.bbox-active` styling above. */
+       with a focus target, every NON-focus overlay gets faded so the
+       eye is drawn to the cited region. The focus overlay still gets
+       `.bbox-active` styling above. */
     #doc-viewer-body .doc-page .bbox-overlay.bbox-dimmed {
-      background: transparent;
-      border-color: rgba(214, 160, 0, 0.25);
-      box-shadow: none;
+      background: rgba(255, 235, 59, 0.12);
     }
-    #doc-viewer-body .doc-page .bbox-overlay.bbox-dimmed .bbox-label {
+    /* The label is rendered into the DOM but kept hidden — it now
+       only appears via the native `title` tooltip on hover. We keep
+       the element in the DOM so existing JS can read its content
+       without breaking, but it never paints over the source text. */
+    #doc-viewer-body .doc-page .bbox-label {
       display: none;
     }
-    #doc-viewer-body .doc-page .bbox-label {
-      position: absolute;
-      top: -1.2rem;
-      left: 0;
-      font-size: 0.72rem;
-      background: rgba(214, 160, 0, 0.95);
-      color: #fff;
-      padding: 1px 6px;
-      border-radius: 3px;
-      white-space: nowrap;
-      pointer-events: none;
+    /* Page-band fallback: when a chart resource carries a
+       `[copilot-source: ...]` tag but no bbox JSON (HL7 messages,
+       fax-packet rows the VLM omitted bbox on, any non-spatial
+       source), render a thin full-width band at the top of the first
+       rendered page so the user gets a visible "this came from this
+       document" anchor instead of a blank PDF. The label IS shown
+       here (unlike precise overlays) because there's no underlying
+       text to obscure — the band sits in margin space. */
+    #doc-viewer-body .doc-page .bbox-overlay.bbox-page-band {
+      background: rgba(255, 200, 0, 0.78);
+      mix-blend-mode: normal;
+      border-top: 2px solid rgba(220, 150, 0, 0.95);
+      border-bottom: 2px solid rgba(220, 150, 0, 0.95);
+      display: flex;
+      align-items: center;
+      padding-left: 0.6rem;
+    }
+    #doc-viewer-body .doc-page .bbox-overlay.bbox-page-band .bbox-label {
+      display: inline-block;
+      color: #3a2a00;
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      text-shadow: 0 1px 0 rgba(255,255,255,0.55);
     }
     #doc-viewer-body .doc-page-stub {
       padding: 1rem;
@@ -834,6 +872,20 @@
       display: none;
     }
     .schedule-btn:hover { filter: brightness(1.1); }
+    /* Modern Dashboard out-link from the patient card. Inherits .schedule-btn
+       sizing but overrides the temporary display:none hide on .schedule-btn
+       (which is gated on a TZ rework that doesn't apply here). */
+    .dashboard-btn {
+      display: inline-flex !important;
+      align-items: center;
+      gap: 0.3rem;
+      text-decoration: none;
+    }
+    .dashboard-btn:hover { text-decoration: none; }
+    .patient-header-actions {
+      display: flex; flex-direction: column; gap: 0.4rem;
+      align-items: flex-end; flex-shrink: 0;
+    }
     /* Persistent prompt that surfaces on the patient header when sex is
        unknown — typically because the patient was created from a document
        (.docx, .xlsx) that didn't print sex and the create defaulted to
@@ -1215,6 +1267,25 @@
       try { localStorage.removeItem(UI_STATE_KEY); } catch (_) {}
     }
     async function restoreUiState() {
+      // URL `?pid=<patient-uuid>` takes precedence over localStorage
+      // and represents an explicit intent (e.g. the dashboard's
+      // "← Back to Co-Pilot" button hands control back here keyed on
+      // the patient the user was viewing). Strip the param after
+      // consuming so a manual refresh doesn't keep forcing the same
+      // patient when the user navigates the chat away.
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const urlPid = params.get('pid');
+        if (urlPid && /^[a-f0-9-]{8,}$/i.test(urlPid)) {
+          params.delete('pid');
+          const cleanQs = params.toString();
+          const cleanUrl = window.location.pathname + (cleanQs ? '?' + cleanQs : '');
+          window.history.replaceState({}, '', cleanUrl);
+          await selectPatient(urlPid);
+          switchTab('card');
+          return;
+        }
+      } catch (_) { /* fall through to localStorage path */ }
       try {
         const raw = localStorage.getItem(UI_STATE_KEY);
         if (!raw) return;
@@ -1516,6 +1587,22 @@
             + '<button type="button" class="sex-set-btn">Save</button>'
           + '</div>'
         : '';
+      // "View on Modern Dashboard" — opens the React patient dashboard
+      // in a new tab, scoped to this patient. The dashboard reuses the
+      // same Co-Pilot session cookie so there's no re-auth round-trip.
+      // The dashboard's "← Back to Co-Pilot" button uses
+      // `window.opener` to navigate THIS chat tab to the patient and
+      // then closes the dashboard tab. For that to work we must NOT
+      // pass `rel="noopener"` (which severs window.opener). Both
+      // surfaces are first-party Co-Pilot code on the same origin, so
+      // dropping noopener doesn't open a security gap.
+      const dashHref = d.mrn
+        ? '/dashboard/?pid=' + encodeURIComponent(d.mrn)
+        : null;
+      const dashBtn = dashHref
+        ? '<a class="schedule-btn dashboard-btn" href="' + dashHref + '" target="_blank" '
+          + 'title="Open this patient in the Modern Dashboard (new tab)">View on Modern Dashboard ↗</a>'
+        : '';
       return [
         '<div class="patient-header">',
           '<div>',
@@ -1526,7 +1613,10 @@
               ' · MRN <code>' + escapeHtml(d.mrn || '') + '</code>',
             '</div>',
           '</div>',
-          '<button type="button" id="btn-schedule" class="schedule-btn">＋ Schedule</button>',
+          '<div class="patient-header-actions">',
+            dashBtn,
+            '<button type="button" id="btn-schedule" class="schedule-btn">＋ Schedule</button>',
+          '</div>',
         '</div>',
         sexBanner,
         '<h3 data-section="AllergyIntolerance">Allergies</h3>',
@@ -1793,18 +1883,38 @@
         path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
       });
 
+      // Render every point as a circle + a small inline value label so
+      // the user can read each datapoint without hovering. Labels are
+      // anchored above or below the line based on whether the point
+      // is in the top or bottom half of the chart, so they don't sit
+      // directly on the line. For dense series (>8 points) we stride
+      // the labels to avoid overlap, but always keep the first and
+      // last value visible.
+      const labelStride = points.length > 8 ? Math.ceil(points.length / 6) : 1;
       const dots = points.map((p, i) => {
         const x = xC(new Date(p.date).getTime());
         const y = yC(Number(p.value));
         const fromNote = typeof p.source === 'string' && p.source.startsWith('ClinicalNote/');
         const tip = String(p.value) + ' ' + (p.unit || unit) + ' on ' +
                     new Date(p.date).toLocaleString();
-        return '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) +
+        const circle = '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) +
                '" r="3.2"' + (fromNote ? ' class="from-note"' : '') +
                ' data-vital-key="' + escapeHtml(key) + '"' +
                ' data-point-idx="' + i + '"' +
                ' data-fhir-ref="' + escapeHtml(p.source || '') + '">' +
                '<title>' + escapeHtml(tip) + '</title></circle>';
+        const showLabel = (i === 0) || (i === points.length - 1) || (i % labelStride === 0);
+        if (!showLabel) return circle;
+        // Anchor above for points in the top half, below for the bottom half.
+        const above = (y > (PY + innerH / 2));
+        const dy = above ? -8 : 12;
+        const valStr = Number.isInteger(Number(p.value))
+          ? String(p.value)
+          : Number(p.value).toFixed(1);
+        const label = '<text x="' + x.toFixed(1) + '" y="' + (y + dy).toFixed(1) +
+               '" class="vc-point-label" text-anchor="middle">' +
+               escapeHtml(valStr) + '</text>';
+        return circle + label;
       }).join('');
 
       const latest = points[points.length - 1];
@@ -1914,6 +2024,14 @@
       const row       = e.target.closest('.vc-list li[data-vital-key]');
       const sourceRef = e.target.closest('.source-ref[data-fhir-ref]');
       const sexSave   = e.target.closest('.sex-set-btn');
+      // Chart card list items (allergies / problems / medications) carry
+      // a `data-fhir-ref` but until now had no click handler — the row
+      // looked clickable (the chat citations do navigate) and users
+      // expected the same affordance. Route through jumpToCitation so
+      // the row click runs the same source-lookup → PDF-deep-link path
+      // that a chat citation would, falling back to the chart-card
+      // scroll if the resource has no `[copilot-source: ...]` tag.
+      const cardItem = e.target.closest('li[data-fhir-ref]');
       if (sexSave) {
         const banner = sexSave.closest('.sex-set-banner');
         const sel = banner && banner.querySelector('.sex-set-select');
@@ -1976,6 +2094,11 @@
         else refreshCard(activePatientId);
         // Defer one tick so the snapshot DOM is parsed before we query it.
         setTimeout(() => jumpToCitation(ref), 0);
+        return;
+      }
+      if (cardItem) {
+        const ref = cardItem.getAttribute('data-fhir-ref') || '';
+        if (ref) jumpToCitation(ref);
         return;
       }
       const target = dot || row;
@@ -2132,12 +2255,14 @@
     });
 
     function openDoc(item, options) {
-      // `options.focusResourceRef` (Bbox v1): when a chat citation for an
-      // extracted chart resource (Allergy/Medication/Condition) opens
-      // the doc viewer, dim every overlay except the one for that
-      // resource so the grader's eye lands on the cited region. None →
-      // every overlay rendered with default styling.
+      // Highlight rendering is controlled by these two options:
+      //   focusResourceRef: chart-resource citation (Allergy/Med/Condition)
+      //     → show only the overlay matching that resource_ref.
+      //   showAllOverlays: doc-level citation (DocumentReference/Encounter)
+      //     → show every overlay persisted for this document.
+      // Neither set (direct open from Supporting Documents) → show none.
       const focusResourceRef = options && options.focusResourceRef;
+      const showAllOverlays = options && options.showAllOverlays;
       // Header
       docTitle.textContent = displayTitle(item) || '(untitled)';
       const dateStr = item.date
@@ -2253,11 +2378,11 @@
         // racing pages into the wrong view. Also used by the Hide /
         // Unhide buttons above to know which document to act on.
         window.__docViewerActiveId = docId;
-        loadDocumentSourcePages(docId, docViewerBody, focusResourceRef || null);
+        loadDocumentSourcePages(docId, docViewerBody, focusResourceRef || null, !!showAllOverlays);
       }
     }
 
-    async function loadDocumentSourcePages(docId, container, focusResourceRef) {
+    async function loadDocumentSourcePages(docId, container, focusResourceRef, showAllOverlays) {
       const stub = document.createElement('div');
       stub.className = 'doc-page-stub';
       stub.textContent = 'Loading source pages…';
@@ -2276,13 +2401,68 @@
           stub.textContent = 'No rendered source pages available for this document.';
           return;
         }
-        // Bucket facts by page number for O(1) lookup per page render.
+        // Bucket facts into two shapes:
+        //   - byPage:    facts with a real bbox -> precise overlay on
+        //                the cited page, scaled to the rendered image.
+        //   - pageBand:  facts WITH a `[copilot-source: ...]` tag but
+        //                NO bbox (HL7 messages, fax/referral rows the
+        //                VLM didn't anchor, any non-spatial source).
+        //                These render as a thin full-width band at the
+        //                top of the first rendered page so the click
+        //                still produces a visible "from this document"
+        //                anchor. Without this branch, every Kowalski
+        //                / Reyes citation lands on a blank PDF and the
+        //                user thinks the deep-link is broken.
         const byPage = new Map();
+        // pageBandFactsByPage: page-number -> list-of-facts. When the
+        // bbox carries only a page hint (`{page: N}` with no x/y/w/h —
+        // backfilled allergies, page-band-only sources), we still know
+        // which page to anchor on. Falls back to page 1 when even the
+        // page hint is missing.
+        const pageBandFactsByPage = new Map();
+        const firstPageNum = (pagesRes.pages[0] && pagesRes.pages[0].page) || 1;
         for (const f of (manifestRes.facts || [])) {
-          const b = f && f.bbox;
-          if (!b || !b.page) continue;
-          if (!byPage.has(b.page)) byPage.set(b.page, []);
-          byPage.get(b.page).push(f);
+          if (!f) continue;
+          const b = f.bbox;
+          const hasFullBbox = b
+            && typeof b.page === 'number'
+            && typeof b.x === 'number' && typeof b.y === 'number'
+            && typeof b.width === 'number' && typeof b.height === 'number';
+          if (hasFullBbox) {
+            if (!byPage.has(b.page)) byPage.set(b.page, []);
+            byPage.get(b.page).push(f);
+          } else if (f.resource_ref) {
+            const pageHint = (b && typeof b.page === 'number')
+              ? b.page : firstPageNum;
+            if (!pageBandFactsByPage.has(pageHint)) {
+              pageBandFactsByPage.set(pageHint, []);
+            }
+            pageBandFactsByPage.get(pageHint).push(f);
+          }
+        }
+        // Flat list used by the focus-fallback check below — flatten
+        // page-band facts back out so any-overlay-matches logic works.
+        const pageBandFacts = [];
+        for (const arr of pageBandFactsByPage.values()) {
+          pageBandFacts.push(...arr);
+        }
+
+        // When a citation deep-link names a specific resource but no
+        // matching overlay (bbox or page-band) is present in the
+        // manifest, fall back to doc-level so every available anchor
+        // shows up — better than a blank PDF.
+        if (focusResourceRef) {
+          const ref = focusResourceRef;
+          const matches = (
+            pageBandFacts.some((f) => f.resource_ref === ref)
+            || Array.from(byPage.values()).some(
+              (arr) => arr.some((f) => f.resource_ref === ref)
+            )
+          );
+          if (!matches) {
+            focusResourceRef = null;
+            showAllOverlays = true;
+          }
         }
 
         // Swap the stub for the heading + page elements.
@@ -2312,6 +2492,12 @@
           const hPx = page.height_px || 0;
           const facts = byPage.get(page.page) || [];
           for (const f of facts) {
+            // Highlights only render when the user opened this doc via
+            // a chat citation. Direct opens from Supporting Documents
+            // show clean pages. Doc-level citations show every overlay;
+            // chart-resource citations show only the matching one.
+            if (!focusResourceRef && !showAllOverlays) continue;
+            if (focusResourceRef && f.resource_ref !== focusResourceRef) continue;
             const b = f.bbox;
             if (!b || !wPx || !hPx) continue;
             // Skip overlays whose bbox is missing any required numeric
@@ -2322,11 +2508,13 @@
                 || typeof b.width !== 'number' || typeof b.height !== 'number') {
               continue;
             }
-            // bbox is the value the VLM returned at extraction time. The
-            // schema docstring claims PDF-point space, but Claude saw a
-            // 150-DPI PNG; assume PNG-pixel space and let the page's
-            // returned width_px / height_px normalize. v1 will resolve
-            // any residual misalignment via PDF.js's page coords.
+            // bbox is the value the VLM returned at extraction time, in
+            // pixels of the rendered page image with origin top-left.
+            // Coord-space contract is enforced by the system prompt in
+            // app/extraction/vision.py and documented on the
+            // BoundingBox model in app/extraction/schemas.py. Dividing
+            // by the page's returned width_px / height_px lets the
+            // overlay scale when the viewer is resized.
             const overlay = document.createElement('div');
             overlay.className = 'bbox-overlay';
             overlay.dataset.resourceRef = f.resource_ref || '';
@@ -2341,29 +2529,54 @@
             overlay.appendChild(label);
             pageDiv.appendChild(overlay);
           }
+
+          // Page-band overlays render on the page their (partial) bbox
+          // names — so a backfilled allergy with `bbox={page:2}` lands
+          // on page 2's band, not page 1's. Without a page hint we
+          // default to the first rendered page. Stack them
+          // top-to-bottom so multiple bbox-less facts each get their
+          // own visible strip; heights are absolute (~28px) rather
+          // than %-of-page so the band looks the same regardless of
+          // page aspect ratio.
+          const pageBandsForThisPage = pageBandFactsByPage.get(page.page) || [];
+          if (pageBandsForThisPage.length > 0
+              && (focusResourceRef || showAllOverlays)) {
+            const bandHeightPct = wPx && hPx ? (28 / hPx) * 100 : 2.5;
+            let cursorPct = 0;
+            for (const f of pageBandsForThisPage) {
+              if (focusResourceRef && f.resource_ref !== focusResourceRef) continue;
+              const overlay = document.createElement('div');
+              overlay.className = 'bbox-overlay bbox-page-band';
+              overlay.dataset.resourceRef = f.resource_ref || '';
+              overlay.title = (f.label || f.resource_type || '') + ' — source: this document';
+              overlay.style.left = '0%';
+              overlay.style.top = cursorPct.toFixed(3) + '%';
+              overlay.style.width = '100%';
+              overlay.style.height = bandHeightPct.toFixed(3) + '%';
+              cursorPct += bandHeightPct;
+              const label = document.createElement('span');
+              label.className = 'bbox-label';
+              label.textContent = 'Source: ' + (f.label || f.resource_type || '').slice(0, 80);
+              overlay.appendChild(label);
+              pageDiv.appendChild(overlay);
+            }
+          }
+
           container.appendChild(pageDiv);
         }
 
-        // Bbox v1: apply per-citation focus. `bbox-active` highlights
-        // the matching overlay; `bbox-dimmed` mutes everything else.
-        // Scroll the first focus match into view so the grader doesn't
-        // hunt for it on a multi-page document.
-        if (focusResourceRef) {
+        // Mark every rendered overlay active and scroll the first one
+        // into view, regardless of whether we entered via a focused
+        // resource citation or the doc-level fallback. The user clicked
+        // a citation expecting "show me where this came from" — landing
+        // them on a passive page and asking them to scan is a
+        // regression. `block: 'center'` keeps the highlight off the
+        // sticky header.
+        if (focusResourceRef || showAllOverlays) {
           const overlays = container.querySelectorAll('.bbox-overlay');
-          let firstMatch = null;
-          overlays.forEach((ov) => {
-            if (ov.dataset.resourceRef === focusResourceRef) {
-              ov.classList.add('bbox-active');
-              if (firstMatch === null) firstMatch = ov;
-            } else {
-              ov.classList.add('bbox-dimmed');
-            }
-          });
-          if (firstMatch !== null) {
-            // `block: 'center'` puts the highlighted box near the
-            // middle of the viewport instead of jamming it against
-            // the header.
-            firstMatch.scrollIntoView({behavior: 'smooth', block: 'center'});
+          overlays.forEach((ov) => ov.classList.add('bbox-active'));
+          if (overlays.length > 0) {
+            overlays[0].scrollIntoView({behavior: 'smooth', block: 'center'});
           }
         }
       } catch (err) {
@@ -2927,16 +3140,21 @@
       }
 
       if (type === 'Encounter' || type === 'DocumentReference') {
-        switchTab('docs');
         // Try to open the matching item in the doc viewer.
         const items = window.__currentDocs || [];
         const idx = items.findIndex(it => it.ref === ref);
         if (idx >= 0) {
-          openDoc(items[idx]);
+          switchTab('docs');
+          // Doc-level citation: no specific resource to focus on, so
+          // surface every persisted highlight from this document.
+          openDoc(items[idx], {showAllOverlays: true});
         } else {
-          // Not in current docs (could be from a different patient turn);
-          // just flash the docs tab title bar so the user notices the jump.
-          flash(tabDocs);
+          // Not in current docs — almost always means the citation is
+          // for a different patient (the user was on Reyes's docs and
+          // clicked a Chen-context citation). Tell them clearly
+          // instead of flashing the whole tab body, which looked like
+          // an alert and was reported as confusing.
+          append('system', "This citation's source document is not loaded for the current patient.");
         }
         return;
       }

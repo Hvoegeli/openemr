@@ -38,3 +38,10 @@ data/guidelines/corpus_embeddings.meta.json
 # paths but the files don't belong in git history.
 data/clinical_notes.json
 data/traces.db
+
+# Modern Dashboard — source committed, build output generated.
+# `npm install && npm run build` regenerates everything below.
+dashboard/node_modules/
+dashboard/dist/
+dashboard/tsconfig.tsbuildinfo
+app/web/dashboard-build/

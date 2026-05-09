@@ -37,6 +37,7 @@ from uuid import uuid4
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
@@ -68,6 +69,7 @@ from app.auth import current_session, current_user, is_admin, require_admin, ver
 from app.assignments_db import AssignmentStore  # noqa: E402
 from app.auth_db import AuthStore  # noqa: E402
 from app.document_fingerprints_db import DocumentFingerprintStore  # noqa: E402
+from app.extracted_sources_db import ExtractedSourcesStore  # noqa: E402
 from app.hidden_docs_db import HiddenDocsStore  # noqa: E402
 import hashlib  # noqa: E402
 
@@ -112,6 +114,19 @@ SESSIONS: dict[str, AgentState] = {}
 # at startup makes the first read after server boot instant; this TTL keeps
 # subsequent reads instant for the duration of a demo or a clinic session.
 DATA_CACHE_TTL_S = 300.0
+
+# Rendered PDF pages + bbox manifest are immutable for the lifetime of a
+# DocumentReference (we never edit attachment bytes after upload). A long
+# TTL keeps clicks on the citation-deep-link path instant after the first
+# render. Server-side prefetch (kicked off by the docs-list endpoint) means
+# the first click is also typically warm.
+PAGES_CACHE_TTL_S = 1800.0
+
+# Cap concurrent background page-renders so prefetch can't pin every
+# uvicorn worker thread on a patient with many large PDFs.
+_PAGES_PREFETCH_SEMAPHORE = asyncio.Semaphore(2)
+# Cap docs prefetched per patient so one chart can't queue 50 renders.
+_PAGES_PREFETCH_PER_PATIENT_CAP = 8
 
 
 def _fresh_state() -> AgentState:
@@ -285,6 +300,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # via a separate `hidden_documents` table.
     app.state.hidden_docs = HiddenDocsStore(auth_db_path)
     log.info("hidden-docs store: sqlite at %s", auth_db_path)
+    # Sidecar mapping (resource_type, resource_id) -> source-doc + bbox.
+    # Required because OpenEMR's FHIR allergy serializer drops the
+    # `comments` column where the writer puts its `[copilot-source: ...]`
+    # tag. Same SQLite file, separate `extracted_resource_sources` table.
+    app.state.extracted_sources = ExtractedSourcesStore(auth_db_path)
+    log.info("extracted-sources store: sqlite at %s", auth_db_path)
     # Content-fingerprint index for dedup Layer 2 — same SQLite file,
     # separate `document_fingerprints` table.
     app.state.fingerprints = DocumentFingerprintStore(auth_db_path)
@@ -303,6 +324,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         assignments_store=app.state.assignments, model_name=MODEL_NAME,
     )
     app.state.cache = TTLCache(ttl_seconds=DATA_CACHE_TTL_S)
+    # Separate cache for rendered PDF pages + bbox manifest. Distinct
+    # because the TTL is much longer (rendered pages don't drift) and the
+    # values are large (multi-MB PNG b64 per doc) — keeping them off the
+    # main TTL path means a single doc-prefetch storm can't crowd out the
+    # small chart-card / docs-list entries.
+    app.state.pages_cache = TTLCache(ttl_seconds=PAGES_CACHE_TTL_S)
 
     # Don't block startup on the prewarm — let it run while uvicorn binds.
     prewarm_task = asyncio.create_task(_prewarm_dashboard(app))
@@ -316,6 +343,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.auth_store.close()
         app.state.assignments.close()
         app.state.hidden_docs.close()
+        app.state.extracted_sources.close()
         app.state.fingerprints.close()
         app.state.active_patients.close()
 
@@ -330,6 +358,35 @@ app.add_middleware(
     https_only=False,  # cloudflared terminates TLS; cookie still travels over public HTTPS
     max_age=12 * 60 * 60,  # 12-hour shift
 )
+
+# Modern Dashboard static bundle. Vite builds into
+# `clinical-copilot/app/web/dashboard-build/`; we mount it under
+# `/dashboard` so `/dashboard` serves index.html and `/dashboard/assets/*`
+# serves the hashed JS+CSS chunks. `html=True` makes the mount serve
+# index.html for the bare prefix path (the SPA reads `?pid=...` from
+# location.search, so we don't need a SPA-style catch-all).
+#
+# The directory may not exist on a fresh checkout (it's a build
+# artifact, gitignored). We fall through to a stub route in that case
+# so the app still starts and `/dashboard` returns a clear "build not
+# found" message instead of a 500.
+_DASHBOARD_BUILD_DIR = WEB_DIR / "dashboard-build"
+if _DASHBOARD_BUILD_DIR.is_dir() and (_DASHBOARD_BUILD_DIR / "index.html").is_file():
+    app.mount(
+        "/dashboard",
+        StaticFiles(directory=str(_DASHBOARD_BUILD_DIR), html=True),
+        name="dashboard",
+    )
+else:
+    @app.get("/dashboard")
+    async def _dashboard_not_built() -> Response:
+        return Response(
+            "Modern Dashboard build not found. From `clinical-copilot/dashboard/` "
+            "run `npm install && npm run build` to populate "
+            "app/web/dashboard-build/, then restart the server.",
+            status_code=503,
+            media_type="text/plain",
+        )
 
 
 class ChatRequest(BaseModel):
@@ -381,6 +438,29 @@ async def index(request: Request) -> FileResponse | RedirectResponse:
 
 @app.get("/login", response_model=None)
 async def login_page(request: Request) -> FileResponse | RedirectResponse:
+    """Serve the username+password login form.
+
+    Two parallel login paths are intentionally kept:
+
+      - This form-post path (`/login` → POST `/api/login`) is the
+        Co-Pilot-only login. It validates credentials against OpenEMR
+        via password-grant, creates a Co-Pilot session, and lands the
+        user on the Co-Pilot chat surface. OpenEMR's PHP session is
+        NOT seeded; OpenEMR-served pages still require their own
+        sign-in.
+
+      - The OAuth2/OIDC path (`/oauth/login` → OpenEMR authorize →
+        callback → session) covers the W2 dashboard rubric's
+        "Authentication via OAuth2/OpenID Connect" requirement. Use
+        this when single-sign-on across Co-Pilot and OpenEMR is
+        wanted in the same browser tab.
+
+    Both lead to the same Co-Pilot session shape, so the chat surface
+    and the Modern Dashboard work identically regardless of which
+    door the user came through. The dashboard reads Copilot's
+    session cookie only — no OpenEMR PHP session is required for the
+    dashboard surface itself.
+    """
     if current_session(request) is not None:
         return RedirectResponse(url="/", status_code=302)
     return FileResponse(WEB_DIR / "login.html", headers=_NO_CACHE_HEADERS)
@@ -441,6 +521,525 @@ async def logout(request: Request) -> dict:
 @app.get("/api/me")
 async def me(username: str = Depends(current_user)) -> dict:
     return {"username": username, "is_admin": is_admin(username)}
+
+
+# ─── OAuth2 / OIDC login (replaces password-grant for new dashboard) ────
+
+
+@app.get("/oauth/login", response_model=None)
+async def oauth_login(request: Request, next: str | None = None) -> RedirectResponse:
+    """Phase 1 of the auth-code flow. Generates a PKCE verifier+challenge
+    and a state nonce, stashes them in the user's signed session cookie,
+    then 302s the browser to OpenEMR's hosted login page. After the user
+    authenticates there, OpenEMR redirects to /oauth/callback below.
+
+    `?next=<path>` carries a same-origin path the user wanted before
+    being bounced to login (e.g. /dashboard). Open-redirect guarded —
+    only paths starting with `/` and not `//` are accepted.
+    """
+    from app.oauth import build_authorize_url  # noqa: PLC0415
+    try:
+        url = build_authorize_url(request, next_path=next)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return RedirectResponse(url=url, status_code=302)
+
+
+@app.get("/oauth/callback", response_model=None)
+async def oauth_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+) -> RedirectResponse:
+    """Phase 2 of the auth-code flow. OpenEMR redirects here after the
+    user signs in. We validate state, exchange the code for an id_token,
+    decode the username, then create the same Copilot session the
+    legacy /api/login created — so the rest of the app behaves
+    identically post-OAuth.
+    """
+    from app.oauth import consume_next_path, exchange_code_for_username  # noqa: PLC0415
+
+    if error:
+        # Provider-side error (user denied, scope rejected, etc.). Keep
+        # the message in the audit log but surface a generic message to
+        # the user — the description may carry stack-trace-shaped detail
+        # we don't want in the response.
+        ua, ip = _client_ua_ip(request)
+        request.app.state.auth_store.log_event(
+            "oauth_provider_error",
+            username=None, user_agent=ua, ip=ip,
+            detail=f"{error}: {(error_description or '')[:200]}",
+        )
+        raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
+
+    if not code or not state:
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth callback missing required `code` or `state` parameter.",
+        )
+
+    ua, ip = _client_ua_ip(request)
+    try:
+        username = await exchange_code_for_username(request, code=code, state=state)
+    except HTTPException:
+        request.app.state.auth_store.log_event(
+            "oauth_exchange_failure", username=None, user_agent=ua, ip=ip,
+        )
+        raise
+    sid = request.app.state.auth_store.create_session(
+        username=username, user_agent=ua, ip=ip,
+    )
+    request.session["sid"] = sid
+    request.app.state.auth_store.log_event(
+        "login_success", username=username, sid=sid, user_agent=ua, ip=ip,
+        detail="oauth2_authcode_pkce",
+    )
+    return RedirectResponse(url=consume_next_path(request), status_code=302)
+
+
+# ─── modern dashboard API ───────────────────────────────────────────────
+#
+# Read-only patient-summary endpoints that power the React/Vite dashboard
+# at /dashboard. Each endpoint:
+#   1. Requires a logged-in Copilot session (`current_user` dependency).
+#   2. Resolves the user's patient panel and asserts `pid` is in it. The
+#      ACL is fail-closed: a non-admin with no panel mapping sees 404 on
+#      every patient.
+#   3. Fans out to the FHIR client and formats one card's worth of data.
+#
+# The dashboard's TypeScript API client (`dashboard/src/api.ts`) is the
+# canonical consumer; response shapes here MUST match the interfaces
+# declared there.
+
+
+def _dashboard_header_payload(patient: dict, patient_id: str) -> dict:
+    """Format a Patient resource into the dashboard's PatientHeader shape."""
+    name = (patient.get("name") or [{}])[0]
+    given = list(name.get("given") or [])
+    family = name.get("family") or ""
+    full_name = " ".join([*given, family]).strip() or "(unnamed patient)"
+
+    # MRN from `identifier[].value` — prefer `type.coding.code == 'MR'` per
+    # FHIR convention, fall back to the first identifier with a value.
+    mrn: str | None = None
+    for ident in patient.get("identifier") or []:
+        codings = ((ident.get("type") or {}).get("coding") or [])
+        if any((c or {}).get("code") == "MR" for c in codings):
+            v = ident.get("value")
+            if isinstance(v, str) and v:
+                mrn = v
+                break
+    if mrn is None:
+        for ident in patient.get("identifier") or []:
+            v = ident.get("value")
+            if isinstance(v, str) and v:
+                mrn = v
+                break
+
+    primary_phone: str | None = None
+    for tel in patient.get("telecom") or []:
+        if (tel or {}).get("system") == "phone":
+            v = tel.get("value")
+            if isinstance(v, str) and v:
+                primary_phone = v
+                break
+
+    from app.fhir.adapter import _calc_age  # noqa: PLC0415
+    return {
+        "id": patient_id,
+        "full_name": full_name,
+        "given": given,
+        "family": family,
+        "birth_date": patient.get("birthDate"),
+        "age": _calc_age(patient.get("birthDate")),
+        "gender": patient.get("gender"),
+        "mrn": mrn,
+        "active": bool(patient.get("active", True)),
+        "primary_phone": primary_phone,
+    }
+
+
+def _dashboard_allergy_entry(a: dict) -> dict:
+    from app.fhir.adapter import _coded_display, _narrative_text  # noqa: PLC0415
+    crit = a.get("criticality")
+    # FHIR R4 `criticality` is one of low|high|unable-to-assess. Anything
+    # else gets normalized to None so the UI's pill renderer can rely on
+    # a closed enum.
+    if crit not in ("low", "high", "unable-to-assess"):
+        crit = None
+    clinical_status = ((a.get("clinicalStatus") or {}).get("coding") or [{}])[0].get("code")
+    # Fallback chain: prefer a coded display, then narrative text, then
+    # "(unspecified)". OpenEMR stores allergies entered via the patient
+    # intake flow as narrative text without SNOMED/RxNorm codings — so
+    # without the narrative fallback every Co-Pilot-uploaded allergy
+    # would render as "(unspecified)" on the dashboard while still
+    # showing correctly on the Co-Pilot's chat-surface patient card.
+    display = _coded_display(a.get("code") or {}) or _narrative_text(a) or "(unspecified)"
+    return {
+        "id": a.get("id") or "",
+        "display": display,
+        "criticality": crit,
+        "clinical_status": clinical_status,
+        "recorded_date": a.get("recordedDate"),
+    }
+
+
+def _dashboard_condition_entry(c: dict) -> dict:
+    from app.fhir.adapter import _coded_display, _narrative_text  # noqa: PLC0415
+    clinical_status = ((c.get("clinicalStatus") or {}).get("coding") or [{}])[0].get("code")
+    display = _coded_display(c.get("code") or {}) or _narrative_text(c) or "(unspecified)"
+    return {
+        "id": c.get("id") or "",
+        "display": display,
+        "clinical_status": clinical_status,
+        "onset_date": c.get("onsetDateTime"),
+    }
+
+
+def _dashboard_med_entry(m: dict) -> dict:
+    from app.fhir.adapter import _coded_display, _narrative_text  # noqa: PLC0415
+    dosage = (m.get("dosageInstruction") or [{}])[0]
+    display = (
+        _coded_display(m.get("medicationCodeableConcept") or {})
+        or _narrative_text(m)
+        or "(unspecified)"
+    )
+    return {
+        "id": m.get("id") or "",
+        "display": display,
+        "status": m.get("status"),
+        "authored_date": m.get("authoredOn"),
+        "dosage_text": dosage.get("text"),
+    }
+
+
+def _dashboard_prescription_entry(m: dict) -> dict:
+    """Format a MedicationRequest with the prescription-order lens.
+
+    Same underlying FHIR resource as `_dashboard_med_entry`, but the
+    fields exposed here are the ones a prescriber/admin cares about
+    (who wrote it, when, how many refills) rather than the clinical
+    summary fields (drug + dosage). The rubric calls for both cards
+    distinctly, so we expose the full set as separate views over the
+    same data.
+    """
+    from app.fhir.adapter import _coded_display, _narrative_text  # noqa: PLC0415
+    display = (
+        _coded_display(m.get("medicationCodeableConcept") or {})
+        or _narrative_text(m)
+        or "(unspecified)"
+    )
+    requester = (m.get("requester") or {}).get("display") or None
+    dispense = m.get("dispenseRequest") or {}
+    refills = dispense.get("numberOfRepeatsAllowed")
+    quantity = (dispense.get("quantity") or {}).get("value")
+    return {
+        "id": m.get("id") or "",
+        "display": display,
+        "status": m.get("status"),
+        "intent": m.get("intent"),
+        "authored_date": m.get("authoredOn"),
+        "prescriber": requester,
+        "refills": refills if isinstance(refills, int) else None,
+        "quantity": quantity,
+    }
+
+
+def _dashboard_careteam_entry(ct: dict) -> list[dict]:
+    """Flatten one CareTeam into one entry per participant.
+
+    A FHIR CareTeam carries `participant[].member.display` for each
+    person on the team; we render one row per participant rather than
+    one row per team. Empty `participant` lists yield an empty result.
+    """
+    out: list[dict] = []
+    ct_id = ct.get("id") or ""
+    for i, p in enumerate(ct.get("participant") or []):
+        member = (p or {}).get("member") or {}
+        role_coding = ((p.get("role") or [{}])[0].get("coding") or [{}])[0]
+        out.append({
+            "id": f"{ct_id}:{i}",
+            "name": member.get("display"),
+            "role": role_coding.get("display") or role_coding.get("code"),
+        })
+    return out
+
+
+# Vitals: LOINC codes the dashboard knows how to label + render. Other
+# observations slip through as "Other" only if they have a usable name;
+# empty rows are dropped before they reach the client.
+_VITAL_LOINC_LABELS: dict[str, str] = {
+    "8480-6":  "Systolic BP",
+    "8462-4":  "Diastolic BP",
+    "8867-4":  "Heart Rate",
+    "29463-7": "Weight",
+    "8302-2":  "Height",
+    "8310-5":  "Body Temperature",
+    "9279-1":  "Respiratory Rate",
+    "59408-5": "SpO2",
+    "39156-5": "BMI",
+}
+
+
+def _dashboard_vitals_series(observations: list[dict]) -> list[dict]:
+    """Group vital-signs Observations by LOINC code and emit time-series.
+
+    BP Observations carry two `component` entries (systolic + diastolic)
+    instead of a top-level `valueQuantity` — split them into the two
+    LOINC-keyed series so the cards can plot each independently.
+    """
+    series: dict[str, dict] = {}
+
+    def push(loinc: str, display: str, unit: str | None, effective: str | None, value: float | None) -> None:
+        if not effective or value is None:
+            return
+        s = series.setdefault(
+            loinc,
+            {"loinc": loinc, "display": display, "unit": unit, "readings": []},
+        )
+        s["readings"].append({"effective": effective, "value": value, "unit": unit})
+
+    for o in observations:
+        eff = o.get("effectiveDateTime") or o.get("issued")
+        # Top-level value first.
+        codings = ((o.get("code") or {}).get("coding") or [])
+        primary = next((c for c in codings if (c or {}).get("system") == "http://loinc.org"), {})
+        primary_loinc = primary.get("code")
+        primary_label = _VITAL_LOINC_LABELS.get(primary_loinc or "", primary.get("display") or "Vital")
+        vq = o.get("valueQuantity") or {}
+        v = vq.get("value")
+        if isinstance(v, (int, float)) and primary_loinc:
+            push(primary_loinc, primary_label, vq.get("unit"), eff, float(v))
+
+        # Components for composite vitals (BP).
+        for comp in o.get("component") or []:
+            comp_codings = ((comp.get("code") or {}).get("coding") or [])
+            cl = next((c for c in comp_codings if (c or {}).get("system") == "http://loinc.org"), {})
+            cl_code = cl.get("code")
+            if not cl_code:
+                continue
+            cvq = comp.get("valueQuantity") or {}
+            cv = cvq.get("value")
+            if isinstance(cv, (int, float)):
+                push(
+                    cl_code,
+                    _VITAL_LOINC_LABELS.get(cl_code, cl.get("display") or "Vital"),
+                    cvq.get("unit"),
+                    eff,
+                    float(cv),
+                )
+
+    # Sort each series chronologically so the sparkline draws left-to-right.
+    out: list[dict] = []
+    for loinc, s in series.items():
+        s["readings"].sort(key=lambda r: r.get("effective") or "")
+        out.append(s)
+    # Stable order: BPs first, then HR / Temp / RR / SpO2 / BMI / Weight / Height.
+    order = ["8480-6", "8462-4", "8867-4", "8310-5", "9279-1", "59408-5", "39156-5", "29463-7", "8302-2"]
+    out.sort(key=lambda s: order.index(s["loinc"]) if s["loinc"] in order else 999)
+    return out
+
+
+async def _dashboard_assert_patient_in_panel(request: Request, username: str, pid: str) -> None:
+    """Shared ACL preamble for every dashboard endpoint. Raises 404 (NOT
+    403) when the patient is outside the user's panel — leaking
+    "this patient exists but you can't see them" is a soft-info-leak we
+    explicitly avoid in this app."""
+    panel = await access_control.get_panel_for_user(
+        request.app.state.fhir, username, request.app.state.assignments,
+    )
+    if not access_control.is_in_panel(panel, pid):
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+
+@app.get("/api/dashboard/patient/{pid}/header")
+async def dashboard_header(
+    pid: str, request: Request, username: str = Depends(current_user),
+) -> dict:
+    await _dashboard_assert_patient_in_panel(request, username, pid)
+    patient = await request.app.state.fhir.get(f"Patient/{pid}")
+    return _dashboard_header_payload(patient, pid)
+
+
+@app.get("/api/dashboard/patient/{pid}/allergies")
+async def dashboard_allergies(
+    pid: str, request: Request, username: str = Depends(current_user),
+) -> dict:
+    await _dashboard_assert_patient_in_panel(request, username, pid)
+    rows = await request.app.state.fhir.search("AllergyIntolerance", {"patient": pid, "_count": 200})
+    return {"items": [_dashboard_allergy_entry(a) for a in rows]}
+
+
+@app.get("/api/dashboard/patient/{pid}/conditions")
+async def dashboard_conditions(
+    pid: str, request: Request, username: str = Depends(current_user),
+) -> dict:
+    await _dashboard_assert_patient_in_panel(request, username, pid)
+    rows = await request.app.state.fhir.search("Condition", {"patient": pid, "_count": 200})
+    # Filter to active/recurrence only — closed/inactive problems
+    # belong on a "history" tab, not the live problem list.
+    active = [
+        c for c in rows
+        if ((c.get("clinicalStatus") or {}).get("coding") or [{}])[0].get("code")
+        in {"active", "recurrence", "relapse", None}
+    ]
+    return {"items": [_dashboard_condition_entry(c) for c in active]}
+
+
+@app.get("/api/dashboard/patient/{pid}/medications")
+async def dashboard_medications(
+    pid: str, request: Request, username: str = Depends(current_user),
+) -> dict:
+    await _dashboard_assert_patient_in_panel(request, username, pid)
+    rows = await request.app.state.fhir.search("MedicationRequest", {"patient": pid, "_count": 200})
+    # Medications view: active list — what the patient is currently
+    # taking. Filters out cancelled / stopped / draft entries that
+    # belong on a "history" tab, not the live clinical summary.
+    active = [
+        m for m in rows
+        if m.get("status") in {"active", "completed", "intended", None}
+    ]
+    return {"items": [_dashboard_med_entry(m) for m in active]}
+
+
+@app.get("/api/dashboard/patient/{pid}/prescriptions")
+async def dashboard_prescriptions(
+    pid: str, request: Request, username: str = Depends(current_user),
+) -> dict:
+    """Prescription-order view of MedicationRequest.
+
+    The rubric calls for Medications AND Prescriptions as distinct
+    cards. They surface the same FHIR resource with different lenses:
+    the medications card focuses on the drug + dose (clinical), this
+    card focuses on the order itself (prescriber, date written,
+    refills, dispense quantity). Sorted by authoredOn descending so
+    the most-recently-written prescription is at the top.
+    """
+    await _dashboard_assert_patient_in_panel(request, username, pid)
+    rows = await request.app.state.fhir.search("MedicationRequest", {"patient": pid, "_count": 200})
+    rows.sort(key=lambda r: r.get("authoredOn") or "", reverse=True)
+    return {"items": [_dashboard_prescription_entry(m) for m in rows]}
+
+
+@app.get("/api/dashboard/patient/{pid}/care-team")
+async def dashboard_care_team(
+    pid: str, request: Request, username: str = Depends(current_user),
+) -> dict:
+    await _dashboard_assert_patient_in_panel(request, username, pid)
+    teams = await request.app.state.fhir.search("CareTeam", {"patient": pid, "_count": 50})
+    items: list[dict] = []
+    for ct in teams:
+        items.extend(_dashboard_careteam_entry(ct))
+    return {"items": items}
+
+
+@app.get("/api/dashboard/patient/{pid}/vitals")
+async def dashboard_vitals(
+    pid: str, request: Request, username: str = Depends(current_user),
+) -> dict:
+    await _dashboard_assert_patient_in_panel(request, username, pid)
+    rows = await request.app.state.fhir.search(
+        "Observation", {"patient": pid, "category": "vital-signs", "_count": 200},
+    )
+    return {"series": _dashboard_vitals_series(rows)}
+
+
+@app.get("/api/dashboard/patient/{pid}/lab-results")
+async def dashboard_lab_results(
+    pid: str, request: Request, username: str = Depends(current_user),
+) -> dict:
+    """Lab results — `Observation?category=laboratory`.
+
+    Returns one entry per Observation, ordered most-recent first.
+    The dashboard's Lab Results tab and the Co-Pilot patient card's
+    Lab Results section both consume this shape.
+
+    Today most uploaded lab PDFs persist as a SOAP-note `objective`
+    text line (see writer.write_lab_encounter_with_results) — they
+    do NOT yet write FHIR Observation rows, so this endpoint will
+    return empty even after a successful lab upload. Wiring up the
+    Observation-write path is on the TODO list.
+    """
+    from app.fhir.adapter import _coded_display, _narrative_text  # noqa: PLC0415
+    await _dashboard_assert_patient_in_panel(request, username, pid)
+    rows = await request.app.state.fhir.search(
+        "Observation", {"patient": pid, "category": "laboratory", "_count": 200},
+    )
+    items: list[dict] = []
+    for o in rows:
+        codings = ((o.get("code") or {}).get("coding") or [])
+        primary = next(
+            (c for c in codings if (c or {}).get("system") == "http://loinc.org"),
+            codings[0] if codings else {},
+        )
+        vq = o.get("valueQuantity") or {}
+        items.append({
+            "id": o.get("id") or "",
+            "loinc": primary.get("code"),
+            "test_name": primary.get("display") or _coded_display(o.get("code") or {}) or _narrative_text(o) or "(unspecified)",
+            "value": vq.get("value"),
+            "value_string": o.get("valueString"),
+            "unit": vq.get("unit"),
+            "reference_range_text": ((o.get("referenceRange") or [{}])[0].get("text")),
+            "abnormal_flag": _abnormal_flag_from_observation(o),
+            "effective": o.get("effectiveDateTime") or o.get("issued"),
+            "status": o.get("status"),
+        })
+    items.sort(key=lambda r: r.get("effective") or "", reverse=True)
+    return {"items": items}
+
+
+def _abnormal_flag_from_observation(o: dict) -> str | None:
+    """Pull the V2-style abnormal flag (`H`, `L`, `N`, `C`, `HH`, `LL`)
+    out of a FHIR Observation's `interpretation`, or return None when
+    no interpretation is recorded."""
+    for interp in o.get("interpretation") or []:
+        for c in interp.get("coding") or []:
+            code = c.get("code")
+            if isinstance(code, str) and code in ("H", "L", "N", "C", "HH", "LL", "A"):
+                return code
+    return None
+
+
+@app.get("/api/dashboard/patient/{pid}/orders")
+async def dashboard_orders(
+    pid: str, request: Request, username: str = Depends(current_user),
+) -> dict:
+    """Orders placed for the patient — `ServiceRequest`.
+
+    Used for lab orders, imaging orders, referrals, procedure orders.
+    Empty state is the default until OpenEMR begins surfacing these
+    via FHIR (and/or until Co-Pilot's clinical-note flow learns to
+    write ServiceRequests for orders the previous shift placed).
+    """
+    from app.fhir.adapter import _coded_display, _narrative_text  # noqa: PLC0415
+    await _dashboard_assert_patient_in_panel(request, username, pid)
+    try:
+        rows = await request.app.state.fhir.search(
+            "ServiceRequest", {"patient": pid, "_count": 100},
+        )
+    except Exception as e:  # noqa: BLE001
+        # OpenEMR may not surface ServiceRequest depending on version;
+        # fail soft so the empty state renders rather than the card
+        # error-banner.
+        log.warning("dashboard orders: ServiceRequest search failed: %s", e)
+        rows = []
+    items: list[dict] = []
+    for r in rows:
+        items.append({
+            "id": r.get("id") or "",
+            "display": _coded_display(r.get("code") or {}) or _narrative_text(r) or "(unspecified)",
+            "category": _coded_display((r.get("category") or [{}])[0]) if r.get("category") else None,
+            "status": r.get("status"),
+            "intent": r.get("intent"),
+            "priority": r.get("priority"),
+            "authored": r.get("authoredOn"),
+            "requester": (r.get("requester") or {}).get("display"),
+        })
+    items.sort(key=lambda r: r.get("authored") or "", reverse=True)
+    return {"items": items}
 
 
 # ─── chat ────────────────────────────────────────────────────────────────
@@ -805,8 +1404,17 @@ def _decorate_card_vitals(card_data: dict, notes: list, trends: dict) -> dict:
     # clinical-local TZ so this fallback path doesn't disagree with the
     # primary `_format_vital` rows (which are already clinical-local) on
     # the minute-key the frontend uses to group readings.
+    #
+    # Skip the backfill entirely when the snapshot already has a
+    # combined "Blood Pressure" row (the path through
+    # `_latest_vitals_snapshot`'s BP-merge pass) — adding the legacy
+    # systolic+diastolic split rows on top would re-introduce the
+    # double-row bug clinicians were complaining about.
     existing_names = {(r.get("name") or "").lower() for r in fhir_rows}
-    bp_already_listed = any("systolic" in n or "diastolic" in n for n in existing_names)
+    bp_already_listed = (
+        "blood pressure" in existing_names
+        or any("systolic" in n or "diastolic" in n for n in existing_names)
+    )
     if not bp_already_listed:
         for canonical in ("bp_systolic", "bp_diastolic"):
             for pt in (trends.get(canonical) or []):
@@ -883,7 +1491,14 @@ def _decorate_card_vitals(card_data: dict, notes: list, trends: dict) -> dict:
     # the FHIR adapter's flat formatter emits it with `value=None`, so the
     # client filters it out. The note's vitals dict is the doctor's source of
     # truth either way — surface it regardless of FHIR roundtrip status.
+    #
+    # Dedupe by `(canonical, time-bucket)` so two clinical notes that
+    # happen to record the same vitals at the same minute (e.g. two
+    # shift handovers a minute apart with the same observed BP) only
+    # contribute ONE row per vital, not two. Without this dedup the
+    # patient card shows duplicate "Blood Pressure 141/87" lines etc.
     note_only_vitals: list[dict] = []
+    seen_note_keys: set[tuple[str, str]] = set()
     for n in [*unsynced_finals, *synced_notes]:
         # Use clinical-local TZ to match `fhir_rows[].time` so the frontend's
         # minute-precision group key lines up across both sources. Without
@@ -891,11 +1506,16 @@ def _decorate_card_vitals(card_data: dict, notes: list, trends: dict) -> dict:
         # would surface here in UTC and split into a separate group on the
         # card — and the slice-to-1 view would render only one of them.
         when = _clinical_iso(n.finalized_at or n.updated_at)
+        when_bucket = (when or "")[:16]  # YYYY-MM-DDTHH:MM
         for canonical, value in (n.vitals or {}).items():
             if value in (None, ""):
                 continue
             if _already_in_fhir(canonical, when):
                 continue
+            dedup_key = (canonical, when_bucket)
+            if dedup_key in seen_note_keys:
+                continue
+            seen_note_keys.add(dedup_key)
             note_only_vitals.append({
                 "kind": "note-vital",
                 "key": canonical,
@@ -1067,7 +1687,102 @@ async def patient_documents(
                     continue
             out.append(it)
         items = out
+
+    # Background prefetch: kick off PNG renders + bbox manifests for the
+    # most recent DocumentReference items in this list so a follow-up
+    # citation click or "open document" lands on a warm cache and
+    # returns instantly. Capped per patient and globally bounded by a
+    # semaphore so a chart with many large PDFs can't pin every worker.
+    # Fire-and-forget — failures are logged but never propagate.
+    asyncio.create_task(
+        _prefetch_doc_pages_for_patient(items, panel=None),
+    )
+
     return {"items": items}
+
+
+async def _prefetch_doc_pages_for_patient(
+    items: list[dict], *, panel: frozenset[str] | None,
+) -> None:
+    """Pre-render and pre-summarize the top N DocumentReference items in a
+    docs-list response so the next click on the citation deep-link path
+    is instant.
+
+    Skips items already in `pages_cache` (per-key locking inside
+    `get_or_compute` would coalesce duplicate work anyway, but skipping
+    early avoids a no-op task spawn). Hidden docs are excluded by the
+    caller before we get here.
+    """
+    cache: TTLCache = app.state.pages_cache
+    targets: list[str] = []
+    for it in items:
+        ref = it.get("ref") or ""
+        if not ref.startswith("DocumentReference/"):
+            continue
+        if it.get("hidden"):
+            continue
+        doc_id = ref.removeprefix("DocumentReference/")
+        if cache.get(f"pages:{doc_id}") is not None:
+            continue
+        targets.append(doc_id)
+        if len(targets) >= _PAGES_PREFETCH_PER_PATIENT_CAP:
+            break
+    if not targets:
+        return
+
+    async def _one(doc_id: str) -> None:
+        async with _PAGES_PREFETCH_SEMAPHORE:
+            # Warm the docpid cache FIRST. The pages and manifest
+            # endpoints both gate on `_get_doc_patient_id`, which on a
+            # cold cache fetches the DocumentReference metadata (~1s
+            # against the local docker FHIR, several against Hetzner).
+            # If the user clicks during that window we'd pay the
+            # latency on the user-triggered request even though the
+            # PNG render is already cached. Warming docpid first
+            # collapses that window to a hash lookup.
+            try:
+                await _get_doc_patient_id(app.state.fhir, cache, doc_id)
+            except Exception as e:  # noqa: BLE001
+                log.debug("docpid prefetch skipped for %s: %s", doc_id, e)
+            try:
+                await cache.get_or_compute(
+                    f"pages:{doc_id}",
+                    lambda: _prefetch_pages_compute(doc_id, panel),
+                )
+            except Exception as e:  # noqa: BLE001 — best-effort
+                log.debug("pages prefetch skipped for %s: %s", doc_id, e)
+            try:
+                await cache.get_or_compute(
+                    f"bbox:{doc_id}",
+                    lambda: _prefetch_bbox_compute(doc_id, panel),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.debug("bbox prefetch skipped for %s: %s", doc_id, e)
+
+    await asyncio.gather(*[_one(d) for d in targets], return_exceptions=True)
+
+
+async def _prefetch_pages_compute(
+    document_id: str, panel: frozenset[str] | None,
+) -> dict:
+    result = await adapter.get_document_pages(
+        app.state.fhir, document_id=document_id, panel=panel,
+    )
+    return result["data"]
+
+
+async def _prefetch_bbox_compute(
+    document_id: str, panel: frozenset[str] | None,
+) -> dict:
+    # Pass the sidecar store so the prefetched manifest already
+    # includes any allergies / backfilled rows. Without this, the
+    # cached bbox-manifest would be missing those entries and only
+    # the user-triggered fetch would see them.
+    result = await adapter.get_document_bbox_manifest(
+        app.state.fhir, document_id=document_id, panel=panel,
+        store=app.state.extracted_sources,
+    )
+    return result["data"]
 
 
 # ─── document upload (Phase 2.4 — minimum viable user-facing surface) ──
@@ -1951,6 +2666,11 @@ async def api_upload(
     app.state.cache.invalidate(f"card:{patient_uuid}")
     app.state.cache.invalidate(f"trends:{patient_uuid}")
     app.state.cache.invalidate_prefix("calendar:today:")
+    # The bbox manifest for the new doc summarizes derived
+    # allergies/meds/conditions just persisted by the writer; drop the
+    # entry so the next viewer click reads the freshly-written tags.
+    new_doc_id = result.reference_id.split("/", 1)[-1]
+    app.state.pages_cache.invalidate(f"bbox:{new_doc_id}")
     sessions_notified = _mark_user_sessions_stale_after_upload(
         username=username,
         patient_uuid=patient_uuid,
@@ -1975,6 +2695,36 @@ async def api_upload(
     }
 
 
+async def _get_doc_patient_id(
+    fhir: FhirClient, pages_cache: TTLCache, document_id: str,
+) -> str | None:
+    """Lookup the Patient subject of a DocumentReference, cached.
+
+    ACL gate for the document endpoints. We can't rely on the cache-hit
+    path of `get_or_compute(pages:...)` to gate access — when two
+    requests race a cache-miss window with different panels, the second
+    waiter inherits the first's ACL pass via the per-key lock. Gating
+    on this small lookup before touching the page cache keeps each
+    request honest while still being microseconds-fast on the second
+    hit (a doc's subject never changes for the lifetime of the doc).
+    """
+    cached = pages_cache.get(f"docpid:{document_id}")
+    if cached is not None:
+        return cached.get("patient_id")
+
+    async def _compute() -> dict:
+        doc = await fhir.get(f"DocumentReference/{document_id}")
+        subject_ref = (doc.get("subject") or {}).get("reference") or ""
+        pid = (
+            subject_ref.removeprefix("Patient/")
+            if subject_ref.startswith("Patient/") else None
+        )
+        return {"patient_id": pid}
+
+    data = await pages_cache.get_or_compute(f"docpid:{document_id}", _compute)
+    return data.get("patient_id")
+
+
 @app.get("/api/document/{document_id}/pages")
 async def api_document_pages(
     document_id: str,
@@ -1985,35 +2735,48 @@ async def api_document_pages(
     Supporting-Documents inline viewer (PRD W2 §5 — visual PDF
     bounding-box overlay).
 
-    The adapter performs the panel ACL check using the document's
-    `subject.reference`; we still resolve the panel here because the
-    adapter takes a `panel` arg (same shape it already uses for the
-    agent's `get_document_content` tool path). 404 on access denial,
-    matching the patient-id-keyed endpoints — no panel-leakage via
-    response codes.
+    ACL is gated up-front via the cached `docpid:` lookup so every
+    request — cache hit or cache miss — re-validates the panel
+    membership. The render itself is panel-agnostic (the rendered PNG
+    is the same bytes regardless of who fetches it) and lives in
+    `pages_cache` keyed by document_id, with a long TTL since
+    DocumentReference attachments are immutable.
     """
     panel = await access_control.get_panel_for_user(
         request.app.state.fhir, username, request.app.state.assignments,
     )
+    pages_cache: TTLCache = request.app.state.pages_cache
+
     try:
-        result = await adapter.get_document_pages(
-            request.app.state.fhir,
-            document_id=document_id,
-            panel=panel,
+        patient_id = await _get_doc_patient_id(
+            request.app.state.fhir, pages_cache, document_id,
         )
-    except access_control.PatientAccessDenied as e:
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail="Document not found") from e
+    if panel is not None and (patient_id is None or patient_id not in panel):
         request.app.state.auth_store.log_event(
             event_type="patient_access_denied",
             username=username,
             sid=request.session.get("sid"),
             user_agent=request.headers.get("user-agent"),
             ip=request.client.host if request.client else None,
-            detail=f"document={document_id} patient={e.patient_id}",
+            detail=f"document={document_id} patient={patient_id}",
         )
-        raise HTTPException(status_code=404, detail="Document not found") from e
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    async def _compute() -> dict:
+        # ACL already gated above; pass panel=None so the adapter's own
+        # check is a no-op and prefetch (also panel=None) shares the
+        # same cached value.
+        result = await adapter.get_document_pages(
+            request.app.state.fhir, document_id=document_id, panel=None,
+        )
+        return result["data"]
+
+    try:
+        return await pages_cache.get_or_compute(f"pages:{document_id}", _compute)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
-    return result["data"]
 
 
 @app.get("/api/document-source/{resource_type}/{resource_id}")
@@ -2042,6 +2805,7 @@ async def api_document_source(
             resource_type=resource_type,
             resource_id=resource_id,
             panel=panel,
+            store=request.app.state.extracted_sources,
         )
     except access_control.PatientAccessDenied as e:
         request.app.state.auth_store.log_event(
@@ -2077,25 +2841,38 @@ async def api_document_bbox_manifest(
     panel = await access_control.get_panel_for_user(
         request.app.state.fhir, username, request.app.state.assignments,
     )
+    pages_cache: TTLCache = request.app.state.pages_cache
+
     try:
-        result = await adapter.get_document_bbox_manifest(
-            request.app.state.fhir,
-            document_id=document_id,
-            panel=panel,
+        patient_id = await _get_doc_patient_id(
+            request.app.state.fhir, pages_cache, document_id,
         )
-    except access_control.PatientAccessDenied as e:
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail="Document not found") from e
+    if panel is not None and (patient_id is None or patient_id not in panel):
         request.app.state.auth_store.log_event(
             event_type="patient_access_denied",
             username=username,
             sid=request.session.get("sid"),
             user_agent=request.headers.get("user-agent"),
             ip=request.client.host if request.client else None,
-            detail=f"document={document_id} patient={e.patient_id}",
+            detail=f"document={document_id} patient={patient_id}",
         )
-        raise HTTPException(status_code=404, detail="Document not found") from e
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    sidecar_store = request.app.state.extracted_sources
+
+    async def _compute() -> dict:
+        result = await adapter.get_document_bbox_manifest(
+            request.app.state.fhir, document_id=document_id, panel=None,
+            store=sidecar_store,
+        )
+        return result["data"]
+
+    try:
+        return await pages_cache.get_or_compute(f"bbox:{document_id}", _compute)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
-    return result["data"]
 
 
 @app.post("/api/document/{document_id}/hide")
@@ -2341,6 +3118,9 @@ async def api_document_resolve_content_match(
     app.state.cache.invalidate(f"card:{patient_id}")
     app.state.cache.invalidate(f"trends:{patient_id}")
     app.state.cache.invalidate_prefix("calendar:today:")
+    # The new doc's bbox manifest just changed — drop the entry so the
+    # viewer's next fetch sees the freshly-written derived facts.
+    app.state.pages_cache.invalidate(f"bbox:{new_doc_id}")
     log.info(
         "content-match resolve %s: user=%s patient=%s new=%s prior=%s "
         "facts_written=%d/%d",

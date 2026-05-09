@@ -35,10 +35,17 @@ class Settings(BaseSettings):
     # OpenEMR FHIR
     openemr_fhir_base_url: str = "https://localhost:9300/apis/default/fhir"
     openemr_oauth_token_url: str = "https://localhost:9300/oauth2/default/token"
+    openemr_oauth_authorize_url: str = "https://localhost:9300/oauth2/default/authorize"
+    openemr_oauth_userinfo_url: str = "https://localhost:9300/oauth2/default/userinfo"
     openemr_client_id: str | None = None
     openemr_client_secret: str | None = None
     openemr_private_key_path: str = "secrets/agent_key.pem"
     openemr_kid: str = "agent_forge_key_1"
+
+    # Copilot's own externally-reachable base URL — used to build the OAuth2
+    # callback redirect_uri (`{copilot_base_url}/oauth/callback`). Local dev
+    # default; production overrides via env (Hetzner cloudflared tunnel URL).
+    copilot_base_url: str = "http://localhost:8000"
 
     # OpenEMR seed client — also used for password-grant credential validation
     # (proves a username/password pair is valid against OpenEMR without us

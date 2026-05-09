@@ -46,6 +46,40 @@ from PIL import Image
 # change if Whitaker stress-test extraction is poor on small text.
 _PDF_RENDER_SCALE = 150 / 72
 
+# Anthropic's vision API resizes any image whose longest edge exceeds
+# ~1568 px down to fit within that bound (preserving aspect ratio).
+# Bbox coordinates Claude returns are in *resized* pixel space, but the
+# frontend renders the *original* page PNG and scales overlays from
+# the original dimensions — so without normalization the overlay can
+# end up half a page off (medication bbox lands on the patient
+# demographics block at the top of the page).
+#
+# We pre-resize every rendered page to fit within `_VISION_MAX_EDGE`
+# before storing/sending. That way Claude's bbox space and the
+# frontend's rendering space are identical, regardless of what DPI the
+# upstream rendering produced (200 DPI fax TIFFs, 150 DPI PDF renders,
+# arbitrary mobile-phone snapshots).
+_VISION_MAX_EDGE = 1500
+
+
+def _resize_for_vision_consistency(pil_image: Image.Image) -> Image.Image:
+    """Downscale `pil_image` so its longest edge is ≤ `_VISION_MAX_EDGE`.
+
+    No-op when the image already fits. Aspect ratio is preserved.
+    Pillow's LANCZOS resampling is the right tradeoff between text
+    sharpness (still readable to Claude) and edge smoothness for a
+    one-shot render that the user will view directly.
+    """
+    w, h = pil_image.size
+    longest = max(w, h)
+    if longest <= _VISION_MAX_EDGE:
+        return pil_image
+    scale = _VISION_MAX_EDGE / longest
+    return pil_image.resize(
+        (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+        Image.Resampling.LANCZOS,
+    )
+
 
 def pdf_to_png_pages(pdf_bytes: bytes) -> list[bytes]:
     """Render every page of a PDF to a PNG bytestring.
@@ -66,6 +100,7 @@ def pdf_to_png_pages(pdf_bytes: bytes) -> list[bytes]:
             try:
                 bitmap = page.render(scale=_PDF_RENDER_SCALE)
                 pil_image = bitmap.to_pil()
+                pil_image = _resize_for_vision_consistency(pil_image)
                 buf = io.BytesIO()
                 pil_image.save(buf, format="PNG", optimize=True)
                 out.append(buf.getvalue())
@@ -93,6 +128,7 @@ def image_to_png_pages(image_bytes: bytes) -> list[bytes]:
         # Convert anything exotic (CMYK, P, L, etc.) to RGB so PNG encode
         # produces something Anthropic's vision API will accept.
         pil_image = pil_image.convert("RGB")
+    pil_image = _resize_for_vision_consistency(pil_image)
     buf = io.BytesIO()
     pil_image.save(buf, format="PNG", optimize=True)
     return [buf.getvalue()]
@@ -130,6 +166,7 @@ def tiff_to_png_pages(tiff_bytes: bytes) -> list[bytes]:
         # own optimizer handles the bitmap nature of fax content
         # gracefully (large flat backgrounds compress well).
         frame_rgb = pil_image.convert("RGB")
+        frame_rgb = _resize_for_vision_consistency(frame_rgb)
         buf = io.BytesIO()
         frame_rgb.save(buf, format="PNG", optimize=True)
         out.append(buf.getvalue())

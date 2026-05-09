@@ -36,6 +36,7 @@ SCOPES = " ".join(
         "system/Binary.read",
         "system/Appointment.read",
         "system/Practitioner.read",
+        "system/CareTeam.read",
     ]
 )
 

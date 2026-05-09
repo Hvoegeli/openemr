@@ -64,18 +64,28 @@ one row here so the UI dropdown picks it up automatically."""
 class BoundingBox(BaseModel):
     """Where on the source page a cited value lives.
 
-    Coordinates are in the source document's native unit space (PDF points
-    for PDFs). The frontend's PDF.js overlay layer transforms these into
-    screen pixels at render time.
+    Coordinates are in PIXELS of the rendered page image (the same PNG
+    the VLM is shown), with origin (0,0) at the TOP-LEFT. `x,y` is the
+    upper-left of the box; `width,height` are positive pixel dimensions.
+    `page` is 1-indexed within the document.
+
+    The frontend overlay (`app/web/index.html::loadDocumentSourcePages`)
+    divides by the page's returned `width_px` / `height_px` to convert
+    these into a percentage-based CSS overlay.
+
+    NOT PDF points and NOT normalized 0-1. The VLM only ever sees the
+    rendered PNG (we don't send the source PDF directly), so PDF-point
+    coords would be uninterpretable to the model. The coord-space rule
+    is enforced by the system prompt in `app/extraction/vision.py`.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     page: int = Field(ge=1, description="1-indexed page number within the source document")
-    x: float = Field(ge=0)
-    y: float = Field(ge=0)
-    width: float = Field(gt=0)
-    height: float = Field(gt=0)
+    x: float = Field(ge=0, description="Upper-left X in pixels of the rendered page image (origin top-left)")
+    y: float = Field(ge=0, description="Upper-left Y in pixels of the rendered page image (origin top-left)")
+    width: float = Field(gt=0, description="Box width in pixels")
+    height: float = Field(gt=0, description="Box height in pixels")
 
 
 class Citation(BaseModel):

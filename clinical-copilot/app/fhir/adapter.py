@@ -219,10 +219,107 @@ def format_patient_card_data(
             "allergies": [_format_allergy(a) for a in allergies],
             "active_problems": [_format_condition(c) for c in problems],
             "active_medications": [_format_med(m) for m in meds],
-            "recent_vitals": [r for v in vitals for r in _format_vital(v)],
+            "recent_vitals": _latest_vitals_snapshot(vitals),
         },
         "sources": sources,
     }
+
+
+def _latest_vitals_snapshot(vitals: list[dict]) -> list[dict]:
+    """Return only the *most recent* vitals snapshot — one row per
+    distinct vital, with BP combined.
+
+    Definition of "snapshot": all vital-sign Observations sharing the
+    same `effectiveDateTime` (rounded to the minute, since OpenEMR
+    sometimes records the same panel with sub-second drift across
+    rows). We pick the latest such timepoint, drop value-less and
+    panel-only rows, dedupe by vital name (keeping the row that has
+    a real value), and merge systolic+diastolic BP into a single
+    "Blood Pressure: 120/80" row.
+
+    The dedupe is the key step: OpenEMR's FHIR layer often returns
+    the same LOINC code twice — once as a panel parent with no
+    `valueQuantity`, once as the actual reading — and a third time
+    inside a composite BP Observation's `component` array. Without
+    dedup the patient card shows "Heart Rate: 78" right next to
+    "Heart Rate: —". This view is for clinicians scanning at a
+    glance; trend views still pull the full time series.
+
+    Skipped row types:
+      - `value is None` rows (parent panels that carry their data
+        inside `component` instead of a top-level value)
+      - Rows whose name is itself a panel label
+        (e.g. "Vital signs … panel", "Blood pressure panel")
+    """
+    if not vitals:
+        return []
+    rows: list[dict] = []
+    for v in vitals:
+        rows.extend(_format_vital(v))
+
+    # Bucket rows by clinical-iso timestamp truncated to the minute
+    # (sub-second drift across BP components is normal).
+    def _bucket_key(t: str | None) -> str:
+        if not t:
+            return ""
+        return t[:16]  # YYYY-MM-DDTHH:MM
+    by_time: dict[str, list[dict]] = {}
+    for r in rows:
+        by_time.setdefault(_bucket_key(r.get("time")), []).append(r)
+    # Drop the no-time bucket from the snapshot pick (we still emit
+    # those rows below if the latest bucket is empty); pick the
+    # max-keyed bucket.
+    timed_keys = [k for k in by_time if k]
+    if not timed_keys:
+        latest = list(rows)
+    else:
+        latest_key = max(timed_keys)
+        latest = list(by_time[latest_key])
+
+    # Drop value-less rows (parent panels) and panel-label rows that
+    # don't represent a single reading. The presence of "panel" in the
+    # name is OpenEMR's tell — LOINC display strings for vital
+    # observations don't contain that word for atomic readings.
+    def _is_renderable(r: dict) -> bool:
+        if r.get("value") is None:
+            return False
+        name = (r.get("name") or "").lower()
+        if "panel" in name:
+            return False
+        return True
+    latest = [r for r in latest if _is_renderable(r)]
+
+    # Dedupe by vital name — if two rows have the same name, keep the
+    # one whose value is closer to a real reading (we already filtered
+    # value-None rows above, so any remaining duplicates are
+    # genuine duplicate measurements; we keep the first).
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for r in latest:
+        name = r.get("name") or ""
+        if name in seen:
+            continue
+        seen.add(name)
+        deduped.append(r)
+    latest = deduped
+
+    # BP combine pass — replace (Systolic BP, Diastolic BP) with a
+    # single "Blood Pressure: 120/80 mmHg" row.
+    sys_row = next((r for r in latest if r.get("name") == "Systolic BP"), None)
+    dia_row = next((r for r in latest if r.get("name") == "Diastolic BP"), None)
+    if sys_row and dia_row:
+        merged = {
+            "id": sys_row.get("id"),
+            "name": "Blood Pressure",
+            "value": f"{sys_row.get('value')}/{dia_row.get('value')}",
+            "unit": sys_row.get("unit") or dia_row.get("unit") or "mmHg",
+            "time": sys_row.get("time") or dia_row.get("time"),
+        }
+        latest = [merged] + [
+            r for r in latest
+            if r.get("name") not in ("Systolic BP", "Diastolic BP")
+        ]
+    return latest
 
 
 # ─── formatters ──────────────────────────────────────────────────────────
@@ -702,14 +799,21 @@ async def get_resource_source_document(
     resource_type: str,
     resource_id: str,
     panel: frozenset[str] | None = None,
+    store: "ExtractedSourcesStore | None" = None,  # noqa: F821
 ) -> SourcedResult:
     """Look up the DocumentReference + bbox a chart resource was extracted
     from, by parsing the `[copilot-source: ...]` tag off its note field.
 
+    `store`, when provided, is consulted as a fallback (for resources
+    whose FHIR `note` is empty — primarily AllergyIntolerance, since
+    OpenEMR's FHIR allergy serializer drops the `comments` column). The
+    SQLite store is also the only source of truth for backfilled
+    historical resources whose tags were lost in transit.
+
     Returns `data.document_ref = None` when the resource exists but has no
-    source tag (e.g. it was hand-entered, not extracted). The frontend
-    treats that as "no source view available" and falls back to the
-    chart-card scroll behavior.
+    source tag in either FHIR or the sidecar store. The frontend treats
+    that as "no source view available" and falls back to the chart-card
+    scroll behavior.
 
     ACL gates on the resource's patient subject — same fail-closed shape
     as `get_document_bbox_manifest`.
@@ -743,6 +847,19 @@ async def get_resource_source_document(
         raise PatientAccessDenied(patient_id or "")
 
     tag = _find_any_source_tag(_collect_note_text(resource))
+    if tag is None and store is not None:
+        # Sidecar fallback: OpenEMR's FHIR layer drops the comments
+        # field for AllergyIntolerance, so the tag never round-trips
+        # through `note`. Reading it from the SQLite store recovers
+        # the deep-link for allergies and any backfilled rows.
+        recorded = store.get(
+            resource_type=resource_type, resource_id=resource_id,
+        )
+        if recorded is not None:
+            tag = {
+                "ref": f"DocumentReference/{recorded.source_doc_id}",
+                "bbox": recorded.bbox,
+            }
     if tag is None:
         return {
             "data": {
@@ -784,19 +901,28 @@ async def get_document_bbox_manifest(
     *,
     document_id: str,
     panel: frozenset[str] | None = None,
+    store: "ExtractedSourcesStore | None" = None,  # noqa: F821
 ) -> SourcedResult:
     """Walk every resource derived from `DocumentReference/<document_id>`
     (allergies, medications, problems, lab observations) and pull the
-    bbox metadata each one carries via the writer's `[copilot-source:
-    ...; bbox=...]` comment tag.
+    bbox metadata each one carries.
+
+    Two sources are merged:
+      1. FHIR `note` field on each resource — the writer puts a
+         `[copilot-source: ...; bbox=...]` tag here. Works for
+         medications and conditions (OpenEMR round-trips the
+         `comments` column as note for those). Allergies are dropped
+         by OpenEMR's FHIR serializer, so this source misses them.
+      2. The SQLite sidecar store, when provided. This is the only
+         source for allergies and the only source for any backfilled
+         historical resources whose tag was lost in transit. The
+         (resource_type, resource_id) primary key dedupes against
+         source #1 — FHIR-note-derived facts win on conflict because
+         they reflect the live row's current state.
 
     Used by the Supporting-Documents PDF-overlay UI (PRD W2 §5 — visual
-    PDF bounding-box overlay). The agent itself does not call this; the
-    return shape is keyed for the frontend, not for inline LLM ingestion.
-
-    ACL gates on the DocumentReference's `subject.reference` Patient: a
-    user whose panel doesn't include that patient gets `PatientAccessDenied`
-    even if they somehow guessed a real document id.
+    PDF bounding-box overlay). ACL gates on the DocumentReference's
+    `subject.reference` Patient.
     """
     from app.access_control import PatientAccessDenied  # noqa: PLC0415
 
@@ -811,6 +937,7 @@ async def get_document_bbox_manifest(
 
     facts: list[dict] = []
     sources: list[str] = [_ref(doc)]
+    seen_refs: set[str] = set()
 
     if patient_id is None:
         # Document with no Patient subject — no derived facts to walk.
@@ -857,6 +984,30 @@ async def get_document_bbox_manifest(
             })
             if ref:
                 sources.append(ref)
+                seen_refs.add(ref)
+            else:
+                seen_refs.add(f"{resource_type}/{row_id}")
+
+    # Merge SQLite sidecar entries for resources whose tag was lost in
+    # transit (primarily AllergyIntolerance — OpenEMR's FHIR layer
+    # drops `comments` for allergies — and any backfilled historical
+    # rows). Skip entries already present from the FHIR walk so we
+    # don't double-list a med with both a real bbox (from FHIR note)
+    # and a backfilled sidecar entry.
+    if store is not None:
+        for entry in store.list_for_doc(document_id):
+            ref = f"{entry.resource_type}/{entry.resource_id}"
+            if ref in seen_refs:
+                continue
+            facts.append({
+                "resource_type": entry.resource_type,
+                "resource_id": entry.resource_id,
+                "resource_ref": ref,
+                "label": (entry.label or entry.resource_type),
+                "bbox": entry.bbox,
+            })
+            sources.append(ref)
+            seen_refs.add(ref)
 
     return {
         "data": {

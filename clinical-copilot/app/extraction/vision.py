@@ -133,6 +133,19 @@ referral-only faxes.
 'results_table.hba1c' or 'medications.0' that uniquely identifies the \
 field within the document. `quote_or_value` is the literal text or \
 value as printed (the value, not your interpretation).
+- Citation `bbox` (visual overlay coordinates): for every clinical fact \
+extracted from a visual document (lab PDFs, intake forms, referral \
+letters, fax packets), populate `bbox` with the rectangle that surrounds \
+the cited value on the rendered page. Coordinates are in PIXELS of the \
+page image you are looking at, with the origin (0,0) at the TOP-LEFT \
+corner of that page. `x`,`y` is the upper-left corner of the box; \
+`width`,`height` are positive pixel dimensions. `page` is the 1-indexed \
+page number within the document. Do NOT use PDF points, do NOT \
+normalize to 0-1, do NOT use a 1000x1000 grid — use the literal pixel \
+coordinates of the rendered page image. Make the box tight around just \
+the cited value (the number itself, the printed allergy entry, etc.), \
+not the whole row or section. Omit `bbox` entirely for HL7 messages, \
+spreadsheets, or any source without visual page coordinates.
 - Sex inference from honorifics: when the document does NOT print an \
 explicit Sex/Gender field but DOES carry a courtesy title next to the \
 patient's name, infer `sex` from the honorific: Mr.→male, \
@@ -213,9 +226,26 @@ def _user_content_blocks(
     doc_type: DocumentType,
     source_document_id: str,
 ) -> list[dict[str, Any]]:
-    """Build the `messages[0].content` array: page images, then instruction."""
+    """Build the `messages[0].content` array: page images, then instruction.
+
+    For each page we measure the actual PNG dimensions and tell the
+    model exactly how big the image it's looking at is. Claude has been
+    observed to fall back to ~612x792 PDF-point coordinates for bbox
+    values when not given explicit dimensions; calling out the literal
+    pixel size per page anchors the coordinate space to the rendered
+    image and keeps overlays from landing 50% of a page off.
+    """
+    from PIL import Image  # noqa: PLC0415
+    import io as _io  # noqa: PLC0415
+
     blocks: list[dict[str, Any]] = []
+    page_dims: list[tuple[int, int]] = []
     for png in page_pngs:
+        try:
+            with Image.open(_io.BytesIO(png)) as im:
+                page_dims.append((int(im.width), int(im.height)))
+        except Exception:  # noqa: BLE001
+            page_dims.append((0, 0))
         blocks.append({
             "type": "image",
             "source": {
@@ -224,12 +254,22 @@ def _user_content_blocks(
                 "data": base64.standard_b64encode(png).decode("ascii"),
             },
         })
+    dims_str = "; ".join(
+        f"page {i + 1}: {w} x {h} px"
+        for i, (w, h) in enumerate(page_dims)
+    )
     blocks.append({
         "type": "text",
         "text": (
             f"Extract the contents of this {doc_type} into the matching "
             f"tool call. Use source_document_id={source_document_id!r} "
-            f"verbatim in every Citation."
+            f"verbatim in every Citation.\n\n"
+            f"Page dimensions (for bbox coordinates): {dims_str}.\n"
+            f"Every Citation's bbox.x and bbox.width must be in [0, page_width_px]; "
+            f"every bbox.y and bbox.height must be in [0, page_height_px] "
+            f"of the SPECIFIC page named by bbox.page (1-indexed). "
+            f"Do NOT use PDF points (612 x 792); use the literal pixel "
+            f"coordinates of the page image you are looking at."
         ),
     })
     return blocks

@@ -7,7 +7,37 @@ applies to them in the future.
 """
 
 import asyncio
+import re
 from typing import TypedDict
+
+
+# SNOMED display strings carry a "fully specified name" suffix in
+# parentheses — `(procedure)`, `(situation)`, `(disorder)`, `(finding)`,
+# `(observation)`, etc. — to disambiguate codes that share the same
+# display in different contexts. Useful for SNOMED tooling, ugly in a
+# patient-facing UI. This regex strips the trailing tag so
+# "Encounter for check up (procedure)" renders as "Encounter for check
+# up". The list is the union of SNOMED's top-level hierarchy tags
+# we've actually observed in OpenEMR fixtures.
+_SNOMED_HIERARCHY_RE = re.compile(
+    r"\s*\((procedure|situation|disorder|finding|observation|"
+    r"qualifier value|regime/therapy|navigational concept|"
+    r"morphologic abnormality|substance|product|event|"
+    r"body structure|organism|context-dependent category)\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_snomed_hierarchy_suffix(text: str | None) -> str | None:
+    """Remove the SNOMED hierarchy tag from a coded display string.
+
+    Returns the input unchanged when there's no recognized tag, and
+    `None` when the input is already None — preserving the caller's
+    null-vs-empty semantics.
+    """
+    if not text:
+        return text
+    return _SNOMED_HIERARCHY_RE.sub("", text)
 
 from app.fhir.adapter import (
     SourcedResult,
@@ -260,16 +290,19 @@ def format_supporting_documents_data(
 
     for e in encounters:
         sources.append(_ref(e))
+        raw_title = _coded_display((e.get("type") or [{}])[0]) or "Visit"
         items.append({
             "kind": "encounter",
             "id": e["id"],
             "ref": _ref(e),
-            "title": _coded_display((e.get("type") or [{}])[0]) or "Visit",
+            "title": _strip_snomed_hierarchy_suffix(raw_title),
             "date": (e.get("period") or {}).get("start") or e.get("date"),
             "status": e.get("status"),
-            "summary": _coded_display(
-                (e.get("reasonCode") or [{}])[0]
-            ) or _narrative_text(e),
+            "summary": _strip_snomed_hierarchy_suffix(
+                _coded_display((e.get("reasonCode") or [{}])[0])
+                or _narrative_text(e)
+                or ""
+            ) or None,
         })
 
     for d in docs:
