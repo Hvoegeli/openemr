@@ -43,6 +43,15 @@ export interface PatientHeader {
   mrn: string | null;
   active: boolean;
   primary_phone: string | null;
+  /**
+   * OpenEMR's internal numeric pid for this patient. Required for the
+   * "Open in classic OpenEMR" out-link URLs because classic's
+   * `set_pid` parameter calls `intval()` on the value and rejects
+   * non-numeric input — passing the FHIR UUID would land users on
+   * patient #0. `null` when the identifier shape varies and we can't
+   * resolve it; the frontend disables the out-link in that case.
+   */
+  numeric_pid: string | null;
 }
 
 export interface AllergyEntry {
@@ -170,21 +179,48 @@ function classicBase(): string {
   return meta?.content || 'https://localhost:9300';
 }
 
+/**
+ * Build a classic-OpenEMR URL, or `null` when we can't.
+ *
+ * `numericPid` MUST be the OpenEMR-internal numeric pid (an integer
+ * string), not the FHIR Patient UUID. Classic's `set_pid` parameter
+ * calls `intval()` on the value (see `src/Common/Session/PatientSessionUtil.php`),
+ * so a UUID becomes `0` and the page lands on the wrong (or no)
+ * patient. When the resolver could not produce a numeric pid (legacy
+ * deployments where the identifier shape differs), every link below
+ * returns `null` — the cards then disable their out-link button rather
+ * than emit a URL that would silently load the wrong chart.
+ */
+type ClassicUrl = string | null;
+
+function buildClassicUrl(path: string, numericPid: string | null, extras: Record<string, string> = {}): ClassicUrl {
+  if (!numericPid) return null;
+  const params = new URLSearchParams({ site: 'default', set_pid: numericPid, ...extras });
+  return `${classicBase()}${path}?${params.toString()}`;
+}
+
 export const classicLinks = {
-  patientSummary: (pid: string) =>
-    `${classicBase()}/interface/patient_file/summary/demographics.php?site=default&set_pid=${encodeURIComponent(pid)}`,
-  allergies: (pid: string) =>
-    `${classicBase()}/interface/patient_file/summary/stats_full.php?site=default&set_pid=${encodeURIComponent(pid)}&category=allergy`,
-  problems: (pid: string) =>
-    `${classicBase()}/interface/patient_file/summary/stats_full.php?site=default&set_pid=${encodeURIComponent(pid)}&category=medical_problem`,
-  medications: (pid: string) =>
-    `${classicBase()}/interface/patient_file/summary/stats_full.php?site=default&set_pid=${encodeURIComponent(pid)}&category=medication`,
-  prescriptions: (pid: string) =>
-    `${classicBase()}/interface/patient_file/summary/stats_full.php?site=default&set_pid=${encodeURIComponent(pid)}&category=prescription`,
-  labResults: (pid: string) =>
-    `${classicBase()}/interface/orders/orders_results.php?site=default&pid=${encodeURIComponent(pid)}`,
-  orders: (pid: string) =>
-    `${classicBase()}/interface/orders/types.php?site=default&pid=${encodeURIComponent(pid)}`,
-  careTeam: (pid: string) =>
-    `${classicBase()}/interface/patient_file/summary/demographics.php?site=default&set_pid=${encodeURIComponent(pid)}`,
+  patientSummary: (numericPid: string | null): ClassicUrl =>
+    buildClassicUrl('/interface/patient_file/summary/demographics.php', numericPid),
+  allergies: (numericPid: string | null): ClassicUrl =>
+    buildClassicUrl('/interface/patient_file/summary/stats_full.php', numericPid, { category: 'allergy' }),
+  problems: (numericPid: string | null): ClassicUrl =>
+    buildClassicUrl('/interface/patient_file/summary/stats_full.php', numericPid, { category: 'medical_problem' }),
+  medications: (numericPid: string | null): ClassicUrl =>
+    buildClassicUrl('/interface/patient_file/summary/stats_full.php', numericPid, { category: 'medication' }),
+  prescriptions: (numericPid: string | null): ClassicUrl =>
+    buildClassicUrl('/interface/patient_file/summary/stats_full.php', numericPid, { category: 'prescription' }),
+  labResults: (numericPid: string | null): ClassicUrl => {
+    if (!numericPid) return null;
+    // orders_results.php uses lowercase `pid`, not `set_pid`.
+    const params = new URLSearchParams({ site: 'default', pid: numericPid });
+    return `${classicBase()}/interface/orders/orders_results.php?${params.toString()}`;
+  },
+  orders: (numericPid: string | null): ClassicUrl => {
+    if (!numericPid) return null;
+    const params = new URLSearchParams({ site: 'default', pid: numericPid });
+    return `${classicBase()}/interface/orders/types.php?${params.toString()}`;
+  },
+  careTeam: (numericPid: string | null): ClassicUrl =>
+    buildClassicUrl('/interface/patient_file/summary/demographics.php', numericPid),
 };

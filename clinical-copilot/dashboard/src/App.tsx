@@ -35,7 +35,7 @@ import { VitalsCard } from './cards/VitalsCard';
 interface TabDef {
   id: string;
   label: string;
-  Component: ComponentType<{ pid: string }>;
+  Component: ComponentType<{ pid: string; numericPid: string | null }>;
 }
 
 // Order: rubric-required cards first (Allergies, Problem List,
@@ -127,7 +127,7 @@ export function App() {
         })}
       </nav>
       <section className="tab-panel" role="tabpanel">
-        <ActiveCard pid={pid} />
+        <ActiveCard pid={pid} numericPid={headerQuery.data?.numeric_pid ?? null} />
       </section>
     </div>
   );

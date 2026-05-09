@@ -39,9 +39,11 @@ data/guidelines/corpus_embeddings.meta.json
 data/clinical_notes.json
 data/traces.db
 
-# Modern Dashboard — source committed, build output generated.
-# `npm install && npm run build` regenerates everything below.
+# Modern Dashboard — source committed AND the production bundle at
+# `app/web/dashboard-build/` is committed too, because the Hetzner
+# deploy box has no Node and the deploy workflow does not run a build
+# step. After every dashboard edit, run `cd dashboard && npm run build`
+# and commit the regenerated `app/web/dashboard-build/` directory.
 dashboard/node_modules/
 dashboard/dist/
 dashboard/tsconfig.tsbuildinfo
-app/web/dashboard-build/

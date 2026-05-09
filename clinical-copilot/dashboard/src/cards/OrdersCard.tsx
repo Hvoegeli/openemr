@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, api, classicLinks } from '../api';
 
-interface Props { pid: string; }
+interface Props { pid: string; numericPid: string | null; }
 
 /**
  * Orders — `ServiceRequest`. Lab orders, imaging orders, referrals,
@@ -10,19 +10,22 @@ interface Props { pid: string; }
  * clinical-note flow learns to write ServiceRequest entries for
  * "follow-up labs" / "imaging requested" lines from prior shifts).
  */
-export function OrdersCard({ pid }: Props) {
+export function OrdersCard({ pid, numericPid }: Props) {
   const q = useQuery({
     queryKey: ['orders', pid],
     queryFn: () => api.orders(pid),
   });
+  const classicUrl = classicLinks.orders(numericPid);
 
   return (
     <div className="card">
       <h2>
         Orders
-        <a className="out-link" href={classicLinks.orders(pid)} target="_blank" rel="noreferrer">
-          Open in classic ↗
-        </a>
+        {classicUrl && (
+          <a className="out-link" href={classicUrl} target="_blank" rel="noreferrer">
+            Open in classic ↗
+          </a>
+        )}
       </h2>
       {q.isLoading && <div className="loading">Loading…</div>}
       {q.error instanceof ApiError && <div className="error">Failed to load orders (HTTP {q.error.status}).</div>}

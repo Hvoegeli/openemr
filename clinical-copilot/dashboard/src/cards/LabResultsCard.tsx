@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, api, classicLinks } from '../api';
 
-interface Props { pid: string; }
+interface Props { pid: string; numericPid: string | null; }
 
 /**
  * Lab Results — `Observation?category=laboratory`. Mostly empty in
@@ -10,19 +10,22 @@ interface Props { pid: string; }
  * write FHIR Observation rows. The empty-state copy below explains
  * that to anyone wondering why the tab is silent after an upload.
  */
-export function LabResultsCard({ pid }: Props) {
+export function LabResultsCard({ pid, numericPid }: Props) {
   const q = useQuery({
     queryKey: ['lab-results', pid],
     queryFn: () => api.labResults(pid),
   });
+  const classicUrl = classicLinks.labResults(numericPid);
 
   return (
     <div className="card">
       <h2>
         Lab Results
-        <a className="out-link" href={classicLinks.labResults(pid)} target="_blank" rel="noreferrer">
-          Open in classic ↗
-        </a>
+        {classicUrl && (
+          <a className="out-link" href={classicUrl} target="_blank" rel="noreferrer">
+            Open in classic ↗
+          </a>
+        )}
       </h2>
       {q.isLoading && <div className="loading">Loading…</div>}
       {q.error instanceof ApiError && <div className="error">Failed to load lab results (HTTP {q.error.status}).</div>}

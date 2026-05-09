@@ -40,6 +40,11 @@ jobs:
           git log -1 --oneline
           systemctl restart copilot.service
           # Give uvicorn a moment to bind, then assert it's actually listening.
-          sleep 2
+          # Bumped 2s -> 8s on 2026-05-09: prewarm + lifespan startup
+          # consistently take 4-6s on this box, so a 2s sleep was racing
+          # the bind() and the curl health check was failing on every
+          # successful deploy. The systemd unit reports `active` as soon
+          # as `uv run` exec's, which is well before uvicorn binds.
+          sleep 8
           systemctl is-active copilot.service
           curl -sS -o /dev/null -w "health check: %{http_code}\n" http://127.0.0.1:8000/login

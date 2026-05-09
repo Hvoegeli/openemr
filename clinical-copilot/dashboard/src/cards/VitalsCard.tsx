@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, api, VitalReading, VitalSeries } from '../api';
 
-interface Props { pid: string; }
+interface Props { pid: string; numericPid: string | null; }
 
 /**
  * Lightweight inline sparkline. No charting library — for a 6-12 point
@@ -161,7 +161,7 @@ function BloodPressurePanel({
   );
 }
 
-export function VitalsCard({ pid }: Props) {
+export function VitalsCard({ pid }: Props) { // numericPid intentionally unused — Vitals has no classic-OpenEMR out-link target
   const q = useQuery({
     queryKey: ['vitals', pid],
     queryFn: () => api.vitals(pid),

@@ -638,6 +638,23 @@ def _dashboard_header_payload(patient: dict, patient_id: str) -> dict:
                 mrn = v
                 break
 
+    # OpenEMR's internal numeric pid lives in `identifier[]` under
+    # `type.coding.code == 'PT'`. The dashboard surfaces this so the
+    # "Open in classic" out-link URLs can carry `set_pid=<numeric>`
+    # — `interface/.../setpid()` calls `intval()` on the value and
+    # rejects non-numeric input, so the FHIR UUID alone would land
+    # users on patient #0 (or an error). Falls back to None when the
+    # identifier shape varies across deployments; the frontend then
+    # disables the out-link rather than emit a broken URL.
+    numeric_pid: str | None = None
+    for ident in patient.get("identifier") or []:
+        codings = ((ident.get("type") or {}).get("coding") or [])
+        if any((c or {}).get("code") == "PT" for c in codings):
+            v = ident.get("value")
+            if isinstance(v, str) and v.isdigit():
+                numeric_pid = v
+                break
+
     primary_phone: str | None = None
     for tel in patient.get("telecom") or []:
         if (tel or {}).get("system") == "phone":
@@ -658,6 +675,7 @@ def _dashboard_header_payload(patient: dict, patient_id: str) -> dict:
         "mrn": mrn,
         "active": bool(patient.get("active", True)),
         "primary_phone": primary_phone,
+        "numeric_pid": numeric_pid,
     }
 
 

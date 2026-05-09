@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, api, classicLinks } from '../api';
 
-interface Props { pid: string; }
+interface Props { pid: string; numericPid: string | null; }
 
 /**
  * Prescriptions card — administrative-order view of MedicationRequest.
@@ -11,19 +11,22 @@ interface Props { pid: string; }
  * here are the ones a prescriber/admin cares about: who wrote it,
  * when, refills, dispense quantity. Sorted most-recent first.
  */
-export function PrescriptionsCard({ pid }: Props) {
+export function PrescriptionsCard({ pid, numericPid }: Props) {
   const q = useQuery({
     queryKey: ['prescriptions', pid],
     queryFn: () => api.prescriptions(pid),
   });
+  const classicUrl = classicLinks.prescriptions(numericPid);
 
   return (
     <div className="card">
       <h2>
         Prescriptions
-        <a className="out-link" href={classicLinks.prescriptions(pid)} target="_blank" rel="noreferrer">
-          Open in classic ↗
-        </a>
+        {classicUrl && (
+          <a className="out-link" href={classicUrl} target="_blank" rel="noreferrer">
+            Open in classic ↗
+          </a>
+        )}
       </h2>
       {q.isLoading && <div className="loading">Loading…</div>}
       {q.error instanceof ApiError && <div className="error">Failed to load prescriptions (HTTP {q.error.status}).</div>}

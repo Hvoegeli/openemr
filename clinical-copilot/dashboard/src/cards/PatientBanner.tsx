@@ -75,6 +75,7 @@ export function PatientBanner({ pid, headerQuery }: Props) {
   const statusPill = p.active
     ? <span className="pill pill-ok">Active</span>
     : <span className="pill pill-muted">Inactive</span>;
+  const classicUrl = classicLinks.patientSummary(p.numeric_pid);
 
   return (
     <div className="patient-banner">
@@ -94,9 +95,16 @@ export function PatientBanner({ pid, headerQuery }: Props) {
         >
           ← Back to Co-Pilot
         </a>
-        <a className="out-link" href={classicLinks.patientSummary(pid)} target="_blank" rel="noreferrer">
-          Open in classic OpenEMR ↗
-        </a>
+        {classicUrl && (
+          <a
+            className="out-link"
+            href={classicUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open in classic OpenEMR ↗
+          </a>
+        )}
       </div>
     </div>
   );

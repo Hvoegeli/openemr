@@ -1,21 +1,24 @@
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, api, classicLinks } from '../api';
 
-interface Props { pid: string; }
+interface Props { pid: string; numericPid: string | null; }
 
-export function MedicationsCard({ pid }: Props) {
+export function MedicationsCard({ pid, numericPid }: Props) {
   const q = useQuery({
     queryKey: ['medications', pid],
     queryFn: () => api.medications(pid),
   });
+  const classicUrl = classicLinks.medications(numericPid);
 
   return (
     <div className="card">
       <h2>
         Medications
-        <a className="out-link" href={classicLinks.medications(pid)} target="_blank" rel="noreferrer">
-          Open in classic ↗
-        </a>
+        {classicUrl && (
+          <a className="out-link" href={classicUrl} target="_blank" rel="noreferrer">
+            Open in classic ↗
+          </a>
+        )}
       </h2>
       {q.isLoading && <div className="loading">Loading…</div>}
       {q.error instanceof ApiError && <div className="error">Failed to load medications (HTTP {q.error.status}).</div>}
