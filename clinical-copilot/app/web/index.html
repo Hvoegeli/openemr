@@ -2711,6 +2711,14 @@
               streamedText += evt.text;
               responseBox.innerHTML = decorateCitations(streamedText, new Set(lastSources));
               log.scrollTop = log.scrollHeight;
+            } else if (evt.type === 'reset') {
+              // Backend tells us the validator triggered an answerer
+              // retry — discard the partial first-attempt text so the
+              // fresh tokens that follow don't get appended to a stale
+              // answer. Without this the user sees both attempts
+              // concatenated with two "For clinician judgment" footers.
+              streamedText = '';
+              responseBox.innerHTML = '';
             } else if (evt.type === 'done') {
               lastSources = evt.sources || [];
               lastValidationWarning = !!evt.validation_warning;

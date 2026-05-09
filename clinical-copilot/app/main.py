@@ -36,7 +36,7 @@ from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
@@ -366,12 +366,60 @@ app.add_middleware(
 # index.html for the bare prefix path (the SPA reads `?pid=...` from
 # location.search, so we don't need a SPA-style catch-all).
 #
+# The bare `/dashboard` and `/dashboard/` paths are intercepted by an
+# explicit route handler that injects an
+# `<meta name="openemr-classic-base">` tag into the served index.html
+# based on `settings.openemr_classic_base`. The dashboard's
+# `classicBase()` (in src/api.ts) reads that tag to build "Open in
+# classic OpenEMR" out-link URLs. Without the injection the dashboard
+# falls back to its built-in https://localhost:9300 default — which is
+# correct only for local dev. In production the classic OpenEMR base
+# is a separate cloudflared tunnel URL whose value can change between
+# deploys, so it MUST come from runtime config rather than be baked
+# into the bundle. Mount-served assets (`/dashboard/assets/*`) are
+# unaffected by the route handler.
+#
 # The directory may not exist on a fresh checkout (it's a build
 # artifact, gitignored). We fall through to a stub route in that case
 # so the app still starts and `/dashboard` returns a clear "build not
 # found" message instead of a 500.
 _DASHBOARD_BUILD_DIR = WEB_DIR / "dashboard-build"
 if _DASHBOARD_BUILD_DIR.is_dir() and (_DASHBOARD_BUILD_DIR / "index.html").is_file():
+    _DASHBOARD_INDEX_PATH = _DASHBOARD_BUILD_DIR / "index.html"
+
+    def _render_dashboard_index() -> str:
+        """Read index.html and inject the openemr-classic-base meta tag.
+
+        Read on every request rather than cached at startup so a build
+        regeneration (npm run build) is picked up without restarting
+        the server. The file is small (~500 bytes) and the dashboard
+        loads at most once per browser session.
+        """
+        from html import escape  # noqa: PLC0415
+        html = _DASHBOARD_INDEX_PATH.read_text()
+        # Strip trailing slash because the frontend's classicLinks
+        # builders concatenate `${classicBase()}${path}` where path
+        # always starts with "/". Without this, an env value of
+        # "https://example.com/" produces "https://example.com//interface/...".
+        # Cloudflared and nginx collapse the double slash, but stricter
+        # routers don't, and it's ugly in the address bar either way.
+        base = (settings.openemr_classic_base or "").strip().rstrip("/")
+        if base:
+            meta = f'<meta name="openemr-classic-base" content="{escape(base, quote=True)}">'
+            # Insert after the opening <head> tag. Falls back to a
+            # straight prepend if <head> is missing (shouldn't happen
+            # with vite output, but defensively don't lose the tag).
+            if "<head>" in html:
+                html = html.replace("<head>", f"<head>\n    {meta}", 1)
+            else:
+                html = meta + html
+        return html
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    @app.get("/dashboard/", response_class=HTMLResponse)
+    async def _dashboard_index() -> HTMLResponse:
+        return HTMLResponse(_render_dashboard_index())
+
     app.mount(
         "/dashboard",
         StaticFiles(directory=str(_DASHBOARD_BUILD_DIR), html=True),
@@ -1289,6 +1337,17 @@ async def chat_stream(
 
     async def event_stream():
         token = set_current_trace(trace)
+        # Count answerer invocations this turn. The validator can send a
+        # `VALIDATION FAILED:` retry message back to the answerer when it
+        # finds uncited or fake-cited claims — that re-runs the answerer
+        # and produces a *new* response, NOT a continuation of the first.
+        # If we stream both, the user sees two complete answers
+        # concatenated (first answer + footer + second answer's preamble
+        # + same data again). Track invocations so we can emit a `reset`
+        # event to the frontend on retry; the frontend then discards the
+        # partial first-attempt text and starts fresh on the second
+        # attempt's tokens.
+        answerer_starts = 0
         try:
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'request_id': trace.request_id})}\n\n"
 
@@ -1299,6 +1358,27 @@ async def chat_stream(
             ):
                 ev = event.get("event")
                 data = event.get("data") or {}
+                md = event.get("metadata") or {}
+
+                if (
+                    ev == "on_chain_start"
+                    and event.get("name") == "answerer"
+                    and md.get("langgraph_node") == "answerer"
+                ):
+                    # Second+ answerer invocation in a single turn ⇒ the
+                    # validator retried. Tell the frontend to discard the
+                    # partial first-attempt text. The fresh stream of
+                    # tokens that follows will populate the bubble cleanly.
+                    # We require BOTH event.name == "answerer" and the
+                    # langgraph_node metadata match because nested LLM
+                    # chains inside the answerer node inherit the
+                    # langgraph_node metadata but have their own event
+                    # name (e.g. "ChatAnthropic"). Counting nested starts
+                    # would over-trigger the reset.
+                    if answerer_starts >= 1:
+                        yield f"data: {json.dumps({'type': 'reset'})}\n\n"
+                    answerer_starts += 1
+                    continue
 
                 if ev == "on_tool_start":
                     yield f"data: {json.dumps({'type': 'tool', 'name': event.get('name'), 'phase': 'start'})}\n\n"
@@ -1308,12 +1388,10 @@ async def chat_stream(
                     # evidence_retriever) also fire on_chat_model_stream
                     # events, and when a worker decides to emit prose
                     # instead of a tool call the worker text leaks into
-                    # the SSE stream alongside the answerer's final text
-                    # — the user sees the answer twice with two
-                    # "For clinician judgment" footers concatenated.
+                    # the SSE stream alongside the answerer's final text.
                     # The non-stream /chat endpoint isn't affected
                     # because it returns messages[-1] only.
-                    node = (event.get("metadata") or {}).get("langgraph_node")
+                    node = md.get("langgraph_node")
                     if node != "answerer":
                         continue
                     chunk = data.get("chunk")

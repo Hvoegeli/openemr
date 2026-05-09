@@ -47,6 +47,15 @@ class Settings(BaseSettings):
     # default; production overrides via env (Hetzner cloudflared tunnel URL).
     copilot_base_url: str = "http://localhost:8000"
 
+    # Externally-reachable base URL for classic OpenEMR. The Modern
+    # Dashboard's "Open in classic OpenEMR" out-links use this as the
+    # prefix. Empty string ⇒ the dashboard falls back to its built-in
+    # default (https://localhost:9300, suitable for local dev only).
+    # Production deploys override via OPENEMR_CLASSIC_BASE — on Hetzner
+    # this is a separate cloudflared tunnel pointed at port 9300, since
+    # the primary tunnel only exposes Co-Pilot at port 8000.
+    openemr_classic_base: str = ""
+
     # OpenEMR seed client — also used for password-grant credential validation
     # (proves a username/password pair is valid against OpenEMR without us
     # having to hit the legacy login endpoints).
