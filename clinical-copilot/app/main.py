@@ -1303,6 +1303,19 @@ async def chat_stream(
                 if ev == "on_tool_start":
                     yield f"data: {json.dumps({'type': 'tool', 'name': event.get('name'), 'phase': 'start'})}\n\n"
                 elif ev == "on_chat_model_stream":
+                    # Only stream tokens from the answerer node. The
+                    # supervisor + worker LLMs (intake_extractor,
+                    # evidence_retriever) also fire on_chat_model_stream
+                    # events, and when a worker decides to emit prose
+                    # instead of a tool call the worker text leaks into
+                    # the SSE stream alongside the answerer's final text
+                    # — the user sees the answer twice with two
+                    # "For clinician judgment" footers concatenated.
+                    # The non-stream /chat endpoint isn't affected
+                    # because it returns messages[-1] only.
+                    node = (event.get("metadata") or {}).get("langgraph_node")
+                    if node != "answerer":
+                        continue
                     chunk = data.get("chunk")
                     if chunk is not None and isinstance(chunk.content, str) and chunk.content:
                         yield f"data: {json.dumps({'type': 'token', 'text': chunk.content})}\n\n"

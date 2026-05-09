@@ -3161,10 +3161,14 @@
 
       // Bbox v1 — when a chart resource was extracted from a document
       // upload, prefer to deep-link the click into the source PDF with
-      // its bbox highlighted. Falls back to the chart-card scroll
-      // (`_chartCardScroll`) when the resource has no source tag, when
-      // the source document isn't in the current patient's docs
-      // roster, or when the lookup fails.
+      // its bbox highlighted. When no source document is on file, tell
+      // the user explicitly instead of silently scrolling to the chart
+      // card — the silent fallback made the citation look "alive" but
+      // unverifiable, which the user reported as indistinguishable from
+      // a hallucination. The chart-card scroll still happens as the
+      // *secondary* affordance (a follow-up click on the system message
+      // link), but the primary feedback is now an honest "no source
+      // document" notice that names the resource type.
       const sourcedTypes = new Set(['AllergyIntolerance', 'MedicationRequest', 'Condition']);
       if (sourcedTypes.has(type)) {
         const id = ref.split('/')[1];
@@ -3185,6 +3189,14 @@
               append('system', 'This citation’s source document is not loaded for the current patient.');
               return;
             }
+            // No source document on file for this fact. The data is
+            // real (it's in the structured FHIR record) but cannot be
+            // traced to an uploaded document for visual verification.
+            // Scroll to the chart card so the user can still inspect
+            // the row — _chartCardScroll handles its own "not on this
+            // chart" message when the LI is missing, so we don't
+            // promise chart-card visibility here.
+            append('system', 'No source document is linked to this ' + type + '. The data came from OpenEMR\'s structured fields rather than an uploaded document.');
             _chartCardScroll(ref);
           })
           .catch(() => _chartCardScroll(ref));
