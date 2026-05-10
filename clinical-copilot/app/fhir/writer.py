@@ -848,10 +848,21 @@ class OpenEMRWriter:
         """Fetch the SOAP note attached to one encounter. Returns None
         when the encounter has no SOAP note. Used by the lab-results
         backfill to read the structured manifest the writer stuffed
-        into the SOAP note's `subjective` field."""
+        into the SOAP note's `subjective` field.
+
+        URL semantics asymmetry: the writer POSTs SOAP notes via
+        ``/patient/{numeric_pid}/encounter/{eid}/soap_note`` (numeric
+        PID — see write_lab_encounter_with_results). We mirror that
+        here for the GET to stay on the same path the writer's data
+        actually lives at; some OpenEMR versions reject the UUID form
+        on the SOAP note endpoint even though they accept it on the
+        encounter create endpoint.
+        """
         try:
+            token = await self._ensure_token()
+            pid = await self._patient_numeric_pid(token, patient_uuid)
             result = await self._get_standard_api(
-                path=f"/patient/{patient_uuid}/encounter/{encounter_id}/soap_note",
+                path=f"/patient/{pid}/encounter/{encounter_id}/soap_note",
                 label=f"soap_note encounter={encounter_id}",
             )
         except OpenEMRWriteError:
