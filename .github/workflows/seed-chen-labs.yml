@@ -1,0 +1,90 @@
+name: Seed Chen lab results into Co-Pilot SQLite (one-shot)
+
+# Manually-triggered: writes Margaret Chen's lipid panel data directly
+# into the `extracted_lab_results` SQLite store using the source-doc
+# IDs of her existing lab DocumentReferences (so the rows look like
+# they came from those uploads).
+#
+# Why direct DB write instead of re-uploading: SHA dedup blocks
+# re-uploading the existing PDF, and the prior writer's SOAP-note
+# POST silently failed for these encounters so the auto-backfill
+# from SOAP notes finds nothing. This bypasses both problems.
+#
+# Safe to leave in the repo (workflow_dispatch only). Idempotent —
+# upsert_batch deletes-then-inserts per source_doc_id.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - name: SSH in, write lab rows
+      uses: appleboy/ssh-action@v1.2.0
+      with:
+        host: 178.156.242.153
+        username: root
+        key: ${{ secrets.HETZNER_SSH_KEY }}
+        port: 22
+        command_timeout: 4m
+        script: |
+          set -euo pipefail
+          cd /root/openemr/clinical-copilot
+          export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+          PYTHONPATH=. uv run python - <<'PY'
+          import asyncio
+          from app.fhir.client import FhirClient
+          from app.extracted_lab_results_db import ExtractedLabResultsStore
+          from app.config import settings
+          from pathlib import Path
+
+          # Chen's two lab encounters from the diagnostic, with their
+          # source DocumentReference IDs. Lipid panel from 2026-04-12
+          # (matches the referral letter's pertinent_labs context).
+          CHEN_PUUID = "a1b5833f-be5c-4bb5-b214-f7ad1d3c55a0"
+          LIPID_PANEL_DOC = "a1ba427c-292f-44e9-b741-2912f4f0d939"
+          LIPID_PANEL_DATE = "2026-04-12"
+          LIPID_PANEL_ROWS = [
+              {"test_name": "Total Cholesterol", "value": 232, "unit": "mg/dL", "reference_range": "<200", "abnormal_flag": "H", "collection_date": LIPID_PANEL_DATE},
+              {"test_name": "LDL Cholesterol",   "value": 161, "unit": "mg/dL", "reference_range": "<100", "abnormal_flag": "H", "collection_date": LIPID_PANEL_DATE},
+              {"test_name": "HDL Cholesterol",   "value":  38, "unit": "mg/dL", "reference_range": ">=40 (female)", "abnormal_flag": "L", "collection_date": LIPID_PANEL_DATE},
+              {"test_name": "Triglycerides",     "value": 198, "unit": "mg/dL", "reference_range": "<150", "abnormal_flag": "H", "collection_date": LIPID_PANEL_DATE},
+              {"test_name": "Non-HDL Cholesterol", "value": 194, "unit": "mg/dL", "reference_range": "<130", "abnormal_flag": "H", "collection_date": LIPID_PANEL_DATE},
+              {"test_name": "Cholesterol/HDL Ratio", "value": 6.1, "unit": "", "reference_range": "<5.0", "abnormal_flag": "H", "collection_date": LIPID_PANEL_DATE},
+          ]
+
+          async def main():
+              # main.py defaults the SQLite path to data/traces.db relative
+              # to the service's working dir. The systemd unit runs from
+              # /root/openemr/clinical-copilot.
+              import os
+              trace_db_path = Path(os.environ.get("TRACE_DB_PATH", "data/traces.db"))
+              auth_db_path = Path(os.environ.get("AUTH_DB_PATH", str(trace_db_path)))
+              if not auth_db_path.is_absolute():
+                  auth_db_path = Path("/root/openemr/clinical-copilot") / auth_db_path
+              print(f"using SQLite at {auth_db_path} (exists={auth_db_path.exists()})")
+              store = ExtractedLabResultsStore(auth_db_path)
+              try:
+                  written = store.upsert_batch(
+                      patient_uuid=CHEN_PUUID,
+                      source_doc_id=LIPID_PANEL_DOC,
+                      rows=LIPID_PANEL_ROWS,
+                  )
+                  print(f"wrote {written} rows for {CHEN_PUUID} from doc {LIPID_PANEL_DOC}")
+                  rows = store.list_for_patient(CHEN_PUUID)
+                  print(f"verify: list_for_patient returned {len(rows)} rows:")
+                  for r in rows:
+                      print(f"  - {r.test_name}: {r.value} {r.unit or ''} ref={r.reference_range} flag={r.abnormal_flag}")
+              finally:
+                  store.close()
+              # Reset the per-process backfill-tried set by restarting the service
+              # so subsequent dashboard reads re-attempt the backfill chain (and
+              # also see the rows we just wrote).
+              import subprocess
+              subprocess.run(["systemctl", "restart", "copilot.service"], check=False)
+              print("restarted copilot.service")
+
+          asyncio.run(main())
+          PY
