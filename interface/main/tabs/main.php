@@ -26,7 +26,6 @@ require_once \OpenEMR\Core\OEGlobalsBag::getInstance()->getSrcDir() . '/ESign/Ap
 use ESign\Api;
 use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
-use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Session\SessionUtil;
 use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Common\Twig\TwigContainer;
@@ -509,42 +508,36 @@ $twig = (new TwigContainer(null, OEGlobalsBag::getInstance()->getKernel()))->get
                 </form>
             <?php endif; ?>
             <?php
-            // Modern Dashboard out-link. Reads `COPILOT_DASHBOARD_URL`
-            // from the container environment so each deploy can point at
-            // its own Co-Pilot tunnel without code changes; rendered only
-            // when set. When the active session has a patient open,
-            // resolve the FHIR UUID and append `?pid=<uuid>` so the
-            // dashboard loads with the same patient already selected
-            // (the modern dashboard's URL contract is FHIR UUIDs, not
-            // numeric pids — see clinical-copilot/dashboard/src/App.tsx).
+            // Modern Dashboard / Co-Pilot out-links. Rendered only when
+            // `COPILOT_DASHBOARD_URL` is set in the container environment.
+            //
+            // Modern Dashboard: the click is routed through
+            // `interface/main/copilot_dashboard.php`, which reads the live
+            // session pid at click time, resolves the FHIR UUID, and 302s
+            // to the dashboard. Computing the URL server-side here would
+            // freeze it on whichever patient was open when the top tabs
+            // frame first rendered (the frame doesn't reload on patient
+            // switch), so subsequent patient switches would still link to
+            // the original patient.
+            //
+            // Co-Pilot chat: bare home link — no patient context to carry.
             $copilotDashboardEnv = getenv('COPILOT_DASHBOARD_URL');
             $copilotDashboardUrl = is_string($copilotDashboardEnv) ? trim($copilotDashboardEnv) : '';
             if ($copilotDashboardUrl !== '') {
                 $copilotDashboardUrl = rtrim($copilotDashboardUrl, '/');
-                // Resolve the active patient's FHIR UUID (if any) so the
-                // dashboard link can carry ?pid=<uuid> straight into the
-                // patient view. Co-Pilot's home (/) handles the no-patient
-                // case with its own picker, so the bare home link is the
-                // safe default when no patient is open.
-                $sessionPidValue = $session->get('pid');
-                $sessionPid = is_numeric($sessionPidValue) ? (int) $sessionPidValue : 0;
-                $patientUuid = '';
-                if ($sessionPid > 0) {
-                    $row = QueryUtils::querySingleRow("SELECT uuid FROM patient_data WHERE pid = ?", [$sessionPid]);
-                    $rawUuid = (is_array($row) && isset($row['uuid'])) ? $row['uuid'] : null;
-                    if (is_string($rawUuid) && $rawUuid !== '') {
-                        $patientUuid = \OpenEMR\Common\Uuid\UuidRegistry::uuidToString($rawUuid);
-                    }
-                }
-                $dashboardHref = $copilotDashboardUrl . '/dashboard'
-                    . ($patientUuid !== '' ? ('?pid=' . urlencode($patientUuid)) : '');
+                // $web_root comes from globals.php and is `mixed` to phpstan;
+                // narrow it before string-concatenation. The fallback to
+                // `/interface/...` is an absolute URL so the click still
+                // routes correctly even if the global is somehow unset.
+                $webRootStr = is_string($web_root ?? null) ? $web_root : '';
+                $dashboardHref = $webRootStr . '/interface/main/copilot_dashboard.php';
                 $copilotHomeHref = $copilotDashboardUrl . '/';
                 ?>
                 <div class="form-inline ml-2 my-1">
                     <a class="btn btn-sm btn-info"
                        href="<?php echo attr($dashboardHref); ?>"
                        target="_blank" rel="noopener"
-                       title="<?php echo $patientUuid !== '' ? xla('Open the active patient on the Modern Dashboard') : xla('Open the Modern Dashboard'); ?>">
+                       title="<?php echo xla('Open the active patient on the Modern Dashboard'); ?>">
                         <i class="fa fa-th-large mr-1"></i><?php echo xlt('Modern Dashboard'); ?>
                     </a>
                     <a class="btn btn-sm btn-outline-info ml-1"
