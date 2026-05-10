@@ -113,6 +113,7 @@ async def attach_and_extract(
     model: str = DEFAULT_MODEL,
     skip_extraction: bool = False,
     skip_persistence: bool = False,
+    practitioners_store: Any | None = None,
 ) -> AttachAndExtractResult:
     """Persist a clinical document to OpenEMR + extract its structured
     contents via Claude vision.
@@ -214,6 +215,7 @@ async def attach_and_extract(
             patient_uuid=patient_uuid,
             extracted=extracted,
             source_document_id=source_document_id,
+            practitioners_store=practitioners_store,
         )
         return AttachAndExtractResult(
             extracted=extracted, write_result=write_result,
@@ -437,6 +439,7 @@ async def persist_extracted_facts(
     patient_uuid: str,
     extracted: ExtractedDocument,
     source_document_id: str,
+    practitioners_store: Any | None = None,
 ) -> dict[str, Any]:
     """Push the structured Phase-2 output into OpenEMR's native tables.
 
@@ -614,6 +617,38 @@ async def persist_extracted_facts(
         }
 
     if isinstance(extracted, ReferralLetter):
+        # Referring physician -> Co-Pilot-side care-team store. OpenEMR's
+        # FHIR has no native target for the contact-block fields a
+        # referral letter prints (specialty / phone / address) and its
+        # CareTeam resource is rarely populated for demo patients. The
+        # Modern Dashboard's Care Team tab reads from this store. Write
+        # is best-effort; failures are recorded but never abort the rest
+        # of the persistence pass (the chart still gets problems / meds /
+        # allergies even if the store is unreachable).
+        rp = extracted.referring_physician
+        if practitioners_store is not None and rp.name:
+            try:
+                practitioners_store.upsert(
+                    patient_uuid=patient_uuid,
+                    source_doc_id=source_document_id,
+                    name=rp.name,
+                    practice=rp.practice,
+                    specialty=rp.specialty,
+                    phone=rp.phone,
+                    address=rp.address,
+                    npi=rp.npi,
+                )
+                items.append({
+                    "kind": "referring_physician", "ok": True,
+                    "label": rp.name,
+                })
+            except Exception as e:  # noqa: BLE001
+                log.exception("persist: referring_physician store write failed")
+                items.append({
+                    "kind": "referring_physician", "ok": False,
+                    "label": rp.name, "error": str(e)[:300],
+                })
+
         # Reason-for-referral -> medical_problem so it surfaces on the
         # chart's Active Problems list (mirrors how chief_concern is
         # handled for IntakeForm). The referral's reason is the doctor's

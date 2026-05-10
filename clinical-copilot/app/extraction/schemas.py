@@ -282,12 +282,23 @@ class MedicalCondition(BaseModel):
 
 
 class ReferringPhysician(BaseModel):
-    """The physician who authored the referral letter."""
+    """The physician who authored the referral letter.
+
+    `specialty`, `phone`, `address` are populated from the letter's
+    signature block / letterhead when printed and surfaced on the
+    Modern Dashboard's Care Team tab. Omitted when the letter does
+    not print them — receiving practices often vary in how complete
+    the contact block is, and a missing field is materially different
+    from an empty string.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, description="Full name including credentials (e.g. 'Helen Park, MD')")
     practice: str | None = Field(default=None, description="Practice or institution name as printed")
+    specialty: str | None = Field(default=None, description="Clinical specialty as printed (e.g. 'Cardiology', 'Internal Medicine'); omitted if not visible")
+    phone: str | None = Field(default=None, description="Office phone as printed (any format — '(650) 555-0100' or '650-555-0100'); omitted if not visible")
+    address: str | None = Field(default=None, description="Practice mailing address as a single line, joining street + city/state/zip with commas; omitted if not visible")
     npi: str | None = Field(default=None, description="10-digit NPI as printed; omitted if not visible")
     source_citation: Citation
 

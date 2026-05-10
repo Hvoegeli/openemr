@@ -31,7 +31,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -70,6 +70,7 @@ from app.assignments_db import AssignmentStore  # noqa: E402
 from app.auth_db import AuthStore  # noqa: E402
 from app.document_fingerprints_db import DocumentFingerprintStore  # noqa: E402
 from app.extracted_sources_db import ExtractedSourcesStore  # noqa: E402
+from app.extracted_practitioners_db import ExtractedPractitionersStore  # noqa: E402
 from app.hidden_docs_db import HiddenDocsStore  # noqa: E402
 import hashlib  # noqa: E402
 
@@ -306,6 +307,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # tag. Same SQLite file, separate `extracted_resource_sources` table.
     app.state.extracted_sources = ExtractedSourcesStore(auth_db_path)
     log.info("extracted-sources store: sqlite at %s", auth_db_path)
+    # Care-team entries derived from referral-letter extractions. Same
+    # SQLite file, separate `extracted_practitioners` table. Powers the
+    # Modern Dashboard's Care Team tab (FHIR CareTeam is rarely populated
+    # for demo patients).
+    app.state.extracted_practitioners = ExtractedPractitionersStore(auth_db_path)
+    log.info("extracted-practitioners store: sqlite at %s", auth_db_path)
     # Content-fingerprint index for dedup Layer 2 — same SQLite file,
     # separate `document_fingerprints` table.
     app.state.fingerprints = DocumentFingerprintStore(auth_db_path)
@@ -344,6 +351,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.assignments.close()
         app.state.hidden_docs.close()
         app.state.extracted_sources.close()
+        app.state.extracted_practitioners.close()
         app.state.fingerprints.close()
         app.state.active_patients.close()
 
@@ -819,18 +827,55 @@ def _dashboard_careteam_entry(ct: dict) -> list[dict]:
     A FHIR CareTeam carries `participant[].member.display` for each
     person on the team; we render one row per participant rather than
     one row per team. Empty `participant` lists yield an empty result.
+    Defensive against malformed/null participant entries — OpenEMR's
+    FHIR can return `participant: [null]` for half-populated rows.
     """
     out: list[dict] = []
     ct_id = ct.get("id") or ""
     for i, p in enumerate(ct.get("participant") or []):
-        member = (p or {}).get("member") or {}
-        role_coding = ((p.get("role") or [{}])[0].get("coding") or [{}])[0]
+        if not isinstance(p, dict):
+            continue
+        member = p.get("member") or {}
+        role_list = p.get("role") or []
+        role_coding: dict = {}
+        if role_list and isinstance(role_list[0], dict):
+            coding_list = role_list[0].get("coding") or []
+            if coding_list and isinstance(coding_list[0], dict):
+                role_coding = coding_list[0]
+        role = role_coding.get("display") or role_coding.get("code")
         out.append({
             "id": f"{ct_id}:{i}",
             "name": member.get("display"),
-            "role": role_coding.get("display") or role_coding.get("code"),
+            "specialty": role,
+            "practice": None,
+            "phone": None,
+            "address": None,
+            "npi": None,
+            "source": "fhir",
         })
     return out
+
+
+def _dashboard_practitioner_entry(p: Any) -> dict:
+    """Render one ExtractedPractitioner row as a dashboard care-team entry.
+
+    Schema mirrors `_dashboard_careteam_entry` so the React card can
+    iterate one merged list. `source="extracted"` lets the UI render a
+    "from <referral document>" deep-link; `id` is a stable string
+    derived from the source-doc id so React keys stay stable across
+    refetches.
+    """
+    return {
+        "id": f"prac:{p.source_doc_id}",
+        "name": p.name,
+        "specialty": p.specialty,
+        "practice": p.practice,
+        "phone": p.phone,
+        "address": p.address,
+        "npi": p.npi,
+        "source": "extracted",
+        "source_doc_id": p.source_doc_id,
+    }
 
 
 # Vitals: LOINC codes the dashboard knows how to label + render. Other
@@ -993,11 +1038,45 @@ async def dashboard_prescriptions(
 async def dashboard_care_team(
     pid: str, request: Request, username: str = Depends(current_user),
 ) -> dict:
+    """Care Team for the dashboard, merged from two sources.
+
+    1. **FHIR CareTeam** — OpenEMR's native resource. In practice rarely
+       populated for demo patients; the demo cohort has no rows here.
+       Wrapped in try/except because OpenEMR's FHIR layer can 4xx/5xx
+       on the CareTeam search path (the resource is partially supported)
+       and a fetch failure here should NOT break the whole tab.
+    2. **Extracted practitioners** — referring physicians captured by the
+       Phase 2 VLM pipeline when a referral letter is uploaded for this
+       patient. Stored in the Co-Pilot's SQLite (`extracted_practitioners`
+       table) because OpenEMR's FHIR has no native target for the
+       contact-block fields a referral prints (specialty / phone /
+       address). See `app/extracted_practitioners_db.py` for the schema.
+
+    Empty result is the honest answer for a patient with no FHIR
+    CareTeam and no uploaded referrals — the React card renders
+    "No care team members on file."
+    """
     await _dashboard_assert_patient_in_panel(request, username, pid)
-    teams = await request.app.state.fhir.search("CareTeam", {"patient": pid, "_count": 50})
     items: list[dict] = []
-    for ct in teams:
-        items.extend(_dashboard_careteam_entry(ct))
+    try:
+        teams = await request.app.state.fhir.search("CareTeam", {"patient": pid, "_count": 50})
+        for ct in teams:
+            items.extend(_dashboard_careteam_entry(ct))
+    except Exception as e:  # noqa: BLE001
+        # OpenEMR's CareTeam FHIR endpoint isn't fully reliable; treat
+        # any error here as "no FHIR care team rows" rather than 500ing
+        # the whole tab.
+        log.warning("dashboard_care_team: FHIR CareTeam fetch failed for pid=%s: %s", pid, e)
+    practitioners_store = getattr(request.app.state, "extracted_practitioners", None)
+    if practitioners_store is not None:
+        try:
+            rows = practitioners_store.list_for_patient(pid)
+            items.extend(_dashboard_practitioner_entry(p) for p in rows)
+        except Exception as e:  # noqa: BLE001
+            # Same defensive posture as the FHIR branch above — a SQLite
+            # error here (file locked, schema mismatch) shouldn't 500
+            # the tab. Worst case the user sees an empty Care Team.
+            log.warning("dashboard_care_team: practitioners store read failed for pid=%s: %s", pid, e)
     return {"items": items}
 
 
@@ -2522,6 +2601,7 @@ async def api_upload(
                 writer=app.state.openemr_writer,
                 skip_extraction=True,
                 skip_persistence=True,
+                practitioners_store=app.state.extracted_practitioners,
             )
     except ValueError as e:
         # Render-side errors (unsupported MIME, empty file inside renderer)
@@ -2698,6 +2778,7 @@ async def api_upload(
             patient_uuid=patient_uuid,
             extracted=result.extracted,
             source_document_id=new_ref,
+            practitioners_store=app.state.extracted_practitioners,
         )
     result.persistence = persistence
     if fingerprint:
@@ -3186,6 +3267,7 @@ async def api_document_resolve_content_match(
         patient_uuid=patient_id,
         extracted=extracted,
         source_document_id=f"DocumentReference/{new_doc_id}",
+        practitioners_store=app.state.extracted_practitioners,
     )
 
     fingerprint = compute_fingerprint(extracted)

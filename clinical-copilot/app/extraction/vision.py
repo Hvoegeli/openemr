@@ -113,7 +113,12 @@ header (name + DOB on letterhead, or a 'Re: <patient name>, DOB ...' \
 salutation), populate `patient_identity` with whatever fields are \
 visible (given_name, family_name, date_of_birth, sex, address, phone). \
 Omit `patient_identity` entirely when the letter only references the \
-patient anonymously ('the patient', 'this 55yo male').
+patient anonymously ('the patient', 'this 55yo male'). For the \
+referring physician, also populate `specialty`, `phone`, and `address` \
+from the letterhead or signature block when printed (e.g. 'Helen Park, \
+MD — Cardiology', '(650) 555-0100', '123 Main St, Mountain View, CA \
+94040'). Join multi-line addresses into a single comma-separated line. \
+Omit each of these three fields when the letter does not print it.
 - For fax packets: a single fax bundles a transmittal cover sheet plus \
 1+ clinical pages (referral request, patient face sheet, lab report). \
 Extract the cover-sheet metadata (date, sender, recipient, urgency, the \

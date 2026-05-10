@@ -91,7 +91,13 @@ export interface PrescriptionEntry {
 export interface CareTeamEntry {
   id: string;
   name: string | null;
-  role: string | null;
+  specialty: string | null;
+  practice: string | null;
+  phone: string | null;
+  address: string | null;
+  npi: string | null;
+  source: 'fhir' | 'extracted';
+  source_doc_id?: string;
 }
 
 export interface VitalReading {

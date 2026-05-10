@@ -171,6 +171,20 @@ a:hover { text-decoration: underline; }
 .card li .primary { font-weight: 500; }
 .card li .secondary { color: var(--text-muted); font-size: 12px; }
 
+/* Care Team — multi-line entries (name + specialty headline, then phone,
+ * address, practice, NPI, source-doc note as separate lines). Override
+ * the flex/baseline default of `.card li` so the lines stack. */
+.card .care-team-list li.care-team-entry {
+  display: block;
+  padding: 12px 0;
+}
+.ct-headline { font-weight: 500; line-height: 1.3; }
+.ct-name { color: var(--text); }
+.ct-sep { color: var(--text-muted); }
+.ct-specialty { color: var(--text); font-weight: 500; }
+.ct-line { color: var(--text); font-size: 13px; line-height: 1.4; margin-top: 2px; }
+.ct-line.ct-muted { color: var(--text-muted); font-size: 12px; }
+
 .empty {
   color: var(--text-muted);
   font-style: italic;
