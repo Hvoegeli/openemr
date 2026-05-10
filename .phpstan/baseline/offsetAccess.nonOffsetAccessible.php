@@ -49458,7 +49458,7 @@ $ignoreErrors[] = [
 ];
 $ignoreErrors[] = [
     'message' => '#^Cannot access offset \'diagnosis\' on mixed\\.$#',
-    'count' => 2,
+    'count' => 1,
     'path' => __DIR__ . '/../../src/Services/ListService.php',
 ];
 $ignoreErrors[] = [

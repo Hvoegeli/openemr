@@ -196,6 +196,14 @@ class ListService
         $sql .= "     diagnosis=?,";
         $sql .= "     comments=?";
 
+        // Narrow $data via array_key_exists checks so phpstan can prove
+        // the offset access is safe on otherwise-`mixed` input. The
+        // surrounding required-key accesses (`pid`, `type`, etc.) are
+        // already covered by the baseline; only `comments` was added by
+        // a later commit and trips the gate.
+        $diagnosis = (is_array($data) && array_key_exists('diagnosis', $data)) ? $data['diagnosis'] : null;
+        $comments  = (is_array($data) && array_key_exists('comments', $data))  ? $data['comments']  : null;
+
         return sqlInsert(
             $sql,
             [
@@ -204,8 +212,8 @@ class ListService
                 $data["title"],
                 $data["begdate"],
                 $data["enddate"],
-                $data["diagnosis"] ?? null,
-                $data["comments"] ?? null
+                $diagnosis,
+                $comments,
             ]
         );
     }

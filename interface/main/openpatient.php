@@ -37,9 +37,11 @@ require_once('../globals.php');
 use OpenEMR\Common\Session\PatientSessionUtil;
 use OpenEMR\Common\Session\SessionWrapperFactory;
 
-$rawPid = $_GET['pid'] ?? '';
-$pid = (int) $rawPid;
-if ($pid <= 0 || (string) $pid !== (string) $rawPid) {
+// FILTER_VALIDATE_INT rejects non-integer-looking input (leading zeros,
+// trailing whitespace, scientific notation, floats) and yields false on
+// failure. Coerce false to 0 so the next check catches it uniformly.
+$pid = filter_input(INPUT_GET, 'pid', FILTER_VALIDATE_INT) ?: 0;
+if ($pid <= 0) {
     http_response_code(400);
     echo 'pid query parameter must be a positive integer';
     exit;
@@ -48,7 +50,7 @@ if ($pid <= 0 || (string) $pid !== (string) $rawPid) {
 $session = SessionWrapperFactory::getInstance()->getActiveSession();
 $authUser = $session->get('authUser');
 
-if (empty($authUser)) {
+if (!is_string($authUser) || $authUser === '') {
     // Not authenticated. Carry the patient id through the login form so
     // main_screen.php opens the right chart tab after sign-in.
     header('Location: ../login/login.php?site=default&patientID=' . urlencode((string) $pid));

@@ -226,10 +226,10 @@ if ($_GET['testing_mode'] ?? 0 == 1) {
 // patientID is propagated through the login form so the user lands on
 // the right patient after sign-in. This is set by openpatient.php when
 // the dashboard's "Open in classic OpenEMR" deep-link routes through
-// us for an unauthenticated user. Cast to int and round-trip empty as
-// the empty string; the template only renders the hidden input when
-// non-empty so a normal /login.php hit isn't affected.
-$loginPatientId = isset($_GET['patientID']) ? (int) $_GET['patientID'] : 0;
+// us for an unauthenticated user. FILTER_VALIDATE_INT yields false on
+// non-integer input; coerce to 0 and the template only renders the
+// hidden input when > 0 so a normal /login.php hit isn't affected.
+$loginPatientId = filter_input(INPUT_GET, 'patientID', FILTER_VALIDATE_INT) ?: 0;
 
 $viewArgs = [
     'title' => $openemr_name,

@@ -26,6 +26,7 @@ require_once \OpenEMR\Core\OEGlobalsBag::getInstance()->getSrcDir() . '/ESign/Ap
 use ESign\Api;
 use OpenEMR\Common\Acl\AclMain;
 use OpenEMR\Common\Csrf\CsrfUtils;
+use OpenEMR\Common\Database\QueryUtils;
 use OpenEMR\Common\Session\SessionUtil;
 use OpenEMR\Common\Session\SessionWrapperFactory;
 use OpenEMR\Common\Twig\TwigContainer;
@@ -507,6 +508,52 @@ $twig = (new TwigContainer(null, OEGlobalsBag::getInstance()->getKernel()))->get
                     </div>
                 </form>
             <?php endif; ?>
+            <?php
+            // Modern Dashboard out-link. Reads `COPILOT_DASHBOARD_URL`
+            // from the container environment so each deploy can point at
+            // its own Co-Pilot tunnel without code changes; rendered only
+            // when set. When the active session has a patient open,
+            // resolve the FHIR UUID and append `?pid=<uuid>` so the
+            // dashboard loads with the same patient already selected
+            // (the modern dashboard's URL contract is FHIR UUIDs, not
+            // numeric pids — see clinical-copilot/dashboard/src/App.tsx).
+            $copilotDashboardEnv = getenv('COPILOT_DASHBOARD_URL');
+            $copilotDashboardUrl = is_string($copilotDashboardEnv) ? trim($copilotDashboardEnv) : '';
+            if ($copilotDashboardUrl !== '') {
+                $copilotDashboardUrl = rtrim($copilotDashboardUrl, '/');
+                $copilotPatientUrl = '';
+                $sessionPidValue = $session->get('pid');
+                $sessionPid = is_numeric($sessionPidValue) ? (int) $sessionPidValue : 0;
+                if ($sessionPid > 0) {
+                    $row = QueryUtils::querySingleRow("SELECT uuid FROM patient_data WHERE pid = ?", [$sessionPid]);
+                    $rawUuid = (is_array($row) && isset($row['uuid'])) ? $row['uuid'] : null;
+                    if (is_string($rawUuid) && $rawUuid !== '') {
+                        $patientUuid = \OpenEMR\Common\Uuid\UuidRegistry::uuidToString($rawUuid);
+                        if ($patientUuid !== '') {
+                            $copilotPatientUrl = $copilotDashboardUrl . '/dashboard?pid=' . urlencode($patientUuid);
+                        }
+                    }
+                }
+                ?>
+                <div class="form-inline ml-2 my-1">
+                    <a class="btn btn-sm btn-info"
+                       href="<?php echo attr($copilotDashboardUrl); ?>/dashboard"
+                       target="_blank" rel="noopener"
+                       title="<?php echo xla('Open the Modern Dashboard (Co-Pilot)'); ?>">
+                        <i class="fa fa-th-large mr-1"></i><?php echo xlt('Modern Dashboard'); ?>
+                    </a>
+                    <?php if ($copilotPatientUrl !== '') : ?>
+                        <a class="btn btn-sm btn-outline-info ml-1"
+                           href="<?php echo attr($copilotPatientUrl); ?>"
+                           target="_blank" rel="noopener"
+                           title="<?php echo xla('Open the active patient on the Modern Dashboard'); ?>">
+                            <i class="fa fa-user-md mr-1"></i><?php echo xlt('Current Patient'); ?>
+                        </a>
+                    <?php endif; ?>
+                </div>
+                <?php
+            }
+            ?>
             <!--Below is the user data section that contains the user information and the attendant data-->
             <span id="userData" data-bind="template: {name: 'user-data-template', data: application_data}"></span>
             <?php

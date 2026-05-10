@@ -92,6 +92,12 @@ services:
       OPENEMR_SETTING_SMTP_Auth: 'TRUE'
       OPENEMR_SETTING_practice_return_email_path: 'noreply@openemr.local'
       OPENEMR_SETTING_Patient_Reminder_Sender_Name: 'OpenEMR Reminders'
+      # Modern Dashboard out-link target. Read by interface/main/tabs/main.php
+      # to render "Modern Dashboard" + "Current Patient" buttons next to the
+      # search bar. Empty (default) hides the buttons — appropriate for
+      # local dev unless you have Co-Pilot running externally. Hetzner
+      # production overrides via shell env when bringing the stack up.
+      COPILOT_DASHBOARD_URL: ${COPILOT_DASHBOARD_URL:-}
     depends_on:
       mysql:
         condition: service_healthy
