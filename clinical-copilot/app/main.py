@@ -1101,6 +1101,79 @@ async def dashboard_vitals(
     return {"series": _dashboard_vitals_series(rows)}
 
 
+@app.get("/api/dashboard/patient/{pid}/lab-results-debug")
+async def dashboard_lab_results_debug(
+    pid: str, request: Request, username: str = Depends(current_user),
+) -> dict:
+    """Diagnostic for the Lab Results backfill. Returns what each phase
+    of the backfill actually sees — encounter count, per-encounter
+    reason text, objective-text length, parsed row count — so we can
+    pinpoint exactly where the chain breaks for a given patient.
+
+    This bypasses the per-process `lab_backfill_tried` guard so a stale
+    failed attempt doesn't mask a fix.
+    """
+    await _dashboard_assert_patient_in_panel(request, username, pid)
+    out: dict = {"pid": pid, "encounters": [], "error": None}
+    writer = getattr(request.app.state, "openemr_writer", None)
+    store = getattr(request.app.state, "extracted_lab_results", None)
+    out["writer_available"] = writer is not None
+    out["store_available"] = store is not None
+    if writer is None:
+        out["error"] = "openemr_writer not on app.state"
+        return out
+    try:
+        encounters = await writer.list_encounters(pid)
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"list_encounters failed: {type(e).__name__}: {e}"
+        return out
+    out["encounter_count_total"] = len(encounters)
+    lab_count = 0
+    for enc in encounters:
+        if not isinstance(enc, dict):
+            continue
+        reason = str(enc.get("reason") or "")
+        eid_raw = enc.get("eid") or enc.get("id") or enc.get("encounter_id")
+        try:
+            eid = int(eid_raw) if eid_raw is not None else None
+        except (TypeError, ValueError):
+            eid = None
+        is_lab = reason.lower().startswith("lab results")
+        info: dict = {
+            "eid": eid,
+            "date": str(enc.get("date") or ""),
+            "reason_prefix": reason[:120],
+            "matches_lab_filter": is_lab,
+            "available_keys": sorted(list(enc.keys()))[:20],
+        }
+        if is_lab and eid is not None:
+            lab_count += 1
+            try:
+                soap = await writer.get_soap_note(pid, eid)
+            except Exception as e:  # noqa: BLE001
+                info["soap_error"] = f"{type(e).__name__}: {e}"
+                soap = None
+            if soap:
+                obj = str(soap.get("objective") or "")
+                info["objective_chars"] = len(obj)
+                info["objective_first_300"] = obj[:300]
+                parsed = 0
+                samples = []
+                for raw_line in obj.splitlines():
+                    p = _parse_lab_objective_line(raw_line)
+                    if p:
+                        parsed += 1
+                        if len(samples) < 3:
+                            samples.append({"line": raw_line.strip()[:120], "parsed": p})
+                info["parsed_row_count"] = parsed
+                info["parsed_samples"] = samples
+            else:
+                info["soap_present"] = False
+        out["encounters"].append(info)
+    out["lab_encounter_count"] = lab_count
+    return out
+
+
 @app.get("/api/dashboard/patient/{pid}/lab-results")
 async def dashboard_lab_results(
     pid: str, request: Request, username: str = Depends(current_user),
