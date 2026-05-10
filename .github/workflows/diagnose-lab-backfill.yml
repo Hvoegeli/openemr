@@ -96,13 +96,31 @@ jobs:
                       is_lab = reason.lower().startswith("lab results")
                       print(f"       matches_lab_filter={is_lab}")
                       if is_lab and eid is not None:
+                          # Raw HTTP call so we see status code + body, not just None.
+                          try:
+                              token = await writer._ensure_token()
+                              num_pid = await writer._patient_numeric_pid(token, pid)
+                              print(f"       resolved numeric_pid={num_pid}")
+                              for path in [
+                                  f"/patient/{num_pid}/encounter/{eid}/soap_note",
+                                  f"/patient/{pid}/encounter/{eid}/soap_note",
+                                  f"/patient/{num_pid}/encounter/{eid}/note",
+                              ]:
+                                  url = f"{writer._api_base}{path}"
+                                  r = await writer._http.get(
+                                      url,
+                                      headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                                  )
+                                  print(f"       GET {path}  ->  {r.status_code}  body[:300]={r.text[:300]!r}")
+                          except Exception as e:
+                              print(f"       SOAP raw probe error: {type(e).__name__}: {e}")
                           try:
                               soap = await writer.get_soap_note(pid, int(eid))
                           except Exception as e:
                               print(f"       SOAP fetch error: {type(e).__name__}: {e}")
                               continue
                           if not soap:
-                              print(f"       SOAP NOTE MISSING")
+                              print(f"       SOAP NOTE MISSING (via writer.get_soap_note)")
                               continue
                           obj = str(soap.get("objective") or "")
                           print(f"       SOAP objective length: {len(obj)} chars")
