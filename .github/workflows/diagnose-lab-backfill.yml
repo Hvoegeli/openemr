@@ -1,0 +1,116 @@
+name: Diagnose lab-results backfill (one-shot)
+
+# Manually triggered diagnostic. SSHes into Hetzner and prints what
+# `_backfill_lab_results_from_soap` actually sees for a given patient
+# (default: Margaret Chen). The output goes to the workflow logs so we
+# can read it via `gh run view --log`.
+#
+# Safe to leave in the repo — workflow_dispatch only, no automatic
+# triggers. Delete after the lab-backfill bug is fixed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      patient_name:
+        description: "Patient family name to look up via FHIR (case-insensitive)"
+        required: false
+        default: "Chen"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - name: SSH in, run diagnostic, print result
+      uses: appleboy/ssh-action@v1.2.0
+      with:
+        host: 178.156.242.153
+        username: root
+        key: ${{ secrets.HETZNER_SSH_KEY }}
+        port: 22
+        command_timeout: 4m
+        envs: PATIENT_NAME
+        script: |
+          set -euo pipefail
+          cd /root/openemr/clinical-copilot
+          PYTHONPATH=. uv run python - <<'PY'
+          import asyncio, json, os, sys, httpx
+          from app.fhir.client import FhirClient
+          from app.fhir.writer import OpenEMRWriter
+          from app.main import _parse_lab_objective_line
+
+          PATIENT_NAME = os.environ.get("PATIENT_NAME") or "Chen"
+
+          async def main():
+              fhir = FhirClient()
+              writer = OpenEMRWriter()
+              try:
+                  print(f"=== Looking up patient by family name: {PATIENT_NAME!r} ===")
+                  patients = await fhir.search("Patient", {"family": PATIENT_NAME, "_count": 5})
+                  print(f"  found {len(patients)} matches")
+                  for p in patients:
+                      name = p.get("name", [{}])[0]
+                      family = name.get("family", "")
+                      given = " ".join(name.get("given", []))
+                      print(f"  - {p.get('id')}: {given} {family} (DOB {p.get('birthDate', '?')})")
+                  if not patients:
+                      print("  no patient matched, aborting")
+                      return
+                  pid = patients[0]["id"]
+                  print(f"\n=== Using patient UUID: {pid} ===")
+
+                  print("\n=== writer.list_encounters ===")
+                  try:
+                      encounters = await writer.list_encounters(pid)
+                      print(f"  total encounters: {len(encounters)}")
+                  except Exception as e:
+                      print(f"  ERROR: {type(e).__name__}: {e}")
+                      return
+
+                  if not encounters:
+                      print("  no encounters at all — that's the bug. The writer should have created one for the lab upload.")
+                      return
+
+                  print("\n=== Per-encounter detail ===")
+                  for i, enc in enumerate(encounters):
+                      if not isinstance(enc, dict):
+                          print(f"  [{i}] not a dict: {enc!r}")
+                          continue
+                      reason = str(enc.get("reason") or "")
+                      eid = enc.get("eid") or enc.get("id") or enc.get("encounter_id")
+                      date = enc.get("date") or "?"
+                      keys = sorted(list(enc.keys()))[:15]
+                      print(f"  [{i}] eid={eid} date={date}")
+                      print(f"       reason={reason[:140]!r}")
+                      print(f"       keys={keys}")
+                      is_lab = reason.lower().startswith("lab results")
+                      print(f"       matches_lab_filter={is_lab}")
+                      if is_lab and eid is not None:
+                          try:
+                              soap = await writer.get_soap_note(pid, int(eid))
+                          except Exception as e:
+                              print(f"       SOAP fetch error: {type(e).__name__}: {e}")
+                              continue
+                          if not soap:
+                              print(f"       SOAP NOTE MISSING")
+                              continue
+                          obj = str(soap.get("objective") or "")
+                          print(f"       SOAP objective length: {len(obj)} chars")
+                          print(f"       SOAP objective first 400 chars:")
+                          for line in obj[:400].splitlines():
+                              print(f"         | {line}")
+                          parsed = 0
+                          for line in obj.splitlines():
+                              p = _parse_lab_objective_line(line)
+                              if p:
+                                  parsed += 1
+                                  print(f"       PARSED: {p}")
+                          print(f"       total parsed rows: {parsed}")
+              finally:
+                  await fhir.aclose()
+                  await writer.aclose()
+
+          asyncio.run(main())
+          PY
+      env:
+        PATIENT_NAME: ${{ inputs.patient_name }}
