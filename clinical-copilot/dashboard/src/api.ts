@@ -190,37 +190,41 @@ function classicBase(): string {
  * deployments where the identifier shape differs), every link below
  * returns `null` — the cards then disable their out-link button rather
  * than emit a URL that would silently load the wrong chart.
+ *
+ * All URLs route through `interface/main/openpatient.php` instead of
+ * landing on the requested deep-link path directly. openpatient.php:
+ *   - if the user is logged in to classic OpenEMR, sets the session
+ *     pid and redirects to demographics.php — the chart loads with
+ *     the patient already selected;
+ *   - if not logged in, redirects to login.php?patientID=N, which
+ *     puts patientID on the login form as a hidden input;
+ *     main_screen.php (line ~446) honors that on POST to auto-open
+ *     the patient's chart tab post-login.
+ *
+ * Without this hop, the post-login redirect lands on OpenEMR's
+ * generic home and the user has to search for the patient again.
+ *
+ * The dashboard cannot tell whether the user has a classic OpenEMR
+ * session (cross-origin: Co-Pilot at one cloudflared subdomain,
+ * classic OpenEMR at another, no shared cookies). openpatient.php
+ * does the auth check server-side and branches accordingly, which
+ * is the only correct place for that decision to live.
  */
 type ClassicUrl = string | null;
 
-function buildClassicUrl(path: string, numericPid: string | null, extras: Record<string, string> = {}): ClassicUrl {
+function buildClassicUrl(numericPid: string | null): ClassicUrl {
   if (!numericPid) return null;
-  const params = new URLSearchParams({ site: 'default', set_pid: numericPid, ...extras });
-  return `${classicBase()}${path}?${params.toString()}`;
+  const params = new URLSearchParams({ pid: numericPid });
+  return `${classicBase()}/interface/main/openpatient.php?${params.toString()}`;
 }
 
 export const classicLinks = {
-  patientSummary: (numericPid: string | null): ClassicUrl =>
-    buildClassicUrl('/interface/patient_file/summary/demographics.php', numericPid),
-  allergies: (numericPid: string | null): ClassicUrl =>
-    buildClassicUrl('/interface/patient_file/summary/stats_full.php', numericPid, { category: 'allergy' }),
-  problems: (numericPid: string | null): ClassicUrl =>
-    buildClassicUrl('/interface/patient_file/summary/stats_full.php', numericPid, { category: 'medical_problem' }),
-  medications: (numericPid: string | null): ClassicUrl =>
-    buildClassicUrl('/interface/patient_file/summary/stats_full.php', numericPid, { category: 'medication' }),
-  prescriptions: (numericPid: string | null): ClassicUrl =>
-    buildClassicUrl('/interface/patient_file/summary/stats_full.php', numericPid, { category: 'prescription' }),
-  labResults: (numericPid: string | null): ClassicUrl => {
-    if (!numericPid) return null;
-    // orders_results.php uses lowercase `pid`, not `set_pid`.
-    const params = new URLSearchParams({ site: 'default', pid: numericPid });
-    return `${classicBase()}/interface/orders/orders_results.php?${params.toString()}`;
-  },
-  orders: (numericPid: string | null): ClassicUrl => {
-    if (!numericPid) return null;
-    const params = new URLSearchParams({ site: 'default', pid: numericPid });
-    return `${classicBase()}/interface/orders/types.php?${params.toString()}`;
-  },
-  careTeam: (numericPid: string | null): ClassicUrl =>
-    buildClassicUrl('/interface/patient_file/summary/demographics.php', numericPid),
+  patientSummary: (numericPid: string | null): ClassicUrl => buildClassicUrl(numericPid),
+  allergies: (numericPid: string | null): ClassicUrl => buildClassicUrl(numericPid),
+  problems: (numericPid: string | null): ClassicUrl => buildClassicUrl(numericPid),
+  medications: (numericPid: string | null): ClassicUrl => buildClassicUrl(numericPid),
+  prescriptions: (numericPid: string | null): ClassicUrl => buildClassicUrl(numericPid),
+  labResults: (numericPid: string | null): ClassicUrl => buildClassicUrl(numericPid),
+  orders: (numericPid: string | null): ClassicUrl => buildClassicUrl(numericPid),
+  careTeam: (numericPid: string | null): ClassicUrl => buildClassicUrl(numericPid),
 };

@@ -28,6 +28,13 @@ This layout is the legacy login page, a centered box with the logos on top
             <div class="p-5 col-12">
                 <input type="hidden" name="new_login_session_management" value="1">
                 <input type="hidden" name="languageChoice" value="{{ defaultLangID|attr }}">
+                {# Carry patientID through the login round-trip so the
+                   dashboard's "Open in classic" deep-link lands on the
+                   right patient after sign-in. See the matching block
+                   in login_details.html.twig for the full rationale. #}
+                {% if patientID is defined and patientID %}
+                <input type="hidden" name="patientID" value="{{ patientID|attr }}">
+                {% endif %}
 
                 {% if displayTinyLogo %}
                     <div class="mb-5">

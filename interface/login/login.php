@@ -223,8 +223,17 @@ if ($_GET['testing_mode'] ?? 0 == 1) {
     $session->set('testing_mode', 1);
 }
 
+// patientID is propagated through the login form so the user lands on
+// the right patient after sign-in. This is set by openpatient.php when
+// the dashboard's "Open in classic OpenEMR" deep-link routes through
+// us for an unauthenticated user. Cast to int and round-trip empty as
+// the empty string; the template only renders the hidden input when
+// non-empty so a normal /login.php hit isn't affected.
+$loginPatientId = isset($_GET['patientID']) ? (int) $_GET['patientID'] : 0;
+
 $viewArgs = [
     'title' => $openemr_name,
+    'patientID' => $loginPatientId > 0 ? (string) $loginPatientId : '',
     'displayLanguage' => $globalsBag->get("language_menu_login") && (count($languageList) != 1),
     'defaultLangID' => $defaultLanguage['id'],
     'defaultLangName' => $defaultLanguage['language'],

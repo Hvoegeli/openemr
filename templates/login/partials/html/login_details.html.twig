@@ -27,6 +27,16 @@ A partial used to build out the login form.
 <form method="POST" id="login_form" autocomplete="off" action="../main/main_screen.php?auth=login&site={{ siteID|attr_url }}" target="_top" name="login_form">
     <input type="hidden" name="new_login_session_management" value="1">
     <input type="hidden" name="languageChoice" value="{{ defaultLangID|attr }}">
+    {# When the dashboard's "Open in classic OpenEMR" deep-link routes
+       through openpatient.php and the user is unauthenticated, we
+       redirect here with ?patientID=<numeric>. Carrying it as a hidden
+       form input means the next POST to main_screen.php will trigger
+       its existing patientID branch (line ~446) that auto-opens that
+       patient's chart tab — so the user lands on the right patient
+       after login instead of OpenEMR's generic home. #}
+    {% if patientID is defined and patientID %}
+    <input type="hidden" name="patientID" value="{{ patientID|attr }}">
+    {% endif %}
     {% include "login/partials/input/username.html.twig" %}
     {% include "login/partials/input/password.html.twig" %}
     {{ divApp }}
