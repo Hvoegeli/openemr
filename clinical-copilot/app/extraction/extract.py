@@ -114,6 +114,7 @@ async def attach_and_extract(
     skip_extraction: bool = False,
     skip_persistence: bool = False,
     practitioners_store: Any | None = None,
+    lab_results_store: Any | None = None,
 ) -> AttachAndExtractResult:
     """Persist a clinical document to OpenEMR + extract its structured
     contents via Claude vision.
@@ -216,6 +217,7 @@ async def attach_and_extract(
             extracted=extracted,
             source_document_id=source_document_id,
             practitioners_store=practitioners_store,
+            lab_results_store=lab_results_store,
         )
         return AttachAndExtractResult(
             extracted=extracted, write_result=write_result,
@@ -440,6 +442,7 @@ async def persist_extracted_facts(
     extracted: ExtractedDocument,
     source_document_id: str,
     practitioners_store: Any | None = None,
+    lab_results_store: Any | None = None,
 ) -> dict[str, Any]:
     """Push the structured Phase-2 output into OpenEMR's native tables.
 
@@ -476,10 +479,10 @@ async def persist_extracted_facts(
 
     if isinstance(extracted, LabReport):
         # All lab results -> one encounter + SOAP note.
+        results_payload = [
+            r.model_dump(mode="json") for r in extracted.results
+        ]
         try:
-            results_payload = [
-                r.model_dump(mode="json") for r in extracted.results
-            ]
             result = await writer.write_lab_encounter_with_results(
                 patient_uuid=patient_uuid,
                 results=results_payload,
@@ -498,6 +501,31 @@ async def persist_extracted_facts(
         except (OpenEMRWriteError, Exception) as e:  # noqa: BLE001
             log.exception("persist: lab encounter write failed")
             items.append({"kind": "lab_encounter", "ok": False, "error": str(e)[:300]})
+
+        # Mirror lab values into the Co-Pilot-side store so the Modern
+        # Dashboard's Lab Results tab can query them. OpenEMR's REST API
+        # has no `procedure_result` write endpoint and no FHIR Observation
+        # write endpoint; the SOAP-note objective text written above is
+        # human-readable but not directly queryable. Best-effort write —
+        # failures are surfaced in the persistence summary but do not
+        # abort the lab-encounter write.
+        if lab_results_store is not None and results_payload:
+            try:
+                written = lab_results_store.upsert_batch(
+                    patient_uuid=patient_uuid,
+                    source_doc_id=source_document_id,
+                    rows=results_payload,
+                )
+                items.append({
+                    "kind": "lab_results_store", "ok": True,
+                    "result_count": written,
+                })
+            except Exception as e:  # noqa: BLE001
+                log.exception("persist: lab_results store write failed")
+                items.append({
+                    "kind": "lab_results_store", "ok": False,
+                    "error": str(e)[:300],
+                })
 
         return {
             "doc_type": "lab_pdf",

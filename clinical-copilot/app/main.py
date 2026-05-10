@@ -71,6 +71,7 @@ from app.auth_db import AuthStore  # noqa: E402
 from app.document_fingerprints_db import DocumentFingerprintStore  # noqa: E402
 from app.extracted_sources_db import ExtractedSourcesStore  # noqa: E402
 from app.extracted_practitioners_db import ExtractedPractitionersStore  # noqa: E402
+from app.extracted_lab_results_db import ExtractedLabResultsStore  # noqa: E402
 from app.hidden_docs_db import HiddenDocsStore  # noqa: E402
 import hashlib  # noqa: E402
 
@@ -313,6 +314,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # for demo patients).
     app.state.extracted_practitioners = ExtractedPractitionersStore(auth_db_path)
     log.info("extracted-practitioners store: sqlite at %s", auth_db_path)
+    # Lab values derived from lab-PDF / fax-packet extractions. Same SQLite
+    # file, separate `extracted_lab_results` table. Powers the Modern
+    # Dashboard's Lab Results tab — OpenEMR's REST API has no
+    # `procedure_result` write endpoint and no FHIR Observation write
+    # endpoint, so the writer persists labs as SOAP-note objective text;
+    # this store is the structured mirror that makes them queryable.
+    app.state.extracted_lab_results = ExtractedLabResultsStore(auth_db_path)
+    log.info("extracted-lab-results store: sqlite at %s", auth_db_path)
     # Content-fingerprint index for dedup Layer 2 — same SQLite file,
     # separate `document_fingerprints` table.
     app.state.fingerprints = DocumentFingerprintStore(auth_db_path)
@@ -352,6 +361,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.hidden_docs.close()
         app.state.extracted_sources.close()
         app.state.extracted_practitioners.close()
+        app.state.extracted_lab_results.close()
         app.state.fingerprints.close()
         app.state.active_patients.close()
 
@@ -1095,43 +1105,84 @@ async def dashboard_vitals(
 async def dashboard_lab_results(
     pid: str, request: Request, username: str = Depends(current_user),
 ) -> dict:
-    """Lab results — `Observation?category=laboratory`.
+    """Lab results, merged from two sources.
 
-    Returns one entry per Observation, ordered most-recent first.
-    The dashboard's Lab Results tab and the Co-Pilot patient card's
-    Lab Results section both consume this shape.
+    1. **FHIR Observations** (`category=laboratory`) — empty for the
+       demo cohort because OpenEMR's REST API exposes no
+       `procedure_result` write endpoint and no FHIR Observation write
+       endpoint, so the writer can't put extracted labs there. Kept
+       in the merge so any externally-imported Observations still
+       surface. Wrapped in try/except: a fetch failure shouldn't
+       break the tab.
+    2. **Extracted lab results** — the Co-Pilot's
+       `extracted_lab_results` SQLite table, written on every lab-PDF
+       upload by `persist_extracted_facts`. This is the data path
+       that actually populates the demo. See
+       `app/extracted_lab_results_db.py` for the schema.
 
-    Today most uploaded lab PDFs persist as a SOAP-note `objective`
-    text line (see writer.write_lab_encounter_with_results) — they
-    do NOT yet write FHIR Observation rows, so this endpoint will
-    return empty even after a successful lab upload. Wiring up the
-    Observation-write path is on the TODO list.
+    Returns one entry per result, ordered most-recent first.
     """
     from app.fhir.adapter import _coded_display, _narrative_text  # noqa: PLC0415
     await _dashboard_assert_patient_in_panel(request, username, pid)
-    rows = await request.app.state.fhir.search(
-        "Observation", {"patient": pid, "category": "laboratory", "_count": 200},
-    )
     items: list[dict] = []
-    for o in rows:
-        codings = ((o.get("code") or {}).get("coding") or [])
-        primary = next(
-            (c for c in codings if (c or {}).get("system") == "http://loinc.org"),
-            codings[0] if codings else {},
+    try:
+        rows = await request.app.state.fhir.search(
+            "Observation", {"patient": pid, "category": "laboratory", "_count": 200},
         )
-        vq = o.get("valueQuantity") or {}
-        items.append({
-            "id": o.get("id") or "",
-            "loinc": primary.get("code"),
-            "test_name": primary.get("display") or _coded_display(o.get("code") or {}) or _narrative_text(o) or "(unspecified)",
-            "value": vq.get("value"),
-            "value_string": o.get("valueString"),
-            "unit": vq.get("unit"),
-            "reference_range_text": ((o.get("referenceRange") or [{}])[0].get("text")),
-            "abnormal_flag": _abnormal_flag_from_observation(o),
-            "effective": o.get("effectiveDateTime") or o.get("issued"),
-            "status": o.get("status"),
-        })
+        for o in rows:
+            codings = ((o.get("code") or {}).get("coding") or [])
+            primary = next(
+                (c for c in codings if (c or {}).get("system") == "http://loinc.org"),
+                codings[0] if codings else {},
+            )
+            vq = o.get("valueQuantity") or {}
+            items.append({
+                "id": o.get("id") or "",
+                "loinc": primary.get("code"),
+                "test_name": primary.get("display") or _coded_display(o.get("code") or {}) or _narrative_text(o) or "(unspecified)",
+                "value": vq.get("value"),
+                "value_string": o.get("valueString"),
+                "unit": vq.get("unit"),
+                "reference_range_text": ((o.get("referenceRange") or [{}])[0].get("text")),
+                "abnormal_flag": _abnormal_flag_from_observation(o),
+                "effective": o.get("effectiveDateTime") or o.get("issued"),
+                "status": o.get("status"),
+                "source": "fhir",
+            })
+    except Exception as e:  # noqa: BLE001
+        log.warning("dashboard_lab_results: FHIR Observation fetch failed for pid=%s: %s", pid, e)
+
+    lab_store = getattr(request.app.state, "extracted_lab_results", None)
+    if lab_store is not None:
+        try:
+            for r in lab_store.list_for_patient(pid):
+                # `value` was stringified on write to accommodate both
+                # numeric ('7.4') and qualitative ('positive') labs;
+                # try to recover a number for the card's right-aligned
+                # value column, else fall back to the string form.
+                num: float | None = None
+                if r.value is not None:
+                    try:
+                        num = float(r.value)
+                    except (ValueError, TypeError):
+                        num = None
+                items.append({
+                    "id": f"el:{r.source_doc_id}:{r.row_index}",
+                    "loinc": None,
+                    "test_name": r.test_name,
+                    "value": num,
+                    "value_string": r.value if num is None else None,
+                    "unit": r.unit,
+                    "reference_range_text": r.reference_range,
+                    "abnormal_flag": r.abnormal_flag if r.abnormal_flag and r.abnormal_flag != "N" else None,
+                    "effective": r.collection_date,
+                    "status": "final",
+                    "source": "extracted",
+                    "source_doc_id": r.source_doc_id,
+                })
+        except Exception as e:  # noqa: BLE001
+            log.warning("dashboard_lab_results: lab_results store read failed for pid=%s: %s", pid, e)
+
     items.sort(key=lambda r: r.get("effective") or "", reverse=True)
     return {"items": items}
 
@@ -2602,6 +2653,7 @@ async def api_upload(
                 skip_extraction=True,
                 skip_persistence=True,
                 practitioners_store=app.state.extracted_practitioners,
+                lab_results_store=app.state.extracted_lab_results,
             )
     except ValueError as e:
         # Render-side errors (unsupported MIME, empty file inside renderer)
@@ -2779,6 +2831,7 @@ async def api_upload(
             extracted=result.extracted,
             source_document_id=new_ref,
             practitioners_store=app.state.extracted_practitioners,
+            lab_results_store=app.state.extracted_lab_results,
         )
     result.persistence = persistence
     if fingerprint:
@@ -3268,6 +3321,7 @@ async def api_document_resolve_content_match(
         extracted=extracted,
         source_document_id=f"DocumentReference/{new_doc_id}",
         practitioners_store=app.state.extracted_practitioners,
+        lab_results_store=app.state.extracted_lab_results,
     )
 
     fingerprint = compute_fingerprint(extracted)
