@@ -444,8 +444,25 @@ if ($is_expired) {
         "label" => xl("Password Reset"),
     ]);
 } elseif (!empty($_POST['patientID'])) {
-    // Patient is open, so add this to the list of tabs, at the end
+    // Patient is open, so add this to the list of tabs, at the end.
+    //
+    // Two non-obvious things matter here:
+    //
+    //  - main.php's tab-render loop reads `$tab['option_id']` and
+    //    `$tab['title']` (the schema getOptionsByListName returns).
+    //    The upstream code shipped this branch with `id`/`label`
+    //    keys, which silently produce an empty tab. Use the schema
+    //    keys so the new "Dashboard" tab actually renders.
+    //  - We also call PatientSessionUtil::setPid here so the session
+    //    knows which patient is open from the moment the user lands
+    //    on main.php — without it, the OpenEMR top-bar "Current
+    //    Patient" button (and any other code that gates on
+    //    `$session->get('pid')`) stays dark until the user manually
+    //    navigates to a patient page.
     $patientID = (int) $_POST['patientID'];
+    if ($patientID > 0) {
+        \OpenEMR\Common\Session\PatientSessionUtil::setPid($patientID);
+    }
     $_notes = "../patient_file/summary/demographics.php?set_pid=" . attr_url($patientID);
     if (!empty($_POST['encounterID'])) {
         $encounterID = (int) $_POST['encounterID'];
@@ -453,8 +470,8 @@ if ($is_expired) {
     }
     $_tabs[] = [
         'notes' => $_notes,
-        'id' => "pat",
-        'label' => xl("Dashboard"),
+        'option_id' => "pat",
+        'title' => xl("Dashboard"),
     ];
 } elseif (isset($_GET['mode']) && $_GET['mode'] == "loadcalendar") {
     // Load the calendar, at the end

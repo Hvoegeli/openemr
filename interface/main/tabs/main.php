@@ -521,35 +521,38 @@ $twig = (new TwigContainer(null, OEGlobalsBag::getInstance()->getKernel()))->get
             $copilotDashboardUrl = is_string($copilotDashboardEnv) ? trim($copilotDashboardEnv) : '';
             if ($copilotDashboardUrl !== '') {
                 $copilotDashboardUrl = rtrim($copilotDashboardUrl, '/');
-                $copilotPatientUrl = '';
+                // Resolve the active patient's FHIR UUID (if any) so the
+                // dashboard link can carry ?pid=<uuid> straight into the
+                // patient view. Co-Pilot's home (/) handles the no-patient
+                // case with its own picker, so the bare home link is the
+                // safe default when no patient is open.
                 $sessionPidValue = $session->get('pid');
                 $sessionPid = is_numeric($sessionPidValue) ? (int) $sessionPidValue : 0;
+                $patientUuid = '';
                 if ($sessionPid > 0) {
                     $row = QueryUtils::querySingleRow("SELECT uuid FROM patient_data WHERE pid = ?", [$sessionPid]);
                     $rawUuid = (is_array($row) && isset($row['uuid'])) ? $row['uuid'] : null;
                     if (is_string($rawUuid) && $rawUuid !== '') {
                         $patientUuid = \OpenEMR\Common\Uuid\UuidRegistry::uuidToString($rawUuid);
-                        if ($patientUuid !== '') {
-                            $copilotPatientUrl = $copilotDashboardUrl . '/dashboard?pid=' . urlencode($patientUuid);
-                        }
                     }
                 }
+                $dashboardHref = $copilotDashboardUrl . '/dashboard'
+                    . ($patientUuid !== '' ? ('?pid=' . urlencode($patientUuid)) : '');
+                $copilotHomeHref = $copilotDashboardUrl . '/';
                 ?>
                 <div class="form-inline ml-2 my-1">
                     <a class="btn btn-sm btn-info"
-                       href="<?php echo attr($copilotDashboardUrl); ?>/dashboard"
+                       href="<?php echo attr($dashboardHref); ?>"
                        target="_blank" rel="noopener"
-                       title="<?php echo xla('Open the Modern Dashboard (Co-Pilot)'); ?>">
+                       title="<?php echo $patientUuid !== '' ? xla('Open the active patient on the Modern Dashboard') : xla('Open the Modern Dashboard'); ?>">
                         <i class="fa fa-th-large mr-1"></i><?php echo xlt('Modern Dashboard'); ?>
                     </a>
-                    <?php if ($copilotPatientUrl !== '') : ?>
-                        <a class="btn btn-sm btn-outline-info ml-1"
-                           href="<?php echo attr($copilotPatientUrl); ?>"
-                           target="_blank" rel="noopener"
-                           title="<?php echo xla('Open the active patient on the Modern Dashboard'); ?>">
-                            <i class="fa fa-user-md mr-1"></i><?php echo xlt('Current Patient'); ?>
-                        </a>
-                    <?php endif; ?>
+                    <a class="btn btn-sm btn-outline-info ml-1"
+                       href="<?php echo attr($copilotHomeHref); ?>"
+                       target="_blank" rel="noopener"
+                       title="<?php echo xla('Open the Co-Pilot chat surface'); ?>">
+                        <i class="fa fa-comments mr-1"></i><?php echo xlt('Co-Pilot'); ?>
+                    </a>
                 </div>
                 <?php
             }
