@@ -798,6 +798,70 @@ class OpenEMRWriter:
             return f"[copilot-source: {ref}; bbox={bbox_str}]" if bbox_str else f"[copilot-source: {ref}]"
         return f"[copilot-source: {ref}]"
 
+    async def _get_standard_api(
+        self, *, path: str, label: str,
+    ) -> dict | list:
+        """GET from the standard REST API and return the parsed JSON
+        body (typically a `{data: [...]}` envelope or a flat dict).
+        Used by the lab-results backfill path that reads back the
+        SOAP-note objective text the writer wrote on a prior upload —
+        OpenEMR's FHIR has no equivalent surface for SOAP notes.
+        """
+        token = await self._ensure_token()
+        r = await self._http.get(
+            f"{self._api_base}{path}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            },
+        )
+        if r.status_code >= 400:
+            raise OpenEMRWriteError(
+                f"{label} GET failed ({r.status_code}): {r.text[:300]}"
+            )
+        try:
+            payload = r.json()
+        except ValueError as exc:
+            raise OpenEMRWriteError(
+                f"{label} GET returned non-JSON body: {r.text[:300]}"
+            ) from exc
+        # Standard API wraps lists/dicts under `data`. Some endpoints
+        # return the bare value. Caller-friendly: unwrap if present.
+        if isinstance(payload, dict) and "data" in payload:
+            return payload["data"]
+        return payload
+
+    async def list_encounters(self, patient_uuid: str) -> list[dict]:
+        """List all encounters for the patient via the standard REST
+        API. Returns a list of flat encounter dicts (eid, date, reason,
+        ...). Used by the lab-results backfill to find lab encounters
+        that the writer created on prior uploads."""
+        result = await self._get_standard_api(
+            path=f"/patient/{patient_uuid}/encounter",
+            label="encounter list",
+        )
+        if isinstance(result, list):
+            return [r for r in result if isinstance(r, dict)]
+        return []
+
+    async def get_soap_note(self, patient_uuid: str, encounter_id: int) -> dict | None:
+        """Fetch the SOAP note attached to one encounter. Returns None
+        when the encounter has no SOAP note. Used by the lab-results
+        backfill to read the structured manifest the writer stuffed
+        into the SOAP note's `subjective` field."""
+        try:
+            result = await self._get_standard_api(
+                path=f"/patient/{patient_uuid}/encounter/{encounter_id}/soap_note",
+                label=f"soap_note encounter={encounter_id}",
+            )
+        except OpenEMRWriteError:
+            return None
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, list) and result and isinstance(result[0], dict):
+            return result[0]
+        return None
+
     async def _post_standard_api(
         self, *, path: str, body: dict, label: str,
     ) -> dict:

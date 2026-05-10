@@ -3575,7 +3575,18 @@
         let body;
         try { body = await resp.json(); } catch { body = { detail: 'non-JSON response' }; }
         if (!resp.ok) {
-          setStatus('Upload failed (HTTP ' + resp.status + '): ' + (body.detail || ''), 'err');
+          // The 409 / 400 / 502 paths return `body.detail` as either a
+          // string (most errors) or a structured dict like
+          // `{code: 'duplicate_file', message: '...'}`. Stringify
+          // generic objects so we never render '[object Object]'.
+          let msg = '';
+          const d = body && body.detail;
+          if (typeof d === 'string') {
+            msg = d;
+          } else if (d && typeof d === 'object') {
+            msg = d.message || JSON.stringify(d);
+          }
+          setStatus('Upload failed (HTTP ' + resp.status + '): ' + (msg || 'unknown error'), 'err');
           $submit.disabled = false;
           return;
         }

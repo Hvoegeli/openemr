@@ -1154,8 +1154,32 @@ async def dashboard_lab_results(
 
     lab_store = getattr(request.app.state, "extracted_lab_results", None)
     if lab_store is not None:
+        # Auto-backfill from SOAP notes when the store is empty for this
+        # patient. Lab uploads predating the store live only as
+        # SOAP-note objective text — without this, the tab stays empty
+        # for patients whose lab PDFs were uploaded before today's fix.
+        # Guarded by a per-process set so we attempt the backfill at
+        # most once per patient per uvicorn lifetime; subsequent reads
+        # use the populated store directly.
         try:
-            for r in lab_store.list_for_patient(pid):
+            initial_rows = lab_store.list_for_patient(pid)
+        except Exception as e:  # noqa: BLE001
+            log.warning("dashboard_lab_results: lab_results store read failed for pid=%s: %s", pid, e)
+            initial_rows = []
+        if not initial_rows:
+            tried: set[str] = getattr(request.app.state, "lab_backfill_tried", set())
+            if pid not in tried:
+                tried.add(pid)
+                request.app.state.lab_backfill_tried = tried
+                try:
+                    await _backfill_lab_results_from_soap(
+                        patient_uuid=pid, request=request,
+                    )
+                    initial_rows = lab_store.list_for_patient(pid)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("dashboard_lab_results: backfill failed for pid=%s: %s", pid, e)
+        try:
+            for r in initial_rows:
                 # `value` was stringified on write to accommodate both
                 # numeric ('7.4') and qualitative ('positive') labs;
                 # try to recover a number for the card's right-aligned
@@ -1185,6 +1209,177 @@ async def dashboard_lab_results(
 
     items.sort(key=lambda r: r.get("effective") or "", reverse=True)
     return {"items": items}
+
+
+def _parse_lab_objective_line(line: str) -> dict | None:
+    """Parse one SOAP-note objective line back into a structured dict.
+
+    Inverse of the rendering loop in
+    ``writer.write_lab_encounter_with_results``. Lines look like:
+
+        HbA1c: 7.4 % (ref 4.0-5.6 %, abnormal flag H)
+        LDL: 161 mg/dL (ref <100, abnormal flag H)
+        Total Cholesterol: 232 mg/dL
+        Glucose, qualitative: positive (ref negative)
+        HDL: 38 mg/dL (ref >=40 (female), abnormal flag L)
+
+    String-ops parsing rather than regex — the extras block can carry
+    nested parens (`>=40 (female)`) which a flat `[^)]+` regex would
+    truncate at the first inner `)`. Returns None when the line
+    doesn't have the expected `name: value …` shape (free-text
+    comments, blank lines, the writer's "(no extracted results)"
+    placeholder).
+    """
+    line = (line or "").strip()
+    if not line or ":" not in line:
+        return None
+    name, rest = line.split(":", 1)
+    name = name.strip()
+    rest = rest.strip()
+    if not name or not rest:
+        return None
+
+    # Pull off the trailing extras block — between the FIRST `(` and the
+    # LAST `)`, so nested parens inside the extras are preserved.
+    extras_str = ""
+    if rest.endswith(")") and "(" in rest:
+        open_pos = rest.find("(")
+        extras_str = rest[open_pos + 1:-1].strip()
+        rest = rest[:open_pos].strip()
+
+    # Now `rest` is "value [unit]" — first token is value, remainder
+    # joined back together is the unit (handles compound units like
+    # "x10^9/L"). A bare value with no unit is fine.
+    parts = rest.split(None, 1)
+    if not parts:
+        return None
+    value = parts[0]
+    unit = parts[1].strip() if len(parts) > 1 else None
+    if unit == "":
+        unit = None
+
+    ref = None
+    flag = None
+    for chunk in [c.strip() for c in extras_str.split(",") if c.strip()]:
+        low = chunk.lower()
+        if low.startswith("ref "):
+            ref = chunk[4:].strip()
+        elif low.startswith("abnormal flag "):
+            flag = chunk[len("abnormal flag "):].strip() or None
+
+    # Filter out the writer's empty-results sentinel.
+    if name == "(no extracted results)":
+        return None
+
+    return {
+        "test_name": name,
+        "value": value,
+        "unit": unit,
+        "reference_range": ref,
+        "abnormal_flag": flag,
+    }
+
+
+async def _backfill_lab_results_from_soap(
+    *, patient_uuid: str, request: Request,
+) -> int:
+    """Populate ``extracted_lab_results`` for a patient from existing
+    SOAP-note objective text written by prior lab-PDF uploads.
+
+    OpenEMR's REST API has no Observation write surface, so the writer
+    persists labs as SOAP-note objective text and a structured
+    bbox-manifest in the subjective field. Earlier uploads (before the
+    SQLite store existed) populated the SOAP notes but not the store,
+    so the dashboard's Lab Results tab would still be empty for those
+    patients.
+
+    This function reads the encounters back via the standard REST API,
+    pulls each lab encounter's SOAP note, parses the objective text
+    into structured rows, and writes them to the store with the
+    encounter's date as the collection_date (the manifest doesn't carry
+    one). Idempotent: re-running for the same patient will overwrite
+    any existing rows for the same source DocumentReference.
+
+    Returns the number of result rows written. Best-effort: any
+    error in reading encounters / SOAP notes logs and skips that
+    encounter rather than aborting the whole backfill.
+    """
+    store = getattr(request.app.state, "extracted_lab_results", None)
+    writer = getattr(request.app.state, "openemr_writer", None)
+    if store is None or writer is None:
+        return 0
+    try:
+        encounters = await writer.list_encounters(patient_uuid)
+    except Exception as e:  # noqa: BLE001
+        log.warning("backfill_lab_results: list_encounters failed for %s: %s", patient_uuid, e)
+        return 0
+
+    written_total = 0
+    for enc in encounters:
+        if not isinstance(enc, dict):
+            continue
+        # The writer sets reason="Lab results from uploaded document <ref>"
+        # on every lab encounter it creates. Filter on that prefix so we
+        # don't accidentally parse arbitrary office-visit notes as lab
+        # lines.
+        reason = str(enc.get("reason") or "")
+        if not reason.lower().startswith("lab results"):
+            continue
+        eid_raw = enc.get("eid") or enc.get("id") or enc.get("encounter_id")
+        try:
+            eid = int(eid_raw) if eid_raw is not None else None
+        except (TypeError, ValueError):
+            eid = None
+        if eid is None:
+            continue
+        # Recover the source DocumentReference id from the reason text
+        # so the store row keys back to the original PDF (matches what
+        # a fresh upload would produce). Fall back to a synthetic id
+        # derived from the encounter id if the reason text is missing
+        # the back-reference.
+        source_doc_id = f"backfill-encounter-{eid}"
+        # "Lab results from uploaded document DocumentReference/<uuid>"
+        # — pull the trailing token, strip the prefix.
+        tail = reason.split("uploaded document", 1)[1].strip() if "uploaded document" in reason else ""
+        if tail and tail not in ("(unknown)",):
+            source_doc_id = tail
+        try:
+            soap = await writer.get_soap_note(patient_uuid, eid)
+        except Exception as e:  # noqa: BLE001
+            log.warning("backfill_lab_results: get_soap_note failed for %s/%s: %s", patient_uuid, eid, e)
+            continue
+        if not soap:
+            continue
+        objective_text = str(soap.get("objective") or "")
+        if not objective_text.strip():
+            continue
+        rows: list[dict] = []
+        # Encounter date carries the lab draw date (writer sets it from
+        # the first result's collection_date). Backfilled rows inherit it.
+        enc_date = str(enc.get("date") or "")[:10] or None
+        for raw_line in objective_text.splitlines():
+            parsed = _parse_lab_objective_line(raw_line)
+            if not parsed:
+                continue
+            parsed["collection_date"] = enc_date
+            rows.append(parsed)
+        if not rows:
+            continue
+        try:
+            written = store.upsert_batch(
+                patient_uuid=patient_uuid,
+                source_doc_id=source_doc_id,
+                rows=rows,
+            )
+            written_total += written
+        except Exception as e:  # noqa: BLE001
+            log.warning("backfill_lab_results: store write failed for %s: %s", patient_uuid, e)
+    if written_total:
+        log.info(
+            "backfill_lab_results: wrote %d rows for patient=%s from %d encounters",
+            written_total, patient_uuid, len(encounters),
+        )
+    return written_total
 
 
 def _abnormal_flag_from_observation(o: dict) -> str | None:
