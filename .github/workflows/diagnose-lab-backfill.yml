@@ -32,15 +32,33 @@ jobs:
         envs: PATIENT_NAME
         script: |
           set -euo pipefail
+
+          echo "===== MySQL: forms + form_soap for Chen's encounters ====="
+          # Find the openemr container, then query MySQL directly.
+          # Look up Chen's pid from patient_data, then list her encounters
+          # and any associated form_soap rows.
+          OPENEMR_CONTAINER=$(docker ps --format '{{.Names}}' | grep -i openemr | head -1 || true)
+          MYSQL_CONTAINER=$(docker ps --format '{{.Names}}' | grep -i mysql | head -1 || true)
+          echo "OPENEMR_CONTAINER=$OPENEMR_CONTAINER"
+          echo "MYSQL_CONTAINER=$MYSQL_CONTAINER"
+          if [ -n "$MYSQL_CONTAINER" ]; then
+            docker exec "$MYSQL_CONTAINER" mysql -uopenemr -popenemr openemr -e "
+              SELECT pid, fname, lname, DOB FROM patient_data WHERE lname = 'Chen' LIMIT 5;
+              SELECT encounter, pid, date, reason FROM form_encounter WHERE pid IN (SELECT pid FROM patient_data WHERE lname = 'Chen') ORDER BY date DESC LIMIT 10;
+              SELECT id, encounter, formdir, form_name, deleted FROM forms WHERE pid IN (SELECT pid FROM patient_data WHERE lname = 'Chen') ORDER BY date DESC LIMIT 30;
+              SELECT fs.id, fs.encounter, fs.subjective, LEFT(fs.objective, 500) AS objective_preview FROM form_soap fs JOIN forms f ON f.form_id = fs.id AND f.formdir = 'soap' WHERE fs.encounter IN (SELECT encounter FROM form_encounter WHERE pid IN (SELECT pid FROM patient_data WHERE lname = 'Chen')) LIMIT 10;
+              -- Direct lookup: any form_soap rows at all on the system?
+              SELECT COUNT(*) AS total_soap_rows FROM form_soap;
+              SELECT id, encounter, LEFT(objective, 300) AS objective_preview FROM form_soap ORDER BY id DESC LIMIT 5;
+            " 2>&1 || echo "MySQL query failed"
+          fi
+
+          echo ""
+          echo "===== Python diagnostic ====="
           cd /root/openemr/clinical-copilot
-          # appleboy/ssh-action runs a non-interactive shell, so PATH
-          # doesn't include the user's local installs. Locate uv from
-          # its known install paths.
           export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
           if ! command -v uv >/dev/null 2>&1; then
             echo "uv not found on PATH=$PATH"
-            ls -la /root/.local/bin/ /root/.cargo/bin/ 2>&1 | head -20
-            command -v python python3 || true
             exit 1
           fi
           PYTHONPATH=. uv run python - <<'PY'
@@ -110,7 +128,7 @@ jobs:
                               for path in [
                                   f"/patient/{num_pid}/encounter/{eid}/soap_note",
                                   f"/patient/{pid}/encounter/{eid}/soap_note",
-                                  f"/patient/{num_pid}/encounter/{eid}/note",
+                                  f"/patient/{num_pid}/encounter/{eid}",
                               ]:
                                   url = f"{writer._api_base}{path}"
                                   r = await writer._http.get(
