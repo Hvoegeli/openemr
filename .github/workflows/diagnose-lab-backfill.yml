@@ -33,6 +33,16 @@ jobs:
         script: |
           set -euo pipefail
           cd /root/openemr/clinical-copilot
+          # appleboy/ssh-action runs a non-interactive shell, so PATH
+          # doesn't include the user's local installs. Locate uv from
+          # its known install paths.
+          export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+          if ! command -v uv >/dev/null 2>&1; then
+            echo "uv not found on PATH=$PATH"
+            ls -la /root/.local/bin/ /root/.cargo/bin/ 2>&1 | head -20
+            command -v python python3 || true
+            exit 1
+          fi
           PYTHONPATH=. uv run python - <<'PY'
           import asyncio, json, os, sys, httpx
           from app.fhir.client import FhirClient
