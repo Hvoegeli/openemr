@@ -45,9 +45,15 @@ jobs:
           fi
           PYTHONPATH=. uv run python - <<'PY'
           import asyncio, json, os, sys, httpx
+          # Force a wider SCOPE on the writer for this probe so we can
+          # see if the SOAP-note GET returns 401 because of a missing
+          # SMART scope vs. an OpenEMR ACL fail.
+          import app.fhir.writer as _w_mod
+          _w_mod._SCOPE = _w_mod._SCOPE + " user/soap_note.cruds"
           from app.fhir.client import FhirClient
           from app.fhir.writer import OpenEMRWriter
           from app.main import _parse_lab_objective_line
+          print(f"=== probe SCOPE: {_w_mod._SCOPE!r}")
 
           PATIENT_NAME = os.environ.get("PATIENT_NAME") or "Chen"
 
