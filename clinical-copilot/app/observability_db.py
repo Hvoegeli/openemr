@@ -55,6 +55,7 @@ class SqliteTraceStore:
             cost_usd REAL,
             validator_attempts INTEGER,
             validator_failed INTEGER,
+            route_count INTEGER NOT NULL DEFAULT 0,
             error TEXT,
             tool_events TEXT,
             llm_events TEXT
@@ -62,6 +63,17 @@ class SqliteTraceStore:
         CREATE INDEX IF NOT EXISTS idx_traces_started ON request_traces(started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_traces_username ON request_traces(username, started_at DESC);
     """
+
+    # Idempotent column-add migrations for DB files created before a column
+    # existed. SQLite has no `ADD COLUMN IF NOT EXISTS`, so we read
+    # `PRAGMA table_info` first and only `ALTER TABLE` for the gaps. Each
+    # entry is `(column_name, column_definition)`; the definition must carry
+    # a default so existing rows read back a sane value (old rows → 0 here).
+    # This runs on every open — the equivalent of a startup migration step,
+    # consistent with this project's "one file, migrate on open" stores.
+    _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+        ("route_count", "INTEGER NOT NULL DEFAULT 0"),
+    )
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -72,8 +84,23 @@ class SqliteTraceStore:
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(self.SCHEMA)
+        self._migrate_columns()
         self._conn.commit()
         log.info("trace store opened at %s", path)
+
+    def _migrate_columns(self) -> None:
+        """Add any columns missing from a pre-existing `request_traces` table."""
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(request_traces)")
+        }
+        for name, definition in self._COLUMN_MIGRATIONS:
+            if name in existing:
+                continue
+            self._conn.execute(
+                f"ALTER TABLE request_traces ADD COLUMN {name} {definition}"
+            )
+            log.info("migrated request_traces: added column %s", name)
 
     def add(self, t: RequestTrace) -> None:
         usage = t.total_usage
@@ -84,16 +111,17 @@ class SqliteTraceStore:
                     request_id, session_id, username, user_msg, model,
                     started_at, finished_at, duration_ms,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                    cost_usd, validator_attempts, validator_failed, error,
+                    cost_usd, validator_attempts, validator_failed, route_count, error,
                     tool_events, llm_events
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     t.request_id, t.session_id, t.username, t.user_msg, t.model,
                     t.started_at, t.finished_at, t.duration_ms,
                     usage.input_tokens, usage.output_tokens,
                     usage.cache_read_tokens, usage.cache_creation_tokens,
-                    t.cost_usd, t.validator_attempts, int(t.validator_failed), t.error,
+                    t.cost_usd, t.validator_attempts, int(t.validator_failed),
+                    t.route_count, t.error,
                     json.dumps([asdict(e) for e in t.tool_events]),
                     json.dumps([asdict(e) for e in t.llm_events]),
                 ),
@@ -153,6 +181,7 @@ class SqliteTraceStore:
             cost_usd=row["cost_usd"] or 0.0,
             validator_attempts=row["validator_attempts"] or 0,
             validator_failed=bool(row["validator_failed"]),
+            route_count=row["route_count"] or 0,
             error=row["error"],
         )
 

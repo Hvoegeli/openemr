@@ -128,6 +128,13 @@ class RequestTrace:
     cost_usd: float = 0.0
     validator_attempts: int = 0
     validator_failed: bool = False
+    # Supervisor routing-hop count for the turn — the same counter that
+    # `MAX_SUPERVISOR_ROUTES` caps. Lives on `AgentState["route_count"]`
+    # during the turn; copied here at request exit so `/api/traces`
+    # exposes it for downstream red-team verdicting (tool-misuse via
+    # excessive routing, DoS via loops). 0 on the short-circuit paths
+    # that never invoke the graph.
+    route_count: int = 0
     error: str | None = None
 
     def finalize(self) -> None:

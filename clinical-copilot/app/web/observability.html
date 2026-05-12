@@ -97,10 +97,11 @@
           <th class="num">Tokens (in / out)</th>
           <th class="num">Cost (USD)</th>
           <th class="num">Validator</th>
+          <th class="num">Hops</th>
         </tr>
       </thead>
       <tbody id="rows">
-        <tr><td colspan="8" class="empty">Loading…</td></tr>
+        <tr><td colspan="9" class="empty">Loading…</td></tr>
       </tbody>
     </table>
     <p class="note">Bounded ring buffer (last 200 requests, in-memory). Refreshes every 5s.</p>
@@ -127,7 +128,7 @@
       const tb = document.getElementById("rows");
       const sum = document.getElementById("summary");
       if (!items.length) {
-        tb.innerHTML = '<tr><td colspan="8" class="empty">No traces yet — send a chat turn.</td></tr>';
+        tb.innerHTML = '<tr><td colspan="9" class="empty">No traces yet — send a chat turn.</td></tr>';
         sum.innerHTML = "";
         return;
       }
@@ -158,6 +159,7 @@
           <td class="num">${(t.total_usage?.input_tokens || 0).toLocaleString()} / ${(t.total_usage?.output_tokens || 0).toLocaleString()}</td>
           <td class="num">${fmtUsd(t.cost_usd)}</td>
           <td class="num">${t.validator_attempts || 0}</td>
+          <td class="num">${t.route_count || 0}</td>
         </tr>`;
       }).join("");
       tb.querySelectorAll("tr[data-id]").forEach(tr => {
