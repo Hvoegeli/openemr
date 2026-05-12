@@ -1092,7 +1092,7 @@
     <div class="right">
       <span id="who"></span>
       <a id="admin-link" href="/admin" style="color: var(--muted); text-decoration: none; font-size: 0.82rem; padding: 0.3rem 0.7rem; border: 1px solid var(--border); border-radius: 6px; display: none;">Admin</a>
-      <a href="/observability" style="color: var(--muted); text-decoration: none; font-size: 0.82rem; padding: 0.3rem 0.7rem; border: 1px solid var(--border); border-radius: 6px;">Traces</a>
+      <a id="traces-link" href="/observability" style="color: var(--muted); text-decoration: none; font-size: 0.82rem; padding: 0.3rem 0.7rem; border: 1px solid var(--border); border-radius: 6px; display: none;">Traces</a>
       <button id="logout" type="button">Sign out</button>
     </div>
   </header>
@@ -1324,8 +1324,13 @@
           const me = await r.json();
           who.textContent = me.username;
           if (me.is_admin) {
+            // Both the Admin page and the Traces/observability dashboard
+            // are admin-only (the latter surfaces other clinicians'
+            // chat traces — PHI). Reveal both links only for admins.
             const adminLink = document.getElementById('admin-link');
             if (adminLink) adminLink.style.display = '';
+            const tracesLink = document.getElementById('traces-link');
+            if (tracesLink) tracesLink.style.display = '';
           }
         } else if (r.status === 401) { window.location.href = '/login'; }
       }).catch(() => { /* ignore */ });

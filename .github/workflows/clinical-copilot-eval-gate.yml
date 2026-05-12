@@ -62,6 +62,11 @@ jobs:
           # path tries to instantiate the Anthropic client, fail loud rather
           # than silently call out and burn credit.
         ANTHROPIC_API_KEY: "ci-noop"
+          # `copilot_session_secret` is a required setting (>= 32 chars, no
+          # default — so prod can't ship a leaked key). The replay gate never
+          # serves a request, but importing app.config validates it, so give
+          # CI an obviously-fake value of the right length.
+        COPILOT_SESSION_SECRET: "ci-noop-not-a-real-secret-0000000000000000"
           # Disable LangSmith uploads from CI runs — keeps the production
           # observability project clean of replay-only invocations.
         LANGSMITH_TRACING: "false"

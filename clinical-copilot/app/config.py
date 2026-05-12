@@ -62,8 +62,11 @@ class Settings(BaseSettings):
     openemr_seed_client_id: str | None = None
     openemr_seed_client_secret: str | None = None
 
-    # Co-pilot cookie sessions. Random fallback OK for dev; set explicitly in prod.
-    copilot_session_secret: str = "dev-secret-change-me-please-32bytes"
+    # Co-pilot cookie-session signing key. REQUIRED — no default, so a deploy
+    # that forgets to set it fails fast at startup instead of silently
+    # shipping a key that's published in the source tree. Generate with:
+    #   python -c 'import secrets; print(secrets.token_hex(32))'
+    copilot_session_secret: str = Field(..., min_length=32)
 
     # Admin users — comma-separated list of OpenEMR usernames who get
     # access to the /admin oversight page. Default is "admin" so the

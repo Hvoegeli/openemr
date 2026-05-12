@@ -109,7 +109,13 @@ log = logging.getLogger("agent.main")
 
 WEB_DIR = Path(__file__).parent / "web"
 
-SESSIONS: dict[str, AgentState] = {}
+# Conversation state, keyed by (username, session_id) — NOT session_id alone.
+# `session_id` is echoed back to the client and re-supplied on the next turn,
+# so keying on it alone lets any logged-in user adopt another clinician's
+# conversation (and replay its PHI-laden ToolMessages) just by sending their
+# session_id. Pairing it with the authenticated username isolates sessions
+# per user: an unrecognized (username, session_id) simply starts fresh.
+SESSIONS: dict[tuple[str, str], AgentState] = {}
 
 # Cache TTL is generous — clinical chart data doesn't change second-to-second,
 # and a stale 5-minute read is preferable to making the user wait 8s. Prewarm
@@ -186,8 +192,8 @@ def _mark_user_sessions_stale_after_upload(
         f"prior ToolMessage content."
     ))
     affected = 0
-    for state in SESSIONS.values():
-        if state.get("username") != username:
+    for (sess_user, _sid), state in SESSIONS.items():
+        if sess_user != username:
             continue
         state["messages"] = [*state["messages"], notice]
         affected += 1
@@ -1529,11 +1535,12 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
         guard_trace.finalize()
         app.state.traces.add(guard_trace)
         log.warning("jailbreak blocked at input layer: pattern=%s session=%s", jb_label, session_id)
+        sess = SESSIONS.get((_user, session_id), {})
         return ChatResponse(
             session_id=session_id,
             response=JAILBREAK_REFUSAL,
-            patient_id=SESSIONS.get(session_id, {}).get("patient_id"),
-            sources=SESSIONS.get(session_id, {}).get("conversation_sources", []),
+            patient_id=sess.get("patient_id"),
+            sources=sess.get("conversation_sources", []),
             validation_warning=False,
         )
 
@@ -1552,7 +1559,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
         router_trace.finalize()
         app.state.traces.add(router_trace)
         log.info("intent routed: pattern=%s session=%s", routed.intent, session_id)
-        sess = SESSIONS.get(session_id, {})
+        sess = SESSIONS.get((_user, session_id), {})
         return ChatResponse(
             session_id=session_id,
             response=routed.response,
@@ -1561,7 +1568,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
             validation_warning=False,
         )
 
-    state = SESSIONS.get(session_id) or _fresh_state()
+    state = SESSIONS.get((_user, session_id)) or _fresh_state()
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
     # Reset supervisor loop guard per turn — same shape as
@@ -1602,7 +1609,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
         "worker_route": result.get("worker_route"),
         "route_count": result.get("route_count", 0),
     }
-    SESSIONS[session_id] = new_state
+    SESSIONS[(_user, session_id)] = new_state
 
     last = new_state["messages"][-1]
     text = message_text(last) if isinstance(last, AIMessage) else ""
@@ -1654,7 +1661,7 @@ async def chat_stream(
         guard_trace.finalize()
         app.state.traces.add(guard_trace)
         log.warning("jailbreak blocked at input layer (stream): pattern=%s session=%s", jb_label, session_id)
-        sess = SESSIONS.get(session_id, {})
+        sess = SESSIONS.get((_user, session_id), {})
 
         async def guard_stream():
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'request_id': guard_trace.request_id})}\n\n"
@@ -1694,7 +1701,7 @@ async def chat_stream(
         router_trace.finalize()
         app.state.traces.add(router_trace)
         log.info("intent routed (stream): pattern=%s session=%s", routed.intent, session_id)
-        sess = SESSIONS.get(session_id, {})
+        sess = SESSIONS.get((_user, session_id), {})
 
         async def routed_stream():
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'request_id': router_trace.request_id})}\n\n"
@@ -1719,7 +1726,7 @@ async def chat_stream(
             },
         )
 
-    state = SESSIONS.get(session_id) or _fresh_state()
+    state = SESSIONS.get((_user, session_id)) or _fresh_state()
     state["messages"] = [*state["messages"], HumanMessage(content=req.message)]
     state["validation_attempts"] = 0
     state["route_count"] = 0
@@ -1817,9 +1824,9 @@ async def chat_stream(
                                 "worker_route": output.get("worker_route"),
                                 "route_count": output.get("route_count", 0),
                             }
-                            SESSIONS[session_id] = new_state
+                            SESSIONS[(_user, session_id)] = new_state
 
-            sess = SESSIONS.get(session_id, {})
+            sess = SESSIONS.get((_user, session_id), {})
             trace.validator_attempts = sess.get("validation_attempts", 0)
             trace.validator_failed = trace.validator_attempts >= MAX_VALIDATION_ATTEMPTS
             trace.route_count = sess.get("route_count", 0)
@@ -3238,6 +3245,48 @@ async def _get_doc_patient_id(
     return data.get("patient_id")
 
 
+async def _get_binary_patient_id(
+    fhir: FhirClient, pages_cache: TTLCache, binary_id: str,
+) -> str | None:
+    """Resolve the Patient that owns a `Binary/{id}` by finding the
+    DocumentReference whose attachment references it. Cached — a binary's
+    owning document is fixed once uploaded.
+
+    FHIR has no search parameter for an attachment URL, so on a cache miss
+    we scan the DocumentReference roster (the same roster-wide read the
+    dashboard prewarm already does). Demo-scale: a handful of docs per
+    patient, fetched at most once per binary id per process. Returns None
+    when no DocumentReference references this binary — panel-gated callers
+    treat that as access-denied (404), mirroring `_get_doc_patient_id`.
+    """
+    cached = pages_cache.get(f"binarypid:{binary_id}")
+    if cached is not None:
+        return cached.get("patient_id")
+
+    async def _compute() -> dict:
+        docs = await fhir.search("DocumentReference", {"_count": 1000})
+        for doc in docs:
+            for content in doc.get("content") or []:
+                url = ((content.get("attachment") or {}).get("url")) or ""
+                if "/Binary/" not in url:
+                    continue
+                # Same id extraction as app.fhir.extras._proxy_binary_url.
+                this_id = url.rsplit("/Binary/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
+                if this_id != binary_id:
+                    continue
+                subject_ref = (doc.get("subject") or {}).get("reference") or ""
+                return {
+                    "patient_id": (
+                        subject_ref.removeprefix("Patient/")
+                        if subject_ref.startswith("Patient/") else None
+                    )
+                }
+        return {"patient_id": None}
+
+    data = await pages_cache.get_or_compute(f"binarypid:{binary_id}", _compute)
+    return data.get("patient_id")
+
+
 @app.get("/api/document/{document_id}/pages")
 async def api_document_pages(
     document_id: str,
@@ -3937,7 +3986,8 @@ async def latest_prior_shift_note(
 @app.get("/api/binary/{binary_id}")
 async def api_binary(
     binary_id: str,
-    _user: str = Depends(current_user),
+    request: Request,
+    username: str = Depends(current_user),
 ):
     """Proxy a FHIR Binary resource to the browser as raw bytes.
 
@@ -3949,17 +3999,41 @@ async def api_binary(
     bytes back, so the front-end can use a normal `<a href>` to open
     the document.
 
-    Auth: any logged-in user. The endpoint does not yet ACL-walk back
-    to the parent DocumentReference -> patient -> panel; tighten this
-    before any non-demo deployment.
+    ACL: logged in AND the caller's panel must include the patient that
+    owns the parent DocumentReference (resolved via the cached
+    `_get_binary_patient_id` lookup). Out-of-panel — or unknown — binaries
+    return 404, not 403, mirroring `/api/document/{id}/pages` so a probe
+    can't tell "doesn't exist" from "not yours". Admins (panel is None)
+    are unrestricted.
 
     Implementation: OpenEMR's `GET /fhir/Binary/{id}` returns the raw
     file bytes (PDF/PNG/etc.) with the original Content-Type header,
     not a FHIR JSON envelope with base64 `data`. Use the dedicated
     `FhirClient.get_raw` so we don't try to parse PNG bytes as JSON.
     """
+    pages_cache: TTLCache = request.app.state.pages_cache
     try:
-        body, content_type = await app.state.fhir.get_raw(f"Binary/{binary_id}")
+        patient_id = await _get_binary_patient_id(
+            request.app.state.fhir, pages_cache, binary_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail="Document not found") from e
+    panel = await access_control.get_panel_for_user(
+        request.app.state.fhir, username, request.app.state.assignments,
+    )
+    if panel is not None and (patient_id is None or patient_id not in panel):
+        request.app.state.auth_store.log_event(
+            event_type="patient_access_denied",
+            username=username,
+            sid=request.session.get("sid"),
+            user_agent=request.headers.get("user-agent"),
+            ip=request.client.host if request.client else None,
+            detail=f"binary={binary_id} patient={patient_id}",
+        )
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    try:
+        body, content_type = await request.app.state.fhir.get_raw(f"Binary/{binary_id}")
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"FHIR fetch failed: {e!s}") from e
     return Response(content=body, media_type=content_type)
@@ -3976,20 +4050,24 @@ async def healthz() -> dict[str, str]:
 @app.get("/api/traces")
 async def list_traces(
     limit: int = 50,
-    _user: str = Depends(current_user),
+    _admin: str = Depends(require_admin),
 ) -> dict:
-    """Newest-first list of recent request traces.
+    """Newest-first list of recent request traces. Admin-only.
 
     Each entry includes latency, token totals, $ cost, validator outcome,
-    tool-call count, and per-tool detail. Bounded ring buffer (200) — no
-    pagination beyond `limit`.
+    tool-call count, and per-tool detail — and the clinician's free-text
+    question, patient UUIDs in tool args, and raw exception strings, which
+    is PHI/PII across users. Hence `require_admin`, not `current_user`.
+    Bounded ring buffer (200) — no pagination beyond `limit`.
     """
     items = [t.to_dict() for t in app.state.traces.list_recent(limit=limit)]
     return {"count": len(items), "items": items}
 
 
 @app.get("/api/traces/{request_id}")
-async def get_trace(request_id: str, _user: str = Depends(current_user)) -> dict:
+async def get_trace(request_id: str, _admin: str = Depends(require_admin)) -> dict:
+    """Single request trace by id. Admin-only — same PHI/PII exposure as
+    `/api/traces`."""
     trace = app.state.traces.get(request_id)
     if trace is None:
         raise HTTPException(status_code=404, detail="trace not found")
@@ -3998,8 +4076,14 @@ async def get_trace(request_id: str, _user: str = Depends(current_user)) -> dict
 
 @app.get("/observability", response_model=None)
 async def observability_page(request: Request) -> FileResponse | RedirectResponse:
-    if current_session(request) is None:
+    """Observability dashboard. Admin-only; non-admins are redirected to /
+    (the page surfaces other clinicians' traces — see `/api/traces`). A
+    redirect is friendlier than a 403 for a misclick, mirroring /admin."""
+    session = current_session(request)
+    if session is None:
         return RedirectResponse(url="/login", status_code=302)
+    if not is_admin(session.username):
+        return RedirectResponse(url="/", status_code=302)
     return FileResponse(WEB_DIR / "observability.html", headers=_NO_CACHE_HEADERS)
 
 
