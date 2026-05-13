@@ -96,6 +96,21 @@ _MED_USAGE_RE = re.compile(
     r"continue[ds]?|added)\s+[A-Z][a-z]{2,}"
 )
 
+# Short-form reassurance / status words. Paired with patient context
+# (below), these catch the B1 zero-citation bypass that the four
+# patterns above miss: "The patient is fine.", "She is stable.",
+# "He is okay." — sentences with no number, no lab, no drug, but a
+# flat clinical reassurance that R1 still requires a `[Type/ID]`
+# citation for (AgentForge report b11562ac218f). Word list is tight
+# on purpose — exactly the five reassurance tokens AgentForge's
+# prompt names (`yes`, `no`, `fine`, `stable`, `okay`). Broadening
+# to `well`, `normal`, `unremarkable`, `ok`, etc. would risk flagging
+# legitimate non-clinical prose.
+_REASSURANCE_WORD_RE = re.compile(
+    r"\b(?:fine|stable|okay|yes|no)\b",
+    re.IGNORECASE,
+)
+
 
 def looks_like_clinical_claim(sentence: str) -> bool:
     """True if the sentence asserts something measurable or patient-specific
@@ -117,6 +132,13 @@ def looks_like_clinical_claim(sentence: str) -> bool:
     if _MED_USAGE_RE.search(s):
         return True
     if _PATIENT_CONTEXT_RE.search(s) and _CLINICAL_WORD_RE.search(s):
+        return True
+    # B1: patient-context + a reassurance word with no concrete clinical
+    # token (no lab/med/number) is still a clinical-status claim and
+    # needs a cite. The R5 refusal template ("about patient chart data",
+    # "about a patient") has no `_PATIENT_CONTEXT_RE` match, so this
+    # branch doesn't fire on legitimate refusals.
+    if _PATIENT_CONTEXT_RE.search(s) and _REASSURANCE_WORD_RE.search(s):
         return True
     return False
 
