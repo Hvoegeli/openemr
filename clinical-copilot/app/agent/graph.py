@@ -26,6 +26,8 @@ the time the answerer runs the source set already covers everything
 either worker pulled.
 """
 
+import asyncio
+import base64
 import json
 import logging
 import time
@@ -49,6 +51,7 @@ from app.agent.system_prompt import (
 )
 from app.agent.tools import EVIDENCE_TOOLS, INTAKE_TOOLS, dispatch
 from app.agent.input_guard import detect_jailbreak, quarantine_marker
+from app.extraction.ocr import ocr_png_text
 from app.agent.validator import find_invalid_citations, find_uncited_clinical_claims
 from app.config import settings
 from app.fhir.client import FhirClient
@@ -175,9 +178,11 @@ def _strip_image_blocks_from_messages(messages: list) -> list:
 def _content_text_for_scan(content: str | list[dict]) -> str:
     """Extract the text portion of a tool result for the jailbreak scan.
 
-    The scanner only operates on text — image blocks can't carry prompt
-    injections through this path. For string content this is the identity;
-    for list content we concatenate every `text`-typed block.
+    For string content this is the identity; for list content we
+    concatenate every `text`-typed block. Image blocks need OCR to be
+    visible to the text-based scanner — see `_image_blocks_ocr_text`,
+    which the `execute_tools` call site combines with this text when
+    the tool is `get_document_content` (C1 image-channel quarantine).
     """
     if isinstance(content, str):
         return content
@@ -187,6 +192,44 @@ def _content_text_for_scan(content: str | list[dict]) -> str:
         if isinstance(block, dict) and block.get("type") == "text"
         and isinstance(block.get("text"), str)
     )
+
+
+async def _image_blocks_ocr_text(content: str | list[dict]) -> str:
+    """OCR every base64-PNG image block in `content` and return the joined
+    text, for the jailbreak scanner to see.
+
+    Closes C1: `get_document_content` returns rendered document pages as
+    image content blocks; without OCR an attacker can paint a jailbreak
+    directive onto an uploaded page and bypass the text-only scanner.
+    Per-page OCR is offloaded to a worker thread so a multi-page packet
+    doesn't block the event loop. Pages decode/OCR independently — a
+    bad page is logged and skipped (returns ""), the rest proceed.
+
+    String content (no image blocks possible) returns "" immediately.
+    The result is appended to the text-scan input ONLY for the
+    `get_document_content` tool — other tools never produce images so
+    paying the OCR cost there is gratuitous.
+    """
+    if not isinstance(content, list):
+        return ""
+    chunks: list[str] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "image":
+            continue
+        if block.get("source_type") != "base64" or block.get("mime_type") != "image/png":
+            continue
+        data = block.get("data")
+        if not isinstance(data, str) or not data:
+            continue
+        try:
+            png_bytes = base64.b64decode(data, validate=False)
+        except (ValueError, TypeError) as exc:
+            log.warning("ocr: image block base64 decode failed (%s); skipping", exc)
+            continue
+        text = await asyncio.to_thread(ocr_png_text, png_bytes)
+        if text:
+            chunks.append(text)
+    return "\n".join(chunks)
 
 
 def _prepend_quarantine(
@@ -527,10 +570,17 @@ def build_graph(
             # header so the LLM sees the suspicious content as data, not
             # a directive. The data itself flows through unchanged so we
             # don't accidentally hide a legitimate clinical detail. For
-            # multimodal results (image blocks from `get_document_content`)
-            # we only scan the text portion — image bytes can't carry text
-            # injections through this code path.
-            jb_label = detect_jailbreak(_content_text_for_scan(content))
+            # `get_document_content` results (the only tool that returns
+            # image blocks) we also OCR every rendered page and feed the
+            # extracted text into the same scanner — C1, the image-channel
+            # jailbreak quarantine, closes the gap where a forged document
+            # paints an instruction-shaped phrase onto an image.
+            scan_text = _content_text_for_scan(content)
+            if call["name"] == "get_document_content":
+                image_ocr = await _image_blocks_ocr_text(content)
+                if image_ocr:
+                    scan_text = f"{scan_text}\n{image_ocr}"
+            jb_label = detect_jailbreak(scan_text)
             if jb_label is not None:
                 content = _prepend_quarantine(content, quarantine_marker(jb_label))
                 log.warning(

@@ -51,6 +51,14 @@ dependencies = [
     # .xlsx workbook parser. Pure-Python, no native deps. Used by the
     # workbook doc-type ingest path — deterministic, zero LLM credit.
     "openpyxl>=3.1",
+    # OCR for the image-channel jailbreak quarantine (C1). pytesseract is
+    # a thin Python wrapper around the `tesseract` system binary, which
+    # must be installed separately — `brew install tesseract` on macOS,
+    # `apt install tesseract-ocr` on Debian/Ubuntu. App startup verifies
+    # the binary is present via `pytesseract.get_tesseract_version()` and
+    # fails closed if it's missing, so a deploy that skipped the install
+    # cannot silently disable the image-channel scan.
+    "pytesseract>=0.3.10",
 ]
 
 [dependency-groups]

@@ -279,6 +279,15 @@ MODEL_NAME = "claude-sonnet-4-6"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Fail closed if the OCR binary needed by the C1 image-channel
+    # jailbreak quarantine is missing. Done FIRST so a misconfigured
+    # deploy errors out before any other store opens — there is no
+    # serve-with-degraded-defense path for this control. See
+    # `app/extraction/ocr.py` for the install hint surfaced in the error.
+    from app.extraction.ocr import verify_tesseract_available  # noqa: E402
+    tesseract_version = verify_tesseract_available()
+    log.info("ocr: tesseract %s available — image-channel scan armed", tesseract_version)
+
     init_langsmith()  # idempotent; no-op when LANGSMITH_TRACING is unset
     app.state.fhir = FhirClient()
     app.state.openemr_writer = OpenEMRWriter()
