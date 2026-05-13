@@ -59,6 +59,17 @@ class Settings(BaseSettings):
     # explicit time window leaves the result unbounded by count.
     max_notes_24h_docs: int = 20
 
+    # Per-turn wall-clock budget (seconds). Wraps the LangGraph
+    # ainvoke / astream_events call so a single chat turn cannot hold
+    # the box hostage even if the per-LLM-call timeout (60s on the
+    # answerer chain) lets through a long sequence of expensive calls.
+    # 120s matches AgentForge's `evals/thresholds.yaml` envelope and
+    # sits comfortably above the observed p95 normal-turn latency
+    # (~68s) from `COST_LATENCY_REPORT.md`. On breach the request
+    # fails closed (HTTPException(504) for `/chat`; SSE error event
+    # then done for `/chat/stream`).
+    max_turn_wall_seconds: int = 120
+
     # Copilot's own externally-reachable base URL — used to build the OAuth2
     # callback redirect_uri (`{copilot_base_url}/oauth/callback`). Local dev
     # default; production overrides via env (Hetzner cloudflared tunnel URL).

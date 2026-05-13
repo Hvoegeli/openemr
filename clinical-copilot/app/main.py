@@ -1588,10 +1588,30 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
     )
     token = set_current_trace(trace)
     try:
-        result = await app.state.graph.ainvoke(
-            state,
-            config={"callbacks": [TokenUsageCallback()]},
+        # DoS-B: per-turn wall-clock cap. `asyncio.wait_for` cancels
+        # the graph task on breach; the per-LLM-call timeout (60s on
+        # the answerer chain) only bounds individual calls, not the
+        # sum, so a long sequence of expensive calls could otherwise
+        # hold the worker thread beyond the operating envelope.
+        result = await asyncio.wait_for(
+            app.state.graph.ainvoke(
+                state,
+                config={"callbacks": [TokenUsageCallback()]},
+            ),
+            timeout=settings.max_turn_wall_seconds,
         )
+    except asyncio.TimeoutError:
+        trace.error = f"timeout:wall_seconds>{settings.max_turn_wall_seconds}"
+        trace.finalize()
+        app.state.traces.add(trace)
+        reset_current_trace(token)
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"This turn took longer than the {settings.max_turn_wall_seconds}s "
+                "per-turn budget and was cancelled. Try a more specific question."
+            ),
+        ) from None
     except Exception as e:  # noqa: BLE001
         trace.error = f"{type(e).__name__}: {e}"
         trace.finalize()
@@ -1758,74 +1778,104 @@ async def chat_stream(
         try:
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'request_id': trace.request_id})}\n\n"
 
-            async for event in app.state.graph.astream_events(
-                state,
-                version="v2",
-                config={"callbacks": [TokenUsageCallback()]},
-            ):
-                ev = event.get("event")
-                data = event.get("data") or {}
-                md = event.get("metadata") or {}
+            # DoS-B: per-turn wall-clock cap on the streaming graph
+            # work. Wraps just the event-iteration loop so the post-
+            # loop trace-finalization isn't subject to the cap. On
+            # breach we emit an `error` SSE event and a `done` event
+            # so the client tears down cleanly; the outer `finally`
+            # still runs to finalize and store the trace.
+            try:
+                async with asyncio.timeout(settings.max_turn_wall_seconds):
+                    async for event in app.state.graph.astream_events(
+                        state,
+                        version="v2",
+                        config={"callbacks": [TokenUsageCallback()]},
+                    ):
+                        ev = event.get("event")
+                        data = event.get("data") or {}
+                        md = event.get("metadata") or {}
 
-                if (
-                    ev == "on_chain_start"
-                    and event.get("name") == "answerer"
-                    and md.get("langgraph_node") == "answerer"
-                ):
-                    # Second+ answerer invocation in a single turn ⇒ the
-                    # validator retried. Tell the frontend to discard the
-                    # partial first-attempt text. The fresh stream of
-                    # tokens that follows will populate the bubble cleanly.
-                    # We require BOTH event.name == "answerer" and the
-                    # langgraph_node metadata match because nested LLM
-                    # chains inside the answerer node inherit the
-                    # langgraph_node metadata but have their own event
-                    # name (e.g. "ChatAnthropic"). Counting nested starts
-                    # would over-trigger the reset.
-                    if answerer_starts >= 1:
-                        yield f"data: {json.dumps({'type': 'reset'})}\n\n"
-                    answerer_starts += 1
-                    continue
+                        if (
+                            ev == "on_chain_start"
+                            and event.get("name") == "answerer"
+                            and md.get("langgraph_node") == "answerer"
+                        ):
+                            # Second+ answerer invocation in a single turn ⇒ the
+                            # validator retried. Tell the frontend to discard the
+                            # partial first-attempt text. The fresh stream of
+                            # tokens that follows will populate the bubble cleanly.
+                            # We require BOTH event.name == "answerer" and the
+                            # langgraph_node metadata match because nested LLM
+                            # chains inside the answerer node inherit the
+                            # langgraph_node metadata but have their own event
+                            # name (e.g. "ChatAnthropic"). Counting nested starts
+                            # would over-trigger the reset.
+                            if answerer_starts >= 1:
+                                yield f"data: {json.dumps({'type': 'reset'})}\n\n"
+                            answerer_starts += 1
+                            continue
 
-                if ev == "on_tool_start":
-                    yield f"data: {json.dumps({'type': 'tool', 'name': event.get('name'), 'phase': 'start'})}\n\n"
-                elif ev == "on_chat_model_stream":
-                    # Only stream tokens from the answerer node. The
-                    # supervisor + worker LLMs (intake_extractor,
-                    # evidence_retriever) also fire on_chat_model_stream
-                    # events, and when a worker decides to emit prose
-                    # instead of a tool call the worker text leaks into
-                    # the SSE stream alongside the answerer's final text.
-                    # The non-stream /chat endpoint isn't affected
-                    # because it returns messages[-1] only.
-                    node = md.get("langgraph_node")
-                    if node != "answerer":
-                        continue
-                    chunk = data.get("chunk")
-                    if chunk is not None and isinstance(chunk.content, str) and chunk.content:
-                        yield f"data: {json.dumps({'type': 'token', 'text': chunk.content})}\n\n"
-                    elif chunk is not None and isinstance(chunk.content, list):
-                        for blk in chunk.content:
-                            if isinstance(blk, dict) and blk.get("type") == "text":
-                                txt = blk.get("text", "")
-                                if txt:
-                                    yield f"data: {json.dumps({'type': 'token', 'text': txt})}\n\n"
-                elif ev == "on_chain_end" and event.get("name") == "LangGraph":
-                    output = data.get("output") or {}
-                    if isinstance(output, dict) and "messages" in output:
-                        msgs = output["messages"]
-                        if msgs:
-                            new_state: AgentState = {
-                                "messages": msgs,
-                                "conversation_sources": output.get("conversation_sources", []),
-                                "patient_id": output.get("patient_id"),
-                                "validation_attempts": output.get("validation_attempts", 0),
-                                "username": _user,
-                                "advisor_mode": req.advisor_mode,
-                                "worker_route": output.get("worker_route"),
-                                "route_count": output.get("route_count", 0),
-                            }
-                            SESSIONS[(_user, session_id)] = new_state
+                        if ev == "on_tool_start":
+                            yield f"data: {json.dumps({'type': 'tool', 'name': event.get('name'), 'phase': 'start'})}\n\n"
+                        elif ev == "on_chat_model_stream":
+                            # Only stream tokens from the answerer node. The
+                            # supervisor + worker LLMs (intake_extractor,
+                            # evidence_retriever) also fire on_chat_model_stream
+                            # events, and when a worker decides to emit prose
+                            # instead of a tool call the worker text leaks into
+                            # the SSE stream alongside the answerer's final text.
+                            # The non-stream /chat endpoint isn't affected
+                            # because it returns messages[-1] only.
+                            node = md.get("langgraph_node")
+                            if node != "answerer":
+                                continue
+                            chunk = data.get("chunk")
+                            if chunk is not None and isinstance(chunk.content, str) and chunk.content:
+                                yield f"data: {json.dumps({'type': 'token', 'text': chunk.content})}\n\n"
+                            elif chunk is not None and isinstance(chunk.content, list):
+                                for blk in chunk.content:
+                                    if isinstance(blk, dict) and blk.get("type") == "text":
+                                        txt = blk.get("text", "")
+                                        if txt:
+                                            yield f"data: {json.dumps({'type': 'token', 'text': txt})}\n\n"
+                        elif ev == "on_chain_end" and event.get("name") == "LangGraph":
+                            output = data.get("output") or {}
+                            if isinstance(output, dict) and "messages" in output:
+                                msgs = output["messages"]
+                                if msgs:
+                                    new_state: AgentState = {
+                                        "messages": msgs,
+                                        "conversation_sources": output.get("conversation_sources", []),
+                                        "patient_id": output.get("patient_id"),
+                                        "validation_attempts": output.get("validation_attempts", 0),
+                                        "username": _user,
+                                        "advisor_mode": req.advisor_mode,
+                                        "worker_route": output.get("worker_route"),
+                                        "route_count": output.get("route_count", 0),
+                                    }
+                                    SESSIONS[(_user, session_id)] = new_state
+            except asyncio.TimeoutError:
+                trace.error = f"timeout:wall_seconds>{settings.max_turn_wall_seconds}"
+                err_payload = {
+                    "type": "error",
+                    "detail": (
+                        f"This turn took longer than the "
+                        f"{settings.max_turn_wall_seconds}s per-turn budget "
+                        "and was cancelled. Try a more specific question."
+                    ),
+                }
+                yield f"data: {json.dumps(err_payload)}\n\n"
+                _sess_to = SESSIONS.get((_user, session_id), {})
+                done_payload = {
+                    "type": "done",
+                    "patient_id": _sess_to.get("patient_id"),
+                    "sources": _sess_to.get("conversation_sources", []),
+                    "validation_warning": False,
+                    "request_id": trace.request_id,
+                    "timed_out": True,
+                }
+                yield f"data: {json.dumps(done_payload)}\n\n"
+                return
 
             sess = SESSIONS.get((_user, session_id), {})
             trace.validator_attempts = sess.get("validation_attempts", 0)
