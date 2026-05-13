@@ -48,6 +48,17 @@ class Settings(BaseSettings):
     # rather than the source tree carrying a "verify off" default.
     openemr_tls_verify: bool = True
 
+    # Document fan-out cap for `get_notes_24h(hours=0)` (the "all docs
+    # for this patient" mode). AgentForge's C5 DoS attack drives an
+    # unbounded per-turn vision-model fan-out by chaining
+    # `get_notes_24h(hours=0)` (returns every uploaded doc) into a
+    # `get_document_content` call per document. Truncating the
+    # newest-first doc list at this cap keeps the heaviest legitimate
+    # case ("catch me up on this patient") within budget while closing
+    # the unbounded enumeration. The cap fires only for `hours=0`; an
+    # explicit time window leaves the result unbounded by count.
+    max_notes_24h_docs: int = 20
+
     # Copilot's own externally-reachable base URL — used to build the OAuth2
     # callback redirect_uri (`{copilot_base_url}/oauth/callback`). Local dev
     # default; production overrides via env (Hetzner cloudflared tunnel URL).

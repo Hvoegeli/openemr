@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 
+from app.config import settings
 from app.fhir.client import FhirClient
 
 log = logging.getLogger("agent.fhir.adapter")
@@ -531,12 +532,30 @@ async def get_notes_24h(
             "attachments": attachments,
         })
     items.sort(key=lambda x: x.get("date") or "", reverse=True)
+    # DoS-D: cap the unbounded `hours=0` mode. The newest-first sort
+    # above means truncation drops the oldest docs, which is the
+    # right semantic for "catch me up on this patient." A truncated
+    # result surfaces `truncated=True` + `cap` so the agent can tell
+    # the clinician older notes were elided rather than silently
+    # implying it saw everything.
+    truncated = False
+    cap = settings.max_notes_24h_docs
+    if not use_window and len(items) > cap:
+        truncated = True
+        kept_ids = {item["id"] for item in items[:cap]}
+        items = items[:cap]
+        sources = [
+            ref for ref in sources
+            if ref.removeprefix("DocumentReference/") in kept_ids
+        ]
     return {
         "data": {
             "window_hours": hours,
             "cutoff_iso": cutoff_iso,
             "count": len(items),
             "documents": items,
+            "truncated": truncated,
+            "cap": cap if truncated else None,
         },
         "sources": sources,
     }
