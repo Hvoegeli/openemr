@@ -56,6 +56,7 @@ class SqliteTraceStore:
             validator_attempts INTEGER,
             validator_failed INTEGER,
             route_count INTEGER NOT NULL DEFAULT 0,
+            conversation_sources TEXT NOT NULL DEFAULT '[]',
             error TEXT,
             tool_events TEXT,
             llm_events TEXT
@@ -73,6 +74,7 @@ class SqliteTraceStore:
     # consistent with this project's "one file, migrate on open" stores.
     _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
         ("route_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("conversation_sources", "TEXT NOT NULL DEFAULT '[]'"),
     )
 
     def __init__(self, path: Path) -> None:
@@ -111,9 +113,10 @@ class SqliteTraceStore:
                     request_id, session_id, username, user_msg, model,
                     started_at, finished_at, duration_ms,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                    cost_usd, validator_attempts, validator_failed, route_count, error,
+                    cost_usd, validator_attempts, validator_failed, route_count,
+                    conversation_sources, error,
                     tool_events, llm_events
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     t.request_id, t.session_id, t.username, t.user_msg, t.model,
@@ -121,7 +124,7 @@ class SqliteTraceStore:
                     usage.input_tokens, usage.output_tokens,
                     usage.cache_read_tokens, usage.cache_creation_tokens,
                     t.cost_usd, t.validator_attempts, int(t.validator_failed),
-                    t.route_count, t.error,
+                    t.route_count, json.dumps(list(t.conversation_sources)), t.error,
                     json.dumps([asdict(e) for e in t.tool_events]),
                     json.dumps([asdict(e) for e in t.llm_events]),
                 ),
@@ -169,6 +172,7 @@ class SqliteTraceStore:
                     duration_ms=e["duration_ms"],
                     usage=TokenUsage(**e["usage"]),
                     finish_reason=e.get("finish_reason"),
+                    sources_at_call=list(e.get("sources_at_call") or []),
                 )
                 for e in llm_payload
             ],
@@ -182,6 +186,7 @@ class SqliteTraceStore:
             validator_attempts=row["validator_attempts"] or 0,
             validator_failed=bool(row["validator_failed"]),
             route_count=row["route_count"] or 0,
+            conversation_sources=json.loads(row["conversation_sources"] or "[]"),
             error=row["error"],
         )
 

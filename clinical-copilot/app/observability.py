@@ -102,6 +102,13 @@ class ToolEvent:
     ok: bool
     sources_added: int
     error: str | None = None
+    # Provenance: which FHIR source IDs were already in the conversation
+    # when this tool ran, and which ones this tool added. The C3 checker
+    # walks these to decide whether a tool's args plausibly came from a
+    # legitimate prior turn (forged-prior-turn / cross-session-canary).
+    # Default `[]` so old rows read back without provenance still load.
+    sources_before: list[str] = field(default_factory=list)
+    sources_added_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -110,6 +117,12 @@ class LLMEvent:
     duration_ms: float
     usage: TokenUsage
     finish_reason: str | None = None
+    # Snapshot of `conversation_sources` at the moment the LLM was
+    # invoked — the same provenance signal as `ToolEvent.sources_before`,
+    # so the C3 checker can correlate LLM output against the source set
+    # the model could have seen. Default `[]` for backward compatibility
+    # with rows recorded before this field existed.
+    sources_at_call: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -135,6 +148,14 @@ class RequestTrace:
     # excessive routing, DoS via loops). 0 on the short-circuit paths
     # that never invoke the graph.
     route_count: int = 0
+    # Final per-turn FHIR source IDs that the conversation accumulated —
+    # snapshot of `AgentState["conversation_sources"]` at request exit.
+    # The C3 deterministic checker needs this aggregate (plus the
+    # per-event `sources_before` / `sources_added_ids` / `sources_at_call`
+    # above) to walk provenance and verdict forged-prior-turn /
+    # cross-session-canary cases. Empty on short-circuit paths that
+    # never run the graph.
+    conversation_sources: list[str] = field(default_factory=list)
     error: str | None = None
 
     def finalize(self) -> None:
@@ -191,6 +212,27 @@ def reset_current_trace(token) -> None:
     _CURRENT.reset(token)
 
 
+# `conversation_sources` snapshot for the in-flight node — set by each
+# agent graph node before it invokes the LLM, read by `TokenUsageCallback`
+# in `on_llm_end` to attach `LLMEvent.sources_at_call`. ContextVar values
+# propagate across `await`s within the same asyncio task, so the callback
+# (which fires inside the LangChain ainvoke call) sees whatever the
+# enclosing node set.
+_CURRENT_SOURCES: ContextVar[list[str]] = ContextVar("current_sources", default=[])
+
+
+def current_sources() -> list[str]:
+    """Snapshot of the conversation_sources visible to the current node."""
+    return list(_CURRENT_SOURCES.get())
+
+
+def set_current_sources(sources: list[str]) -> None:
+    """Called by each graph node before invoking the LLM, so the LLM
+    callback can record what `conversation_sources` looked like at the
+    moment of the LLM call (C3 provenance)."""
+    _CURRENT_SOURCES.set(list(sources))
+
+
 # ─── LangChain callback for token capture ────────────────────────────────
 
 
@@ -224,6 +266,7 @@ class TokenUsageCallback(BaseCallbackHandler):
             duration_ms=(time.time() - self._t_start) * 1000.0,
             usage=usage,
             finish_reason=finish_reason,
+            sources_at_call=current_sources(),
         ))
 
 
@@ -279,7 +322,17 @@ def record_tool_event(
     ok: bool,
     sources_added: int,
     error: str | None = None,
+    sources_before: list[str] | None = None,
+    sources_added_ids: list[str] | None = None,
 ) -> None:
+    """Record a tool event onto the current request trace.
+
+    `sources_before` / `sources_added_ids` carry the C3 provenance snapshot:
+    which FHIR source IDs were already in the conversation when this tool
+    fired, and which IDs this tool added. Both default to empty for
+    callers that don't supply provenance (the existing `sources_added`
+    count stays authoritative for legacy consumers).
+    """
     trace = current_trace()
     if trace is None:
         return
@@ -291,6 +344,8 @@ def record_tool_event(
         ok=ok,
         sources_added=sources_added,
         error=error,
+        sources_before=list(sources_before) if sources_before else [],
+        sources_added_ids=list(sources_added_ids) if sources_added_ids else [],
     ))
 
 

@@ -52,7 +52,7 @@ from app.agent.input_guard import detect_jailbreak, quarantine_marker
 from app.agent.validator import find_invalid_citations, find_uncited_clinical_claims
 from app.config import settings
 from app.fhir.client import FhirClient
-from app.observability import record_tool_event
+from app.observability import record_tool_event, set_current_sources
 
 log = logging.getLogger("agent")
 
@@ -364,6 +364,11 @@ def build_graph(
         return list(messages)
 
     async def supervisor_node(state: AgentState) -> dict:
+        # C3 provenance: snapshot `conversation_sources` so any LLM call
+        # this node makes (`supervisor_chain.ainvoke` below) is tagged
+        # with what source IDs were already in play.
+        sources_snapshot = list(state["conversation_sources"])
+        set_current_sources(sources_snapshot)
         rc = state.get("route_count", 0) + 1
         if rc > MAX_SUPERVISOR_ROUTES:
             log.warning(
@@ -376,6 +381,7 @@ def build_graph(
                 started_at=time.time(),
                 ok=True,
                 sources_added=0,
+                sources_before=sources_snapshot,
             )
             return {"worker_route": "answer", "route_count": rc}
 
@@ -407,10 +413,12 @@ def build_graph(
             started_at=t0,
             ok=True,
             sources_added=0,
+            sources_before=sources_snapshot,
         )
         return {"worker_route": next_worker, "route_count": rc}
 
     async def intake_extractor(state: AgentState) -> dict:
+        set_current_sources(state["conversation_sources"])
         history = _pad_for_anthropic(
             list(state["messages"]),
             prompt="Continue the intake-extraction work. Call a tool or finish.",
@@ -420,6 +428,7 @@ def build_graph(
         return {"messages": [response]}
 
     async def evidence_retriever(state: AgentState) -> dict:
+        set_current_sources(state["conversation_sources"])
         history = _pad_for_anthropic(
             list(state["messages"]),
             prompt="Continue the evidence-retrieval work. Call a tool or finish.",
@@ -429,6 +438,7 @@ def build_graph(
         return {"messages": [response]}
 
     async def answerer(state: AgentState) -> dict:
+        set_current_sources(state["conversation_sources"])
         sys_msg = sys_answerer_advisor if state.get("advisor_mode") else sys_answerer_default
         history = _pad_for_anthropic(
             list(state["messages"]),
@@ -460,11 +470,19 @@ def build_graph(
         for call in last.tool_calls:
             t0 = time.time()
             sources_added = 0
+            # C3 provenance: snapshot the source IDs already in play just
+            # before this tool fires, and (on success) the IDs this tool
+            # adds. `new_sources` already reflects any prior tool calls
+            # earlier in this same batch, so each call's snapshot
+            # correctly captures intra-batch accumulation.
+            sources_before = list(new_sources)
+            sources_added_ids: list[str] = []
             tool_ok = True
             tool_err: str | None = None
             try:
                 result = await dispatch(call["name"], call["args"], client, notes_store, panel=panel)
                 sources_added = len(result["sources"])
+                sources_added_ids = list(result["sources"])
                 new_sources.extend(result["sources"])
                 if call["name"] == "resolve_patient" and isinstance(result["data"], dict) \
                         and result["data"].get("found"):
@@ -524,6 +542,8 @@ def build_graph(
                 ok=tool_ok,
                 sources_added=sources_added,
                 error=tool_err,
+                sources_before=sources_before,
+                sources_added_ids=sources_added_ids,
             )
 
         return {

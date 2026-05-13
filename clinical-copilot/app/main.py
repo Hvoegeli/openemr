@@ -1617,6 +1617,7 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
     trace.validator_attempts = new_state["validation_attempts"]
     trace.validator_failed = new_state["validation_attempts"] >= MAX_VALIDATION_ATTEMPTS
     trace.route_count = new_state["route_count"]
+    trace.conversation_sources = list(new_state["conversation_sources"])
     trace.finalize()
     app.state.traces.add(trace)
     reset_current_trace(token)
@@ -1830,6 +1831,7 @@ async def chat_stream(
             trace.validator_attempts = sess.get("validation_attempts", 0)
             trace.validator_failed = trace.validator_attempts >= MAX_VALIDATION_ATTEMPTS
             trace.route_count = sess.get("route_count", 0)
+            trace.conversation_sources = list(sess.get("conversation_sources", []))
             done_payload = {
                 "type": "done",
                 "patient_id": sess.get("patient_id"),
