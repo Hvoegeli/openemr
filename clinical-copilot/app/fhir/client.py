@@ -6,8 +6,11 @@ Uses SMART-on-FHIR Backend Services auth (`private_key_jwt`):
   3. Get a system-level access token.
   4. Cache it until ~30s before expiry, then refresh.
 
-Self-signed cert verification is disabled because the local OpenEMR docker
-stack uses a dev cert.
+TLS verification is driven from `settings.openemr_tls_verify` (default
+`True`, production-safe). The local dev docker stack and the Hetzner
+demo box run OpenEMR behind a self-signed cert at `https://localhost:9300`
+— each opts out in its own `.env` (`OPENEMR_TLS_VERIFY=false`) rather
+than the source tree carrying a "verify off" default.
 """
 
 import time
@@ -47,7 +50,7 @@ class FhirClient:
     def __init__(self) -> None:
         self._token: str | None = None
         self._token_expires_at: float = 0.0
-        self._http = httpx.AsyncClient(verify=False, timeout=30)
+        self._http = httpx.AsyncClient(verify=settings.openemr_tls_verify, timeout=30)
         self._private_key: bytes | None = None
 
     def _load_private_key(self) -> bytes:

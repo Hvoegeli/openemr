@@ -35,7 +35,7 @@ async def verify_openemr_credentials(username: str, password: str) -> bool:
             "scripts/register_seed_client.py first."
         )
 
-    async with httpx.AsyncClient(verify=False, timeout=15) as http:
+    async with httpx.AsyncClient(verify=settings.openemr_tls_verify, timeout=15) as http:
         resp = await http.post(
             settings.openemr_oauth_token_url,
             data={

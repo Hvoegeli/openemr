@@ -11,9 +11,12 @@ with the standards-compliant authorization-code + PKCE flow:
 4. OpenEMR redirects back to `{COPILOT_BASE_URL}/oauth/callback?code=...&state=...`.
 5. We validate state matches, then POST the code + verifier + client_secret
    to OpenEMR's token endpoint to receive an `id_token`.
-6. We decode the id_token's payload (no signature verification — see
-   security note below) to extract the username, then create a Copilot
-   session via `auth_store` exactly as the legacy `/api/login` did.
+6. We decode the id_token's payload (no JWT signature verification —
+   see security note below), then call OpenEMR's `userinfo` endpoint
+   with the access_token and use the server-attested username from
+   there. The id_token's claim, if present, must match userinfo's;
+   on mismatch the login fails closed. We create a Copilot session
+   via `auth_store` exactly as the legacy `/api/login` did.
 7. The user lands at the dashboard with a working `sid` cookie.
 
 Why this matters (per W2 Sunday plan): the dashboard is loaded inside
@@ -183,7 +186,7 @@ async def exchange_code_for_username(request: Request, *, code: str, state: str)
         "code_verifier": verifier,
     }
 
-    async with httpx.AsyncClient(verify=False, timeout=15) as http:
+    async with httpx.AsyncClient(verify=settings.openemr_tls_verify, timeout=15) as http:
         resp = await http.post(
             settings.openemr_oauth_token_url,
             data=body,
@@ -201,20 +204,31 @@ async def exchange_code_for_username(request: Request, *, code: str, state: str)
     access_token = payload.get("access_token")
     if not id_token:
         raise HTTPException(status_code=400, detail="OAuth response missing id_token.")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="OAuth response missing access_token.")
 
-    username = _username_from_id_token(id_token)
-    if username:
-        return username
+    id_token_username = _username_from_id_token(id_token)
 
-    # Fallback: the id_token didn't carry a username claim shape we
-    # recognize. Hit the userinfo endpoint with the access token —
-    # OpenEMR returns the same identity set there.
-    if access_token:
-        username = await _username_from_userinfo(access_token)
-        if username:
-            return username
-
-    raise HTTPException(status_code=400, detail="OAuth response had no username claim.")
+    # Always cross-check the id_token's claim against OpenEMR's userinfo
+    # endpoint — NOT only when the id_token is missing a username claim.
+    # Without verifying the id_token's JWT signature against OpenEMR's
+    # JWKS, the userinfo round-trip is the layer that prevents a forged
+    # `preferred_username` (e.g. from a MITM on the agent → OpenEMR
+    # token call) from minting an admin session. `userinfo` is
+    # authoritative; the id_token's claim must agree with it.
+    userinfo_username = await _username_from_userinfo(access_token)
+    if not userinfo_username:
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth userinfo unavailable for identity cross-check.",
+        )
+    if id_token_username and id_token_username != userinfo_username:
+        log.warning(
+            "oauth: id_token vs userinfo username mismatch — id_token=%r userinfo=%r; rejecting",
+            id_token_username, userinfo_username,
+        )
+        raise HTTPException(status_code=400, detail="OAuth identity claims do not match.")
+    return userinfo_username
 
 
 def _username_from_id_token(id_token: str) -> str | None:
@@ -244,10 +258,13 @@ def _username_from_id_token(id_token: str) -> str | None:
 
 
 async def _username_from_userinfo(access_token: str) -> str | None:
-    """Fallback: hit OpenEMR's `userinfo` endpoint and read the username
-    from the response. Used when the id_token doesn't carry a username
-    claim (rare, but tolerated)."""
-    async with httpx.AsyncClient(verify=False, timeout=10) as http:
+    """Hit OpenEMR's `userinfo` endpoint and read the username from the
+    response — the **authoritative** identity source for an OIDC login
+    (server-attested, not extracted from an unsigned JWT). Called by
+    `exchange_code_for_username` on every login to cross-check the
+    id_token's claimed username; a mismatch (or this endpoint being
+    unreachable) fails the login closed."""
+    async with httpx.AsyncClient(verify=settings.openemr_tls_verify, timeout=10) as http:
         try:
             resp = await http.get(
                 settings.openemr_oauth_userinfo_url,

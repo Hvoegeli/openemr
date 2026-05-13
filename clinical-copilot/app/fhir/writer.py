@@ -151,7 +151,7 @@ class OpenEMRWriter:
     def __init__(self) -> None:
         self._token: str | None = None
         self._token_expires_at: float = 0.0
-        self._http = httpx.AsyncClient(verify=False, timeout=30)
+        self._http = httpx.AsyncClient(verify=settings.openemr_tls_verify, timeout=30)
 
     @property
     def _api_base(self) -> str:

@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     openemr_client_secret: str | None = None
     openemr_private_key_path: str = "secrets/agent_key.pem"
     openemr_kid: str = "agent_forge_key_1"
+    # Verify the TLS cert on agent → OpenEMR HTTP calls. Default `True`
+    # (production-safe). The local dev stack and the Hetzner box both
+    # run OpenEMR behind a self-signed cert on `https://localhost:9300`,
+    # so each opts out in its own `.env` (`OPENEMR_TLS_VERIFY=false`)
+    # rather than the source tree carrying a "verify off" default.
+    openemr_tls_verify: bool = True
 
     # Copilot's own externally-reachable base URL — used to build the OAuth2
     # callback redirect_uri (`{copilot_base_url}/oauth/callback`). Local dev
