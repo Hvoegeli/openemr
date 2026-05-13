@@ -92,6 +92,7 @@ from app.extraction.schemas import DOC_TYPE_LABELS  # noqa: E402
 from app.extraction.vision import ExtractionError, extract_via_claude  # noqa: E402
 from app.observability import (  # noqa: E402
     TokenUsageCallback,
+    TurnBudgetExceeded,
     init_langsmith,
     new_request_trace,
     reset_current_trace,
@@ -1612,6 +1613,20 @@ async def chat(req: ChatRequest, request: Request, _user: str = Depends(current_
                 "per-turn budget and was cancelled. Try a more specific question."
             ),
         ) from None
+    except TurnBudgetExceeded as e:
+        # DoS-A: per-turn token / cost cap breached mid-graph.
+        trace.error = f"budget:{e.reason}"
+        trace.finalize()
+        app.state.traces.add(trace)
+        reset_current_trace(token)
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"This turn exceeded the per-turn budget ({e.reason}; "
+                f"total_tokens={e.total_tokens}, cost_usd={e.total_cost_usd:.4f}) "
+                "and was cancelled. Try a more specific question."
+            ),
+        ) from None
     except Exception as e:  # noqa: BLE001
         trace.error = f"{type(e).__name__}: {e}"
         trace.finalize()
@@ -1873,6 +1888,30 @@ async def chat_stream(
                     "validation_warning": False,
                     "request_id": trace.request_id,
                     "timed_out": True,
+                }
+                yield f"data: {json.dumps(done_payload)}\n\n"
+                return
+            except TurnBudgetExceeded as e:
+                # DoS-A: per-turn token / cost cap breached mid-graph.
+                trace.error = f"budget:{e.reason}"
+                err_payload = {
+                    "type": "error",
+                    "detail": (
+                        f"This turn exceeded the per-turn budget "
+                        f"({e.reason}; total_tokens={e.total_tokens}, "
+                        f"cost_usd={e.total_cost_usd:.4f}) and was cancelled. "
+                        "Try a more specific question."
+                    ),
+                }
+                yield f"data: {json.dumps(err_payload)}\n\n"
+                _sess_be = SESSIONS.get((_user, session_id), {})
+                done_payload = {
+                    "type": "done",
+                    "patient_id": _sess_be.get("patient_id"),
+                    "sources": _sess_be.get("conversation_sources", []),
+                    "validation_warning": False,
+                    "request_id": trace.request_id,
+                    "budget_exceeded": True,
                 }
                 yield f"data: {json.dumps(done_payload)}\n\n"
                 return

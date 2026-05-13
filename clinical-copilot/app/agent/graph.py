@@ -52,7 +52,7 @@ from app.agent.input_guard import detect_jailbreak, quarantine_marker
 from app.agent.validator import find_invalid_citations, find_uncited_clinical_claims
 from app.config import settings
 from app.fhir.client import FhirClient
-from app.observability import record_tool_event, set_current_sources
+from app.observability import check_turn_budget, record_tool_event, set_current_sources
 
 log = logging.getLogger("agent")
 
@@ -369,6 +369,9 @@ def build_graph(
         # with what source IDs were already in play.
         sources_snapshot = list(state["conversation_sources"])
         set_current_sources(sources_snapshot)
+        # DoS-A: inter-node budget check — abort the turn if prior
+        # LLM calls have already blown the per-turn token/cost cap.
+        check_turn_budget()
         rc = state.get("route_count", 0) + 1
         if rc > MAX_SUPERVISOR_ROUTES:
             log.warning(
@@ -419,6 +422,7 @@ def build_graph(
 
     async def intake_extractor(state: AgentState) -> dict:
         set_current_sources(state["conversation_sources"])
+        check_turn_budget()
         history = _pad_for_anthropic(
             list(state["messages"]),
             prompt="Continue the intake-extraction work. Call a tool or finish.",
@@ -429,6 +433,7 @@ def build_graph(
 
     async def evidence_retriever(state: AgentState) -> dict:
         set_current_sources(state["conversation_sources"])
+        check_turn_budget()
         history = _pad_for_anthropic(
             list(state["messages"]),
             prompt="Continue the evidence-retrieval work. Call a tool or finish.",
@@ -439,6 +444,7 @@ def build_graph(
 
     async def answerer(state: AgentState) -> dict:
         set_current_sources(state["conversation_sources"])
+        check_turn_budget()
         sys_msg = sys_answerer_advisor if state.get("advisor_mode") else sys_answerer_default
         history = _pad_for_anthropic(
             list(state["messages"]),

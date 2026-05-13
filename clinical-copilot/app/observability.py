@@ -233,6 +233,72 @@ def set_current_sources(sources: list[str]) -> None:
     _CURRENT_SOURCES.set(list(sources))
 
 
+# ─── DoS-A: per-turn token + cost budget ─────────────────────────────────
+
+
+class TurnBudgetExceeded(Exception):
+    """Raised when the current request trace's cumulative LLM usage exceeds
+    the configured per-turn caps (`settings.max_turn_tokens` /
+    `settings.max_turn_cost_usd`). Caught at the request boundary in
+    `/chat` (HTTPException 429) and `/chat/stream` (SSE error+done with
+    `budget_exceeded: True`).
+
+    `reason` is a short structured string (e.g. `"tokens:108200>80000"`)
+    suitable for the trace's `error` field; `total_tokens` and
+    `total_cost_usd` carry the running snapshot at the breach.
+    """
+
+    def __init__(self, reason: str, *, total_tokens: int, total_cost_usd: float) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.total_tokens = total_tokens
+        self.total_cost_usd = total_cost_usd
+
+
+def check_turn_budget() -> None:
+    """Inter-node budget check. Sums LLMEvent usage across the current
+    trace and raises `TurnBudgetExceeded` if either cap is over.
+
+    Tokens are `input + output` only — cache-read tokens are excluded
+    to match the AgentForge `evals/thresholds.yaml` semantics
+    (cache reads are saved work, grow with conversation length, would
+    false-positive long-but-normal conversations). Cost uses the full
+    `TokenUsage` (cache pricing included) since `max_turn_cost_usd`
+    is a dollar bound, not a "new consumption" bound.
+
+    Called at the top of each LLM-invoking graph node. A node's own
+    LLM call could still push the trace over the cap before the
+    *next* node's check fires — accepted trade-off for keeping the
+    LangChain callback layer free of exception-raising side effects;
+    closes the C5 multi-call expansion attack which is the actual
+    vector AgentForge documents.
+
+    No-op when called outside a request context (`current_trace()`
+    returns None).
+    """
+    trace = current_trace()
+    if trace is None:
+        return
+    running = TokenUsage()
+    for ev in trace.llm_events:
+        running.add(ev.usage)
+    total_tokens = running.input_tokens + running.output_tokens
+    if total_tokens > settings.max_turn_tokens:
+        raise TurnBudgetExceeded(
+            f"tokens:{total_tokens}>{settings.max_turn_tokens}",
+            total_tokens=total_tokens,
+            total_cost_usd=compute_cost_usd(trace.model, running) if trace.model else 0.0,
+        )
+    if trace.model:
+        cost = compute_cost_usd(trace.model, running)
+        if cost > settings.max_turn_cost_usd:
+            raise TurnBudgetExceeded(
+                f"cost_usd:{cost:.4f}>{settings.max_turn_cost_usd:.4f}",
+                total_tokens=total_tokens,
+                total_cost_usd=cost,
+            )
+
+
 # ─── LangChain callback for token capture ────────────────────────────────
 
 

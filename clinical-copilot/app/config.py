@@ -70,6 +70,20 @@ class Settings(BaseSettings):
     # then done for `/chat/stream`).
     max_turn_wall_seconds: int = 120
 
+    # Per-turn token + cost caps. Checked at every agent-graph node
+    # entry against the running total of LLMEvents on the current
+    # trace. Tokens exclude cache-read tokens (those are re-served
+    # cached prompt, not new consumption — and grow with conversation
+    # length, which would false-positive on long normal conversations);
+    # cost is computed via the full TokenUsage so cache pricing is
+    # included. Defaults match `~/agentforge/evals/thresholds.yaml`:
+    # heaviest observed normal turn ≈ 41k tokens / $0.29, so 80k /
+    # $0.50 is "clearly abnormal" without flagging real clinical
+    # work. On breach the request fails closed (HTTPException(429)
+    # for `/chat`; SSE error event then done for `/chat/stream`).
+    max_turn_tokens: int = 80000
+    max_turn_cost_usd: float = 0.50
+
     # Copilot's own externally-reachable base URL — used to build the OAuth2
     # callback redirect_uri (`{copilot_base_url}/oauth/callback`). Local dev
     # default; production overrides via env (Hetzner cloudflared tunnel URL).
